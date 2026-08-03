@@ -211,13 +211,22 @@ fn load_rules(root: &Path, dirs: &[PathBuf], no_default_rules: bool) -> Result<R
     validate_root(root).map_err(|e| format!("{}: {e}", root.display()))?;
 
     let mut rules: Vec<CompiledRule> = Vec::new();
+    // Sources are recorded in the same order they are loaded; the cache keys
+    // entries on their digest, so an unrecorded source is an unnoticed change.
+    let mut sources: Vec<(String, String)> = Vec::new();
     if !no_default_rules {
         rules.extend(
             rules::load_str(default_pack::default_rules(), "default-pack")
                 .map_err(|e| e.to_string())?,
         );
+        sources.push((
+            "default-pack".to_string(),
+            default_pack::default_rules().to_string(),
+        ));
     }
-    rules.extend(rules::load_dirs(dirs).map_err(|e| e.to_string())?.rules);
+    let loaded = rules::load_dirs(dirs).map_err(|e| e.to_string())?;
+    rules.extend(loaded.rules);
+    sources.extend(loaded.sources);
 
     let mut seen: HashMap<&str, ()> = HashMap::new();
     for rule in &rules {
@@ -226,7 +235,7 @@ fn load_rules(root: &Path, dirs: &[PathBuf], no_default_rules: bool) -> Result<R
         }
     }
 
-    Ok(RuleSet { rules })
+    Ok(RuleSet { rules, sources })
 }
 
 /// The walker cannot tell "nothing to scan" from "root is missing", so the root

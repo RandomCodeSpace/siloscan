@@ -1,4 +1,3 @@
-
 // Re-exported so consumers can parse `output::to_json` results without pinning
 // their own serde_json version.
 pub mod baseline;

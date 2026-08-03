@@ -162,7 +162,10 @@ mod tests {
     fn dashboard_renders_80x24() {
         let mut state = AppState::new(
             PathBuf::from("."),
-            Arc::new(siloscan_core::rules::RuleSet { rules: Vec::new() }),
+            Arc::new(siloscan_core::rules::RuleSet {
+                rules: Vec::new(),
+                ..Default::default()
+            }),
             None,
         );
 
@@ -192,7 +195,10 @@ mod tests {
     fn dashboard_renders_200x50() {
         let mut state = AppState::new(
             PathBuf::from("."),
-            Arc::new(siloscan_core::rules::RuleSet { rules: Vec::new() }),
+            Arc::new(siloscan_core::rules::RuleSet {
+                rules: Vec::new(),
+                ..Default::default()
+            }),
             None,
         );
 
@@ -222,7 +228,10 @@ mod tests {
     fn dashboard_does_not_render_when_too_narrow() {
         let state = AppState::new(
             PathBuf::from("."),
-            Arc::new(siloscan_core::rules::RuleSet { rules: Vec::new() }),
+            Arc::new(siloscan_core::rules::RuleSet {
+                rules: Vec::new(),
+                ..Default::default()
+            }),
             None,
         );
 

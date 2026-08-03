@@ -346,7 +346,10 @@ mod tests {
     fn draw_dashboard_renders_at_80x24() {
         let state = AppState::new(
             PathBuf::from("."),
-            Arc::new(siloscan_core::rules::RuleSet { rules: Vec::new() }),
+            Arc::new(siloscan_core::rules::RuleSet {
+                rules: Vec::new(),
+                ..Default::default()
+            }),
             None,
         );
 
@@ -363,7 +366,10 @@ mod tests {
     fn draw_dashboard_renders_at_200x50() {
         let state = AppState::new(
             PathBuf::from("."),
-            Arc::new(siloscan_core::rules::RuleSet { rules: Vec::new() }),
+            Arc::new(siloscan_core::rules::RuleSet {
+                rules: Vec::new(),
+                ..Default::default()
+            }),
             None,
         );
 
@@ -386,7 +392,10 @@ mod tests {
     fn state() -> AppState {
         let mut state = AppState::new(
             PathBuf::from("/repo"),
-            Arc::new(RuleSet { rules: Vec::new() }),
+            Arc::new(RuleSet {
+                rules: Vec::new(),
+                ..Default::default()
+            }),
             None,
         );
         state.rows = ["src/a.rs", "src/b.rs", "tests/c.rs"]

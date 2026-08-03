@@ -1,5 +1,5 @@
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
 use siloscan_core::serde_json::Value;
@@ -68,6 +68,18 @@ const SUPPRESSIBLE_RULE: &str = concat!(
     "      pattern: 'needle'\n",
 );
 
+/// Reports the macro name node, so the span is the `dbg` identifier rather than
+/// the whole invocation.
+const AST_DBG_RULE: &str = concat!(
+    "version: 1\n",
+    "rules:\n",
+    "  - id: ast.dbg\n",
+    "    severity: error\n",
+    "    message: leftover dbg\n",
+    "    ast:\n",
+    "      rust: '(macro_invocation macro: (identifier) @report (#eq? @report \"dbg\"))'\n",
+);
+
 fn write(dir: &Path, rel: &str, body: &str) {
     let path = dir.join(rel);
     if let Some(parent) = path.parent() {
@@ -101,6 +113,45 @@ fn fixture(rules_yaml: &str) -> (TempDir, TempDir) {
         ("a.rs", "needle\n"),
     ]);
     (rules_dir(rules_yaml), src)
+}
+
+/// One file that trips the ast rule and one that does not, so a run exercises
+/// both the hit and the miss path through the cache.
+fn ast_src() -> TempDir {
+    src_dir(&[
+        (
+            "src/main.rs",
+            "fn main() {\n    let x = 1;\n    dbg!(x);\n}\n",
+        ),
+        ("src/clean.rs", "pub fn f() -> u32 {\n    1\n}\n"),
+    ])
+}
+
+fn ast_fixture() -> (TempDir, TempDir) {
+    (rules_dir(AST_DBG_RULE), ast_src())
+}
+
+/// Every file under the scan root's cache directory, sorted. Empty when the
+/// directory does not exist.
+fn cache_entries(src: &Path) -> Vec<PathBuf> {
+    fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
+        let Ok(entries) = fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, out);
+            } else {
+                out.push(path);
+            }
+        }
+    }
+
+    let mut out = Vec::new();
+    walk(&src.join(".siloscan/cache"), &mut out);
+    out.sort();
+    out
 }
 
 fn run(rules: &Path, src: &Path, extra: &[&str]) -> Output {
@@ -346,6 +397,90 @@ fn no_default_rules_without_rule_dirs_scans_with_zero_rules() {
 
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     assert!(stdout(&output).is_empty(), "stdout: {}", stdout(&output));
+}
+
+#[test]
+fn ast_rule_reports_the_report_capture_position() {
+    let (rules, src) = ast_fixture();
+    let output = run(rules.path(), src.path(), &["--no-default-rules"]);
+
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    let text = stdout(&output);
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines, vec!["src/main.rs:3:5 error ast.dbg leftover dbg"]);
+}
+
+#[test]
+fn warm_cache_reproduces_the_cold_output_byte_for_byte() {
+    let (rules, src) = ast_fixture();
+    assert!(cache_entries(src.path()).is_empty());
+
+    let cold = run(rules.path(), src.path(), &["--no-default-rules"]);
+    assert_eq!(cold.status.code(), Some(1), "{}", stderr(&cold));
+
+    let entries = cache_entries(src.path());
+    assert!(!entries.is_empty(), "cold run should populate the cache");
+    assert!(
+        entries
+            .iter()
+            .all(|path| path.extension().is_some_and(|ext| ext == "json")),
+        "unexpected cache files: {entries:?}"
+    );
+
+    let warm = run(rules.path(), src.path(), &["--no-default-rules"]);
+    assert_eq!(warm.status.code(), cold.status.code());
+    assert_eq!(warm.stdout, cold.stdout);
+    // A warm run reads what it already wrote, so the entry set is unchanged.
+    assert_eq!(cache_entries(src.path()), entries);
+}
+
+#[test]
+fn no_cache_produces_identical_output_and_writes_no_entries() {
+    let rules = rules_dir(AST_DBG_RULE);
+    let cached_src = ast_src();
+    let uncached_src = ast_src();
+
+    let cached = run(rules.path(), cached_src.path(), &["--no-default-rules"]);
+    let uncached = run(
+        rules.path(),
+        uncached_src.path(),
+        &["--no-default-rules", "--no-cache"],
+    );
+
+    assert_eq!(uncached.status.code(), cached.status.code());
+    assert_eq!(uncached.stdout, cached.stdout);
+    assert!(!cache_entries(cached_src.path()).is_empty());
+    assert!(cache_entries(uncached_src.path()).is_empty());
+    assert!(!uncached_src.path().join(".siloscan/cache").exists());
+}
+
+#[test]
+fn editing_a_scanned_file_invalidates_its_cached_entry() {
+    let (rules, src) = ast_fixture();
+
+    let first = run(rules.path(), src.path(), &["--no-default-rules"]);
+    assert_eq!(
+        stdout(&first).lines().collect::<Vec<_>>(),
+        vec!["src/main.rs:3:5 error ast.dbg leftover dbg"]
+    );
+    let before = cache_entries(src.path());
+
+    write(
+        src.path(),
+        "src/main.rs",
+        "fn main() {\n    let x = 1;\n    let y = 2;\n    dbg!(x + y);\n}\n",
+    );
+
+    let second = run(rules.path(), src.path(), &["--no-default-rules"]);
+    assert_eq!(second.status.code(), Some(1), "{}", stderr(&second));
+    assert_eq!(
+        stdout(&second).lines().collect::<Vec<_>>(),
+        vec!["src/main.rs:4:5 error ast.dbg leftover dbg"]
+    );
+    assert!(
+        cache_entries(src.path()).len() > before.len(),
+        "edited content should be a miss and add an entry"
+    );
 }
 
 /// A consumer that exits early (`siloscan | head`) closes the read end of the

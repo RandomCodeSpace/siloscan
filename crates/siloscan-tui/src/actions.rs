@@ -222,7 +222,10 @@ mod tests {
     fn state(root: &Path, rows: Vec<FindingRow>) -> AppState {
         let mut state = AppState::new(
             root.to_path_buf(),
-            Arc::new(RuleSet { rules: Vec::new() }),
+            Arc::new(RuleSet {
+                rules: Vec::new(),
+                ..Default::default()
+            }),
             None,
         );
         state.rows = rows;

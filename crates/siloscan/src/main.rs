@@ -7,6 +7,7 @@ use std::process;
 
 use clap::{Args, Parser, Subcommand};
 use siloscan_core::baseline::{self, Baseline};
+use siloscan_core::cache::Cache;
 use siloscan_core::harness;
 use siloscan_core::rules::{self, CompiledRule, RuleSet, Severity};
 use siloscan_core::scan;
@@ -56,6 +57,10 @@ struct ScanArgs {
     /// Baseline file (defaults to `.siloscan/baseline.json` under PATH when present)
     #[arg(long, value_name = "FILE")]
     baseline: Option<PathBuf>,
+
+    /// Do not read or write the scan cache under `.siloscan/cache`
+    #[arg(long)]
+    no_cache: bool,
 }
 
 #[derive(Args)]
@@ -71,6 +76,10 @@ struct BaselineArgs {
     /// Do not load the built-in rule pack
     #[arg(long)]
     no_default_rules: bool,
+
+    /// Do not read or write the scan cache under `.siloscan/cache`
+    #[arg(long)]
+    no_cache: bool,
 }
 
 #[derive(Args)]
@@ -128,7 +137,12 @@ fn run_scan(args: ScanArgs) {
         Err(e) => fail(&e),
     };
 
-    let report = scan::scan(&args.path, &rules, baseline.as_ref());
+    let cache = open_cache(&args.path, &rules, args.no_cache);
+    let options = scan::ScanOptions {
+        baseline: baseline.as_ref(),
+        cache: cache.as_ref(),
+    };
+    let report = scan::scan_opts(&args.path, &rules, &options, &mut |_| {});
 
     for skipped in &report.skipped {
         eprintln!("warning: skipped {}: {}", skipped.path, skipped.reason);
@@ -184,7 +198,12 @@ fn run_scan(args: ScanArgs) {
 fn run_baseline(args: BaselineArgs) {
     let rules = load_rules(&args.path, &args.rules, args.no_default_rules);
 
-    let report = scan::scan(&args.path, &rules, None);
+    let cache = open_cache(&args.path, &rules, args.no_cache);
+    let options = scan::ScanOptions {
+        cache: cache.as_ref(),
+        ..Default::default()
+    };
+    let report = scan::scan_opts(&args.path, &rules, &options, &mut |_| {});
 
     for skipped in &report.skipped {
         eprintln!("warning: skipped {}: {}", skipped.path, skipped.reason);
@@ -228,6 +247,16 @@ fn run_test(args: TestArgs) {
     }
 }
 
+/// The cache lives under the scan root, so it is only available when the root
+/// is a directory. `siloscan test` never caches: a fixture run must exercise
+/// the engines.
+fn open_cache(root: &Path, rules: &RuleSet, no_cache: bool) -> Option<Cache> {
+    if no_cache || !root.is_dir() {
+        return None;
+    }
+    Some(Cache::open(root, rules))
+}
+
 /// Validates the scan root and loads the built-in pack plus every `--rules`
 /// directory. Any failure here is exit 2.
 fn load_rules(root: &Path, dirs: &[PathBuf], no_default_rules: bool) -> RuleSet {
@@ -236,15 +265,27 @@ fn load_rules(root: &Path, dirs: &[PathBuf], no_default_rules: bool) -> RuleSet 
     }
 
     let mut rules: Vec<CompiledRule> = Vec::new();
+    // Sources are recorded in the same order they are loaded; the cache keys
+    // entries on their digest, so an unrecorded source is an unnoticed change.
+    let mut sources: Vec<(String, String)> = Vec::new();
     if !no_default_rules {
         match rules::load_str(default_pack::default_rules(), "default-pack") {
-            Ok(loaded) => rules.extend(loaded),
+            Ok(loaded) => {
+                rules.extend(loaded);
+                sources.push((
+                    "default-pack".to_string(),
+                    default_pack::default_rules().to_string(),
+                ));
+            }
             Err(e) => fail(&format!("error: {e}")),
         }
     }
 
     match rules::load_dirs(dirs) {
-        Ok(loaded) => rules.extend(loaded.rules),
+        Ok(loaded) => {
+            rules.extend(loaded.rules);
+            sources.extend(loaded.sources);
+        }
         Err(e) => fail(&format!("error: {e}")),
     }
 
@@ -257,7 +298,7 @@ fn load_rules(root: &Path, dirs: &[PathBuf], no_default_rules: bool) -> RuleSet 
         }
     }
 
-    RuleSet { rules }
+    RuleSet { rules, sources }
 }
 
 /// An explicit `--baseline` file must exist; the default location is optional.
