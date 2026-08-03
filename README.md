@@ -2,7 +2,7 @@
 
 [![CI](https://img.shields.io/github/actions/workflow/status/RandomCodeSpace/siloscan/ci.yml?branch=main&style=for-the-badge&label=CI&logo=github)](https://github.com/RandomCodeSpace/siloscan/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue?style=for-the-badge)](LICENSE)
-[![Rust](https://img.shields.io/badge/rust-2021_edition-orange?style=for-the-badge&logo=rust)](https://www.rust-lang.org)
+[![Rust](https://img.shields.io/badge/rust-2024_edition-orange?style=for-the-badge&logo=rust)](https://www.rust-lang.org)
 [![Status](https://img.shields.io/badge/status-phase_1_of_4-yellow?style=for-the-badge)](https://github.com/RandomCodeSpace/siloscan/issues/1)
 
 A universal, rule-based static code scanner. Quick, deterministic, fully offline.
