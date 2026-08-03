@@ -4,6 +4,8 @@ use serde::Serialize;
 pub struct JsonReport<'a> {
     pub version: &'a str,
     pub findings: &'a [crate::findings::Finding],
+    pub baselined: &'a [crate::findings::Finding],
+    pub suppressed: &'a [crate::findings::Finding],
     pub skipped: &'a [crate::scan::SkippedFile],
 }
 
@@ -11,6 +13,8 @@ pub fn to_json(report: &crate::scan::ScanReport) -> String {
     let json_report = JsonReport {
         version: env!("CARGO_PKG_VERSION"),
         findings: &report.findings,
+        baselined: &report.baselined,
+        suppressed: &report.suppressed,
         skipped: &report.skipped,
     };
     serde_json::to_string_pretty(&json_report).unwrap() // serialization cannot fail
@@ -37,11 +41,15 @@ mod tests {
         };
         let report = ScanReport {
             findings: vec![finding],
+            baselined: vec![],
+            suppressed: vec![],
             skipped: vec![],
         };
 
         let json = to_json(&report);
         assert!(json.contains("findings"));
+        assert!(json.contains("baselined"));
+        assert!(json.contains("suppressed"));
         assert!(json.contains("0.1.0"));
     }
 
@@ -62,7 +70,9 @@ mod tests {
             reason: "excluded by rule".to_string(),
         };
         let report = ScanReport {
-            findings: vec![finding],
+            findings: vec![finding.clone()],
+            baselined: vec![finding.clone()],
+            suppressed: vec![finding],
             skipped: vec![skipped],
         };
 

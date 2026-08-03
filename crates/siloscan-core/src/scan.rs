@@ -15,12 +15,20 @@ pub struct SkippedFile {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ScanReport {
+    /// Actionable findings: neither suppressed inline nor covered by the baseline.
     pub findings: Vec<Finding>,
+    pub baselined: Vec<Finding>,
+    pub suppressed: Vec<Finding>,
     pub skipped: Vec<SkippedFile>,
 }
 
-pub fn scan(root: &Path, rules: &RuleSet) -> ScanReport {
+pub fn scan(
+    root: &Path,
+    rules: &RuleSet,
+    baseline: Option<&crate::baseline::Baseline>,
+) -> ScanReport {
     let mut findings: Vec<Finding> = Vec::new();
+    let mut suppressed: Vec<Finding> = Vec::new();
     let mut skipped: Vec<SkippedFile> = Vec::new();
 
     for path in walk::collect_files(root) {
@@ -34,17 +42,42 @@ pub fn scan(root: &Path, rules: &RuleSet) -> ScanReport {
             }),
             FileKind::Text(content) => {
                 let language = crate::lang::detect(&path, &content);
-                findings.extend(crate::engines::regex::scan_file(
+                let mut file_findings =
+                    crate::engines::regex::scan_file(&rules.rules, &path_rel, language, &content);
+                file_findings.extend(crate::engines::secret::scan_file(
                     &rules.rules,
                     &path_rel,
                     language,
                     &content,
                 ));
+
+                let (kept, ignored) = crate::suppress::partition(&content, file_findings);
+                findings.extend(kept);
+                suppressed.extend(ignored);
             }
         }
     }
 
-    // Canonical order: path (bytewise), line, column, rule id.
+    sort_findings(&mut findings);
+    sort_findings(&mut suppressed);
+    skipped.sort_by(|a, b| a.path.as_bytes().cmp(b.path.as_bytes()));
+
+    // Partitioning preserves input order, so both halves stay canonical.
+    let (findings, baselined) = match baseline {
+        Some(baseline) => crate::baseline::partition(baseline, findings),
+        None => (findings, Vec::new()),
+    };
+
+    ScanReport {
+        findings,
+        baselined,
+        suppressed,
+        skipped,
+    }
+}
+
+/// Canonical order: path (bytewise), line, column, rule id.
+fn sort_findings(findings: &mut [Finding]) {
     findings.sort_by(|a, b| {
         a.path
             .as_bytes()
@@ -53,9 +86,6 @@ pub fn scan(root: &Path, rules: &RuleSet) -> ScanReport {
             .then(a.column.cmp(&b.column))
             .then(a.rule_id.as_bytes().cmp(b.rule_id.as_bytes()))
     });
-    skipped.sort_by(|a, b| a.path.as_bytes().cmp(b.path.as_bytes()));
-
-    ScanReport { findings, skipped }
 }
 
 /// Scan-root-relative, forward-slash path. Fingerprints incorporate this
@@ -97,6 +127,16 @@ rules:
       pattern: "needle"
 "#;
 
+    const SECRET_RULES: &str = r#"
+version: 1
+rules:
+  - id: test.token
+    severity: error
+    message: "token found"
+    secret:
+      pattern: "tok_[a-z0-9]+"
+"#;
+
     fn ruleset() -> RuleSet {
         RuleSet {
             rules: load_str(RULES, "test").expect("rules should load"),
@@ -121,7 +161,7 @@ rules:
         write(dir.path(), "src/a.rs", b"let x = 1;\nlet needle = 2;\n");
         write(dir.path(), "src/deep/b.rs", b"// nothing here\n");
 
-        let report = scan(dir.path(), &ruleset());
+        let report = scan(dir.path(), &ruleset(), None);
 
         assert!(report.skipped.is_empty());
         assert_eq!(report.findings.len(), 1);
@@ -142,7 +182,7 @@ rules:
         write(dir.path(), "src/m.rs", b"needle needle\n");
         write(dir.path(), "a.rs", b"filler\nneedle\n");
 
-        let report = scan(dir.path(), &ruleset());
+        let report = scan(dir.path(), &ruleset(), None);
 
         let order: Vec<(&str, u64, u64)> = report
             .findings
@@ -166,7 +206,7 @@ rules:
         let dir = tempdir();
         write(dir.path(), "src/a.rs", b"needle\n");
 
-        let report = scan(&dir.path().join("src/a.rs"), &ruleset());
+        let report = scan(&dir.path().join("src/a.rs"), &ruleset(), None);
 
         assert_eq!(report.findings.len(), 1);
         assert_eq!(report.findings[0].path, "a.rs");
@@ -177,8 +217,8 @@ rules:
         let dir = tempdir();
         write(dir.path(), "sub/b.rs", b"needle\n");
 
-        let from_root = scan(dir.path(), &ruleset());
-        let from_sub = scan(&dir.path().join("sub"), &ruleset());
+        let from_root = scan(dir.path(), &ruleset(), None);
+        let from_sub = scan(&dir.path().join("sub"), &ruleset(), None);
 
         assert_eq!(from_root.findings.len(), 1);
         assert_eq!(from_root.findings[0].path, "sub/b.rs");
@@ -194,11 +234,73 @@ rules:
         write(dir.path(), "blob.bin", b"needle\0\0\0needle");
         write(dir.path(), "ok.txt", b"needle\n");
 
-        let report = scan(dir.path(), &ruleset());
+        let report = scan(dir.path(), &ruleset(), None);
 
         assert!(report.skipped.is_empty());
         assert_eq!(report.findings.len(), 1);
         assert_eq!(report.findings[0].path, "ok.txt");
+    }
+
+    #[test]
+    fn secret_rules_run_alongside_regex_rules() {
+        let dir = tempdir();
+        write(dir.path(), "a.rs", b"let key = \"tok_abc123\";\n");
+
+        let rules = RuleSet {
+            rules: load_str(RULES, "regex")
+                .unwrap()
+                .into_iter()
+                .chain(load_str(SECRET_RULES, "secret").unwrap())
+                .collect(),
+        };
+        let report = scan(dir.path(), &rules, None);
+
+        assert_eq!(report.findings.len(), 1);
+        assert_eq!(report.findings[0].rule_id, "test.token");
+        assert_eq!(report.findings[0].matched, "tok_abc123");
+    }
+
+    #[test]
+    fn inline_markers_move_findings_to_suppressed() {
+        let dir = tempdir();
+        write(
+            dir.path(),
+            "a.rs",
+            b"// siloscan-ignore: test.needle\nlet a = needle;\nlet b = 2;\n",
+        );
+        write(dir.path(), "b.rs", b"needle\n");
+
+        let report = scan(dir.path(), &ruleset(), None);
+
+        // The marker line itself matches the rule; line 2 is suppressed.
+        assert_eq!(report.findings.len(), 2);
+        assert_eq!(report.suppressed.len(), 1);
+        assert_eq!(report.suppressed[0].path, "a.rs");
+        assert_eq!(report.suppressed[0].line, 2);
+    }
+
+    #[test]
+    fn baseline_moves_known_findings_out_of_findings() {
+        let dir = tempdir();
+        write(dir.path(), "a.rs", b"needle\n");
+        write(dir.path(), "b.rs", b"needle\n");
+
+        let first = scan(dir.path(), &ruleset(), None);
+        let baseline = crate::baseline::Baseline {
+            version: 1,
+            entries: vec![crate::baseline::BaselineEntry {
+                fingerprint: first.findings[0].fingerprint.clone(),
+                rule_id: first.findings[0].rule_id.clone(),
+                path: first.findings[0].path.clone(),
+            }],
+        };
+
+        let report = scan(dir.path(), &ruleset(), Some(&baseline));
+
+        assert_eq!(report.findings.len(), 1);
+        assert_eq!(report.findings[0].path, "b.rs");
+        assert_eq!(report.baselined.len(), 1);
+        assert_eq!(report.baselined[0].path, "a.rs");
     }
 
     #[cfg(unix)]
@@ -217,7 +319,7 @@ rules:
             return;
         }
 
-        let report = scan(dir.path(), &ruleset());
+        let report = scan(dir.path(), &ruleset(), None);
 
         assert_eq!(report.skipped.len(), 1);
         assert_eq!(report.skipped[0].path, "secret.txt");
