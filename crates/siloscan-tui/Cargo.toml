@@ -1,0 +1,15 @@
+[package]
+name = "siloscan-tui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Interactive terminal UI for siloscan: triage board, ratchet console, dashboards"
+
+[dependencies]
+crossterm = "0.29.0"
+ratatui = "0.30.2"
+siloscan-core = { path = "../siloscan-core" }
+
+[dev-dependencies]
+tempfile = "3.27.0"

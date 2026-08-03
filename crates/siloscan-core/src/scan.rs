@@ -22,16 +22,45 @@ pub struct ScanReport {
     pub skipped: Vec<SkippedFile>,
 }
 
+/// Scan progress snapshot. `findings` counts raw matches as scanned, before
+/// inline suppression and baseline partitioning, so it only ever grows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct Progress {
+    pub files_total: usize,
+    pub files_done: usize,
+    pub findings: usize,
+}
+
 pub fn scan(
     root: &Path,
     rules: &RuleSet,
     baseline: Option<&crate::baseline::Baseline>,
 ) -> ScanReport {
+    scan_with_progress(root, rules, baseline, &mut |_| {})
+}
+
+/// Same scan, with a callback invoked once after the walk (`files_done = 0`,
+/// total known) and once after each file.
+pub fn scan_with_progress(
+    root: &Path,
+    rules: &RuleSet,
+    baseline: Option<&crate::baseline::Baseline>,
+    on_progress: &mut dyn FnMut(Progress),
+) -> ScanReport {
     let mut findings: Vec<Finding> = Vec::new();
     let mut suppressed: Vec<Finding> = Vec::new();
     let mut skipped: Vec<SkippedFile> = Vec::new();
 
-    for path in walk::collect_files(root) {
+    let files = walk::collect_files(root);
+    let files_total = files.len();
+    let mut raw_findings = 0usize;
+    on_progress(Progress {
+        files_total,
+        files_done: 0,
+        findings: 0,
+    });
+
+    for (index, path) in files.into_iter().enumerate() {
         let path_rel = relative(root, &path);
         match walk::read_text(&path) {
             // Binary files are not scannable input, not a failure to report.
@@ -51,11 +80,18 @@ pub fn scan(
                     &content,
                 ));
 
+                raw_findings += file_findings.len();
                 let (kept, ignored) = crate::suppress::partition(&content, file_findings);
                 findings.extend(kept);
                 suppressed.extend(ignored);
             }
         }
+
+        on_progress(Progress {
+            files_total,
+            files_done: index + 1,
+            findings: raw_findings,
+        });
     }
 
     sort_findings(&mut findings);
@@ -301,6 +337,95 @@ rules:
         assert_eq!(report.findings[0].path, "b.rs");
         assert_eq!(report.baselined.len(), 1);
         assert_eq!(report.baselined[0].path, "a.rs");
+    }
+
+    fn collect_progress(root: &Path, rules: &RuleSet) -> (ScanReport, Vec<Progress>) {
+        let mut events = Vec::new();
+        let report = scan_with_progress(root, rules, None, &mut |p| events.push(p));
+        (report, events)
+    }
+
+    #[test]
+    fn progress_is_emitted_once_per_file_plus_one() {
+        let dir = tempdir();
+        write(dir.path(), "a.rs", b"needle\n");
+        write(dir.path(), "src/b.rs", b"needle needle\n");
+        write(dir.path(), "src/c.rs", b"nothing\n");
+
+        let (_report, events) = collect_progress(dir.path(), &ruleset());
+
+        assert_eq!(events.len(), 4);
+        assert_eq!(
+            events[0],
+            Progress {
+                files_total: 3,
+                files_done: 0,
+                findings: 0,
+            }
+        );
+        let last = events.last().unwrap();
+        assert_eq!(last.files_done, 3);
+        assert_eq!(last.files_total, 3);
+        assert_eq!(last.findings, 3);
+    }
+
+    #[test]
+    fn progress_counters_are_monotonic() {
+        let dir = tempdir();
+        write(dir.path(), "a.rs", b"needle\n");
+        write(dir.path(), "b.rs", b"filler\n");
+        write(dir.path(), "c.rs", b"needle\nneedle\n");
+
+        let (_report, events) = collect_progress(dir.path(), &ruleset());
+
+        for pair in events.windows(2) {
+            assert_eq!(pair[1].files_done, pair[0].files_done + 1);
+            assert!(pair[1].findings >= pair[0].findings);
+            assert_eq!(pair[1].files_total, pair[0].files_total);
+            assert!(pair[1].files_done <= pair[1].files_total);
+        }
+    }
+
+    #[test]
+    fn progress_counts_raw_matches_before_suppression() {
+        let dir = tempdir();
+        write(
+            dir.path(),
+            "a.rs",
+            b"// siloscan-ignore: test.needle\nlet a = needle;\n",
+        );
+
+        let (report, events) = collect_progress(dir.path(), &ruleset());
+
+        assert_eq!(report.findings.len(), 1);
+        assert_eq!(report.suppressed.len(), 1);
+        assert_eq!(events.last().unwrap().findings, 2);
+    }
+
+    #[test]
+    fn progress_scan_matches_plain_scan() {
+        let dir = tempdir();
+        write(dir.path(), "a.rs", b"needle\n");
+        write(dir.path(), "src/b.rs", b"needle\nneedle\n");
+        write(dir.path(), "blob.bin", b"needle\0\0needle");
+
+        let first = scan(dir.path(), &ruleset(), None);
+        let baseline = crate::baseline::Baseline {
+            version: 1,
+            entries: vec![crate::baseline::BaselineEntry {
+                fingerprint: first.findings[0].fingerprint.clone(),
+                rule_id: first.findings[0].rule_id.clone(),
+                path: first.findings[0].path.clone(),
+            }],
+        };
+
+        let plain = scan(dir.path(), &ruleset(), Some(&baseline));
+        let tracked = scan_with_progress(dir.path(), &ruleset(), Some(&baseline), &mut |_| {});
+
+        assert_eq!(
+            serde_json::to_string(&plain).unwrap(),
+            serde_json::to_string(&tracked).unwrap()
+        );
     }
 
     #[cfg(unix)]
