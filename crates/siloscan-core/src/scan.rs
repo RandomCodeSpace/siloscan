@@ -20,6 +20,16 @@ pub struct ScanReport {
     pub baselined: Vec<Finding>,
     pub suppressed: Vec<Finding>,
     pub skipped: Vec<SkippedFile>,
+    /// Per-file semantic facts for every file that produced a parse tree.
+    pub graph: crate::graph::Graph,
+}
+
+/// Optional inputs to a scan. Defaults to no baseline and no cache, which is
+/// exactly what [`scan`] and [`scan_with_progress`] pass.
+#[derive(Default)]
+pub struct ScanOptions<'a> {
+    pub baseline: Option<&'a crate::baseline::Baseline>,
+    pub cache: Option<&'a crate::cache::Cache>,
 }
 
 /// Scan progress snapshot. `findings` counts raw matches as scanned, before
@@ -47,9 +57,25 @@ pub fn scan_with_progress(
     baseline: Option<&crate::baseline::Baseline>,
     on_progress: &mut dyn FnMut(Progress),
 ) -> ScanReport {
+    let options = ScanOptions {
+        baseline,
+        ..ScanOptions::default()
+    };
+    scan_opts(root, rules, &options, on_progress)
+}
+
+/// The scanner proper. Every file is read once, parsed at most once, and run
+/// through every engine; a cache hit replaces the read-to-engine step only.
+pub fn scan_opts(
+    root: &Path,
+    rules: &RuleSet,
+    options: &ScanOptions,
+    on_progress: &mut dyn FnMut(Progress),
+) -> ScanReport {
     let mut findings: Vec<Finding> = Vec::new();
     let mut suppressed: Vec<Finding> = Vec::new();
     let mut skipped: Vec<SkippedFile> = Vec::new();
+    let mut graph = crate::graph::Graph::default();
 
     let files = walk::collect_files(root);
     let files_total = files.len();
@@ -70,18 +96,14 @@ pub fn scan_with_progress(
                 reason,
             }),
             FileKind::Text(content) => {
-                let language = crate::lang::detect(&path, &content);
-                let mut file_findings =
-                    crate::engines::regex::scan_file(&rules.rules, &path_rel, language, &content);
-                file_findings.extend(crate::engines::secret::scan_file(
-                    &rules.rules,
-                    &path_rel,
-                    language,
-                    &content,
-                ));
+                let entry = scan_text(rules, options, &path, &path_rel, &content);
 
-                raw_findings += file_findings.len();
-                let (kept, ignored) = crate::suppress::partition(&content, file_findings);
+                if let Some(facts) = entry.facts {
+                    graph.files.insert(path_rel, facts);
+                }
+
+                raw_findings += entry.findings.len();
+                let (kept, ignored) = crate::suppress::partition(&content, entry.findings);
                 findings.extend(kept);
                 suppressed.extend(ignored);
             }
@@ -99,7 +121,7 @@ pub fn scan_with_progress(
     skipped.sort_by(|a, b| a.path.as_bytes().cmp(b.path.as_bytes()));
 
     // Partitioning preserves input order, so both halves stay canonical.
-    let (findings, baselined) = match baseline {
+    let (findings, baselined) = match options.baseline {
         Some(baseline) => crate::baseline::partition(baseline, findings),
         None => (findings, Vec::new()),
     };
@@ -109,7 +131,74 @@ pub fn scan_with_progress(
         baselined,
         suppressed,
         skipped,
+        graph,
     }
+}
+
+/// Engine results for one text file, from the cache when possible.
+///
+/// The cache holds raw engine output: findings as the engines produced them,
+/// before inline suppression. Suppression is re-applied to every retrieved
+/// entry. The content hash covers the markers either way, so this is a wash for
+/// correctness and keeps the stored payload engine-pure.
+fn scan_text(
+    rules: &RuleSet,
+    options: &ScanOptions,
+    path: &Path,
+    path_rel: &str,
+    content: &str,
+) -> crate::cache::CachedFile {
+    let hash = options.cache.map(|_| entry_hash(path_rel, content));
+
+    if let (Some(cache), Some(hash)) = (options.cache, &hash)
+        && let Some(entry) = cache.get(hash, content)
+    {
+        return entry;
+    }
+
+    let language = crate::lang::detect(path, content);
+    let tree = language.and_then(|lang| crate::parsers::parse(lang, content));
+
+    let mut file_findings =
+        crate::engines::regex::scan_file(&rules.rules, path_rel, language, content);
+    file_findings.extend(crate::engines::secret::scan_file(
+        &rules.rules,
+        path_rel,
+        language,
+        content,
+    ));
+    file_findings.extend(crate::engines::ast::scan_file(
+        &rules.rules,
+        path_rel,
+        language,
+        content,
+        tree.as_ref(),
+    ));
+
+    let facts = match (language, &tree) {
+        (Some(lang), Some(tree)) => Some(crate::graph::extract(lang, content, tree)),
+        _ => None,
+    };
+
+    let entry = crate::cache::CachedFile {
+        findings: file_findings,
+        facts,
+    };
+    if let (Some(cache), Some(hash)) = (options.cache, &hash) {
+        cache.put(hash, &entry);
+    }
+    entry
+}
+
+/// Cache entries are keyed by path and content together: a finding carries its
+/// repo-relative path, and its fingerprint is derived from it, so two identical
+/// files at different paths are not interchangeable.
+fn entry_hash(path_rel: &str, content: &str) -> String {
+    let mut buf = Vec::with_capacity(path_rel.len() + content.len() + 1);
+    buf.extend_from_slice(path_rel.as_bytes());
+    buf.push(0);
+    buf.extend_from_slice(content.as_bytes());
+    crate::cache::content_hash(&buf)
 }
 
 /// Canonical order: path (bytewise), line, column, rule id.
@@ -176,6 +265,7 @@ rules:
     fn ruleset() -> RuleSet {
         RuleSet {
             rules: load_str(RULES, "test").expect("rules should load"),
+            sources: vec![("test".to_string(), RULES.to_string())],
         }
     }
 
@@ -288,6 +378,7 @@ rules:
                 .into_iter()
                 .chain(load_str(SECRET_RULES, "secret").unwrap())
                 .collect(),
+            ..Default::default()
         };
         let report = scan(dir.path(), &rules, None);
 
@@ -426,6 +517,126 @@ rules:
             serde_json::to_string(&plain).unwrap(),
             serde_json::to_string(&tracked).unwrap()
         );
+    }
+
+    fn cached_scan(root: &Path, rules: &RuleSet, cache: &crate::cache::Cache) -> ScanReport {
+        let options = ScanOptions {
+            cache: Some(cache),
+            ..ScanOptions::default()
+        };
+        scan_opts(root, rules, &options, &mut |_| {})
+    }
+
+    #[test]
+    fn cache_hit_reproduces_the_uncached_report() {
+        let dir = tempdir();
+        write(dir.path(), "a.rs", b"needle\n");
+        write(dir.path(), "src/b.rs", b"needle needle\n");
+
+        let rules = ruleset();
+        let cache = crate::cache::Cache::open(dir.path(), &rules);
+        let cold = cached_scan(dir.path(), &rules, &cache);
+        let warm = cached_scan(dir.path(), &rules, &cache);
+
+        assert_eq!(
+            serde_json::to_string(&cold).unwrap(),
+            serde_json::to_string(&warm).unwrap()
+        );
+        assert_eq!(
+            serde_json::to_string(&scan(dir.path(), &rules, None)).unwrap(),
+            serde_json::to_string(&warm).unwrap()
+        );
+    }
+
+    #[test]
+    fn edited_content_invalidates_the_cached_entry() {
+        let dir = tempdir();
+        write(dir.path(), "a.rs", b"needle\n");
+
+        let rules = ruleset();
+        let cache = crate::cache::Cache::open(dir.path(), &rules);
+        assert_eq!(cached_scan(dir.path(), &rules, &cache).findings.len(), 1);
+
+        write(
+            dir.path(),
+            "a.rs",
+            b"// siloscan-ignore: test.needle\nneedle\n",
+        );
+        let report = cached_scan(dir.path(), &rules, &cache);
+        assert_eq!(report.findings.len(), 1);
+        assert_eq!(report.suppressed.len(), 1);
+    }
+
+    #[test]
+    fn identical_content_at_two_paths_keeps_its_own_findings() {
+        let dir = tempdir();
+        write(dir.path(), "a.rs", b"needle\n");
+        write(dir.path(), "src/b.rs", b"needle\n");
+
+        let rules = ruleset();
+        let cache = crate::cache::Cache::open(dir.path(), &rules);
+        cached_scan(dir.path(), &rules, &cache);
+        let report = cached_scan(dir.path(), &rules, &cache);
+
+        let paths: Vec<&str> = report.findings.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(paths, vec!["a.rs", "src/b.rs"]);
+    }
+
+    #[cfg(feature = "tree-sitter-rust")]
+    #[test]
+    fn graph_facts_are_collected_cached_or_not() {
+        let dir = tempdir();
+        write(
+            dir.path(),
+            "src/a.rs",
+            b"use std::io::Read;\n\nfn main() {}\n",
+        );
+        write(dir.path(), "notes.txt", b"needle\n");
+
+        let rules = ruleset();
+        let cache = crate::cache::Cache::open(dir.path(), &rules);
+        let cold = cached_scan(dir.path(), &rules, &cache);
+        let warm = cached_scan(dir.path(), &rules, &cache);
+
+        assert_eq!(cold.graph, warm.graph);
+        assert_eq!(cold.graph, scan(dir.path(), &rules, None).graph);
+        let facts = cold.graph.files.get("src/a.rs").expect("facts");
+        assert_eq!(facts.language, "rust");
+        assert_eq!(
+            facts
+                .imports
+                .iter()
+                .map(|i| i.raw.as_str())
+                .collect::<Vec<_>>(),
+            vec!["std::io::Read"]
+        );
+        assert!(!cold.graph.files.contains_key("notes.txt"));
+    }
+
+    #[cfg(feature = "tree-sitter-rust")]
+    #[test]
+    fn ast_rules_run_alongside_regex_rules() {
+        let dir = tempdir();
+        write(dir.path(), "src/a.rs", b"fn main() {\n    dbg!(1);\n}\n");
+
+        let src = r#"
+version: 1
+rules:
+  - id: rust.dbg-macro
+    severity: warning
+    message: "leftover dbg"
+    ast:
+      rust: '(macro_invocation macro: (identifier) @report (#eq? @report "dbg"))'
+"#;
+        let rules = RuleSet {
+            rules: load_str(src, "ast").unwrap(),
+            sources: vec![("ast".to_string(), src.to_string())],
+        };
+
+        let report = scan(dir.path(), &rules, None);
+        assert_eq!(report.findings.len(), 1);
+        assert_eq!(report.findings[0].rule_id, "rust.dbg-macro");
+        assert_eq!((report.findings[0].line, report.findings[0].column), (2, 5));
     }
 
     #[cfg(unix)]

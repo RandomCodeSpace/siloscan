@@ -1,11 +1,13 @@
 use std::fmt::Write as _;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::rules::Severity;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+/// `Deserialize` is required by the incremental cache, which stores findings
+/// verbatim and reads them back.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Finding {
     pub rule_id: String,
     pub severity: Severity,

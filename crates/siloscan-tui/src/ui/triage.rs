@@ -763,7 +763,14 @@ mod tests {
     }
 
     fn state(root: PathBuf) -> AppState {
-        let mut state = AppState::new(root, Arc::new(RuleSet { rules: Vec::new() }), None);
+        let mut state = AppState::new(
+            root,
+            Arc::new(RuleSet {
+                rules: Vec::new(),
+                ..Default::default()
+            }),
+            None,
+        );
         state.rows = vec![
             row("secret.token", Severity::Info, "src/a.rs", Status::New),
             row("regex.todo", Severity::Error, "src/a.rs", Status::Baselined),

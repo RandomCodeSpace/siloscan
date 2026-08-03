@@ -204,8 +204,12 @@ mod tests {
             baselined: vec![],
             suppressed: vec![],
             skipped: vec![],
+            graph: Default::default(),
         };
-        let rules = RuleSet { rules: vec![] };
+        let rules = RuleSet {
+            rules: vec![],
+            ..Default::default()
+        };
 
         let sarif = to_sarif(&report, &rules);
         assert!(sarif.contains("https://json.schemastore.org/sarif-2.1.0.json"));
@@ -219,8 +223,12 @@ mod tests {
             baselined: vec![],
             suppressed: vec![],
             skipped: vec![],
+            graph: Default::default(),
         };
-        let rules = RuleSet { rules: vec![] };
+        let rules = RuleSet {
+            rules: vec![],
+            ..Default::default()
+        };
 
         let sarif = to_sarif(&report, &rules);
         assert!(sarif.contains("\"name\": \"siloscan\""));
@@ -244,8 +252,12 @@ mod tests {
             baselined: vec![],
             suppressed: vec![],
             skipped: vec![],
+            graph: Default::default(),
         };
-        let rules = RuleSet { rules: vec![] };
+        let rules = RuleSet {
+            rules: vec![],
+            ..Default::default()
+        };
 
         let sarif = to_sarif(&report, &rules);
         assert!(sarif.contains("test.rule"));
@@ -293,6 +305,7 @@ mod tests {
             baselined: vec![],
             suppressed: vec![],
             skipped: vec![],
+            graph: Default::default(),
         };
         let rule_text = r#"
 version: 1
@@ -308,6 +321,7 @@ rules:
 "#;
         let rules = RuleSet {
             rules: load_str(rule_text, "test").expect("rules should load"),
+            ..Default::default()
         };
 
         let sarif = to_sarif(&report, &rules);
@@ -342,8 +356,12 @@ rules:
             baselined: vec![],
             suppressed: vec![],
             skipped: vec![],
+            graph: Default::default(),
         };
-        let rules = RuleSet { rules: vec![] };
+        let rules = RuleSet {
+            rules: vec![],
+            ..Default::default()
+        };
 
         let sarif = to_sarif(&report, &rules);
         // Verify that we have exactly one result
@@ -368,8 +386,12 @@ rules:
             baselined: vec![],
             suppressed: vec![],
             skipped: vec![],
+            graph: Default::default(),
         };
-        let rules = RuleSet { rules: vec![] };
+        let rules = RuleSet {
+            rules: vec![],
+            ..Default::default()
+        };
 
         let sarif1 = to_sarif(&report, &rules);
         let sarif2 = to_sarif(&report, &rules);
@@ -413,6 +435,7 @@ rules:
             baselined: vec![],
             suppressed: vec![],
             skipped: vec![],
+            graph: Default::default(),
         };
         let rule_text = r#"
 version: 1
@@ -432,6 +455,7 @@ rules:
 "#;
         let rules = RuleSet {
             rules: load_str(rule_text, "test").expect("rules should load"),
+            ..Default::default()
         };
 
         let sarif = to_sarif(&report, &rules);

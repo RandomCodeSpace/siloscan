@@ -139,6 +139,7 @@ rules:
     fn ruleset(src: &str) -> RuleSet {
         RuleSet {
             rules: load_str(src, "test").expect("rules should load"),
+            sources: vec![("test".to_string(), src.to_string())],
         }
     }
 

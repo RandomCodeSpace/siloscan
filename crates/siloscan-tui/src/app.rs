@@ -105,7 +105,10 @@ mod tests {
     fn state() -> AppState {
         AppState::new(
             PathBuf::from("/repo"),
-            Arc::new(RuleSet { rules: Vec::new() }),
+            Arc::new(RuleSet {
+                rules: Vec::new(),
+                ..Default::default()
+            }),
             None,
         )
     }
@@ -125,6 +128,7 @@ mod tests {
                 path: "blob.bin".to_string(),
                 reason: "binary".to_string(),
             }],
+            graph: Default::default(),
         }
     }
 
@@ -203,6 +207,7 @@ mod tests {
                 baselined: Vec::new(),
                 suppressed: Vec::new(),
                 skipped: Vec::new(),
+                graph: Default::default(),
             },
         );
 
@@ -227,8 +232,7 @@ mod tests {
                 "version: 1\nrules:\n  - id: test.needle\n    severity: warning\n    message: \"needle\"\n    regex:\n      pattern: \"needle\"\n",
                 "test",
             )
-            .unwrap(),
-        });
+            .unwrap(), ..Default::default() });
 
         let (tx, rx) = mpsc::channel();
         spawn_scan(dir.clone(), Arc::clone(&rules), None, tx);

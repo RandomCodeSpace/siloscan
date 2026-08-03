@@ -44,6 +44,7 @@ mod tests {
             baselined: vec![],
             suppressed: vec![],
             skipped: vec![],
+            graph: Default::default(),
         };
 
         let json = to_json(&report);
@@ -74,6 +75,7 @@ mod tests {
             baselined: vec![finding.clone()],
             suppressed: vec![finding],
             skipped: vec![skipped],
+            graph: Default::default(),
         };
 
         let json1 = to_json(&report);
