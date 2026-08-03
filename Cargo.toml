@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/siloscan-core", "crates/siloscan"]
+members = ["crates/siloscan-core", "crates/siloscan", "crates/siloscan-tui"]
 
 [workspace.package]
 version = "0.1.0"
