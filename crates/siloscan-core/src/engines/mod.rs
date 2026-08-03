@@ -100,3 +100,4 @@ fn line_starts(content: &str) -> Vec<usize> {
     starts
 }
 pub mod ast;
+pub mod boundary;
