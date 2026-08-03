@@ -1,0 +1,12 @@
+/target
+.siloscan/cache/
+
+# Discussion and planning documents stay out of the repository (code only).
+# Design records live on the GitHub issue tracker; research notes live on
+# throwaway research/* branches.
+/research/
+/docs/
+/plans/
+*.plan.md
+*.notes.md
+NOTES.md
