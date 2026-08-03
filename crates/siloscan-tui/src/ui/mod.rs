@@ -13,6 +13,7 @@
 mod dashboard;
 
 pub mod ratchet;
+pub mod silo;
 pub mod triage;
 
 use std::cell::RefCell;
@@ -45,6 +46,7 @@ pub struct LayoutMap {
     pub dashboard_tab: Option<Rect>,
     pub triage_tab: Option<Rect>,
     pub ratchet_tab: Option<Rect>,
+    pub silo_tab: Option<Rect>,
 }
 
 impl LayoutMap {
@@ -67,6 +69,7 @@ impl LayoutMap {
             (self.dashboard_tab, Screen::Dashboard),
             (self.triage_tab, Screen::Triage),
             (self.ratchet_tab, Screen::Ratchet),
+            (self.silo_tab, Screen::Silo),
         ];
         hits.into_iter()
             .find(|(area, _)| area.is_some_and(|area| contains(area, column, row)))
@@ -91,6 +94,7 @@ thread_local! {
         dashboard_tab: None,
         triage_tab: None,
         ratchet_tab: None,
+        silo_tab: None,
     }) };
 }
 
@@ -152,6 +156,7 @@ fn draw_content(frame: &mut Frame, area: Rect, state: &AppState, layout: &mut La
             // details pane takes it otherwise.
             layout.dashboard = layout.dashboard.or(map.dashboard);
         }
+        Screen::Silo => silo::draw_silo(frame, area, state, layout),
     }
 }
 
@@ -163,6 +168,7 @@ pub fn keybindings(screen: Screen) -> &'static str {
             "/ search | s/t/f section | enter toggle | o sort | tab sidebar | esc clear"
         }
         Screen::Ratchet => "b baseline | i ignore-inline | n/p step | esc back",
+        Screen::Silo => "arrows move cell | enter open edge | esc close | tab next screen",
     }
 }
 
@@ -201,7 +207,7 @@ fn draw_status(frame: &mut Frame, area: Rect, state: &AppState, layout: &mut Lay
     let [tabs, keys, progress] = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
-            Constraint::Length(3 * TAB_WIDTH),
+            Constraint::Length(Screen::ALL.len() as u16 * TAB_WIDTH),
             Constraint::Min(0),
             Constraint::Length(28),
         ])
@@ -247,6 +253,7 @@ fn draw_tabs(frame: &mut Frame, area: Rect, state: &AppState, layout: &mut Layou
             Screen::Dashboard => layout.dashboard_tab = Some(rect),
             Screen::Triage => layout.triage_tab = Some(rect),
             Screen::Ratchet => layout.ratchet_tab = Some(rect),
+            Screen::Silo => layout.silo_tab = Some(rect),
         }
     }
 }
@@ -256,6 +263,7 @@ pub fn handle_key(state: &mut AppState, key: KeyEvent) {
         Screen::Dashboard => handle_dashboard_key(state, key),
         Screen::Triage => triage::handle_key_triage(state, key),
         Screen::Ratchet => ratchet::handle_key_ratchet(state, key),
+        Screen::Silo => silo::handle_key_silo(state, key),
     }
 }
 
@@ -285,6 +293,7 @@ pub fn handle_mouse(state: &mut AppState, event: MouseEvent) {
         Screen::Dashboard => handle_dashboard_mouse(state, event, &layout),
         Screen::Triage => triage::handle_mouse_triage(state, event, &layout),
         Screen::Ratchet => ratchet::handle_mouse_ratchet(state, event),
+        Screen::Silo => silo::handle_mouse_silo(state, event),
     }
 }
 

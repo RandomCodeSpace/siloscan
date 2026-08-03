@@ -19,8 +19,9 @@ use std::time::Duration;
 
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use siloscan_core::baseline;
+use siloscan_core::config::{self, Config};
 use siloscan_core::default_pack;
-use siloscan_core::rules::{self, CompiledRule, RuleSet};
+use siloscan_core::rules::{self, CompiledPayload, CompiledRule, RuleSet};
 
 use app::AppEvent;
 use state::{AppState, Screen};
@@ -30,7 +31,7 @@ const POLL_INTERVAL: Duration = Duration::from_millis(50);
 const USAGE: &str = "\
 siloscan-tui - interactive terminal UI for siloscan
 
-Usage: siloscan-tui [PATH] [--rules DIR]... [--no-default-rules]
+Usage: siloscan-tui [PATH] [--rules DIR]... [--no-default-rules] [--config FILE]
 
 Arguments:
   PATH                 Path to scan (default: .)
@@ -39,6 +40,8 @@ Options:
       --rules DIR      Rule directory, repeatable
       --no-default-rules
                        Do not load the built-in rule pack
+      --config FILE    Repository config (default: nearest siloscan.toml at or
+                       above PATH)
   -h, --help           Print help
 ";
 
@@ -47,6 +50,7 @@ struct Args {
     path: PathBuf,
     rules: Vec<PathBuf>,
     no_default_rules: bool,
+    config: Option<PathBuf>,
     help: bool,
 }
 
@@ -60,10 +64,20 @@ fn main() {
         return;
     }
 
-    let rules = match load_rules(&args.path, &args.rules, args.no_default_rules) {
+    let (config, config_rule_dirs) = match load_config(&args.path, args.config.as_deref()) {
+        Ok(loaded) => loaded,
+        Err(e) => fail(&format!("error: {e}")),
+    };
+    let mut dirs = args.rules.clone();
+    dirs.extend(config_rule_dirs);
+
+    let rules = match load_rules(&args.path, &dirs, args.no_default_rules) {
         Ok(rules) => Arc::new(rules),
         Err(e) => fail(&format!("error: {e}")),
     };
+    if let Err(e) = require_silos(&rules, config.as_deref()) {
+        fail(&format!("error: {e}"));
+    }
     let baseline = match baseline::load(&args.path) {
         Ok(baseline) => baseline.map(Arc::new),
         Err(e) => fail(&format!("error: {e}")),
@@ -75,7 +89,7 @@ fn main() {
         Ok(terminal) => terminal,
         Err(e) => fail(&format!("error: terminal setup failed: {e}")),
     };
-    let result = run(&mut terminal, &mut state);
+    let result = run(&mut terminal, &mut state, config);
     let restored = term::restore();
 
     if let Err(e) = result {
@@ -91,9 +105,13 @@ fn main() {
 /// One scan starts up front; `r` starts another once the previous one is done.
 /// Each iteration drains scan events, redraws, then waits up to
 /// `POLL_INTERVAL` for input, so progress keeps ticking on an idle terminal.
-fn run(terminal: &mut term::Tui, state: &mut AppState) -> io::Result<()> {
+fn run(
+    terminal: &mut term::Tui,
+    state: &mut AppState,
+    config: Option<Arc<Config>>,
+) -> io::Result<()> {
     let (tx, rx): (Sender<AppEvent>, Receiver<AppEvent>) = mpsc::channel();
-    start_scan(state, &tx);
+    start_scan(state, config.clone(), &tx);
 
     while !state.should_quit {
         drain_events(state, &rx);
@@ -101,7 +119,9 @@ fn run(terminal: &mut term::Tui, state: &mut AppState) -> io::Result<()> {
 
         if event::poll(POLL_INTERVAL)? {
             match event::read()? {
-                Event::Key(key) if key.kind == KeyEventKind::Press => on_key(state, key, &tx),
+                Event::Key(key) if key.kind == KeyEventKind::Press => {
+                    on_key(state, key, config.clone(), &tx)
+                }
                 Event::Mouse(mouse) => ui::handle_mouse(state, mouse),
                 // Resize needs no bookkeeping: the next draw re-lays out.
                 Event::Resize(_, _) => {}
@@ -118,13 +138,14 @@ fn drain_events(state: &mut AppState, rx: &Receiver<AppEvent>) {
         match event {
             AppEvent::Progress(progress) => state.progress = Some(progress),
             AppEvent::ScanDone(report) => app::apply_report(state, *report),
+            AppEvent::Failed(message) => app::apply_failure(state, message),
         }
     }
 }
 
 /// Global bindings win unless a screen is capturing text (the filter box), in
 /// which case every key is forwarded verbatim. Ctrl-C always quits.
-fn on_key(state: &mut AppState, key: KeyEvent, tx: &Sender<AppEvent>) {
+fn on_key(state: &mut AppState, key: KeyEvent, config: Option<Arc<Config>>, tx: &Sender<AppEvent>) {
     if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
         state.should_quit = true;
         return;
@@ -139,22 +160,24 @@ fn on_key(state: &mut AppState, key: KeyEvent, tx: &Sender<AppEvent>) {
         KeyCode::Char('r') => {
             if !state.scan_running {
                 reload_baseline(state);
-                start_scan(state, tx);
+                start_scan(state, config, tx);
             }
         }
         KeyCode::Char('1') => state.screen = Screen::Dashboard,
         KeyCode::Char('2') => state.screen = Screen::Triage,
         KeyCode::Char('3') => state.screen = Screen::Ratchet,
+        KeyCode::Char('4') => state.screen = Screen::Silo,
         _ => ui::handle_key(state, key),
     }
 }
 
-fn start_scan(state: &mut AppState, tx: &Sender<AppEvent>) {
+fn start_scan(state: &mut AppState, config: Option<Arc<Config>>, tx: &Sender<AppEvent>) {
     state.begin_scan();
     app::spawn_scan(
         state.root.clone(),
         Arc::clone(&state.rules),
         state.baseline.clone(),
+        config,
         tx.clone(),
     );
 }
@@ -181,6 +204,12 @@ fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<Args, String> {
         match arg.as_str() {
             "-h" | "--help" => args.help = true,
             "--no-default-rules" => args.no_default_rules = true,
+            "--config" => {
+                let file = argv
+                    .next()
+                    .ok_or_else(|| "--config requires a file".to_string())?;
+                args.config = Some(PathBuf::from(file));
+            }
             "--rules" => {
                 let dir = argv
                     .next()
@@ -190,6 +219,8 @@ fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<Args, String> {
             other => {
                 if let Some(dir) = other.strip_prefix("--rules=") {
                     args.rules.push(PathBuf::from(dir));
+                } else if let Some(file) = other.strip_prefix("--config=") {
+                    args.config = Some(PathBuf::from(file));
                 } else if other.starts_with('-') && other != "-" {
                     return Err(format!("unknown option: {other}"));
                 } else if path_seen {
@@ -203,6 +234,49 @@ fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<Args, String> {
     }
 
     Ok(args)
+}
+
+/// The repository config and the extra rule directories it declares, resolved
+/// against the directory holding the config file. Same rules as the CLI: an
+/// explicit `--config` must exist, a discovered one is optional.
+fn load_config(
+    root: &Path,
+    explicit: Option<&Path>,
+) -> Result<(Option<Arc<Config>>, Vec<PathBuf>), String> {
+    validate_root(root).map_err(|e| format!("{}: {e}", root.display()))?;
+
+    let path = match explicit {
+        Some(path) => path.to_path_buf(),
+        None => match config::discover(root) {
+            Some(path) => path,
+            None => return Ok((None, Vec::new())),
+        },
+    };
+
+    let config = config::load(&path)?;
+    let dir = path.parent().unwrap_or(Path::new(".")).to_path_buf();
+    let dirs = config.rules.iter().map(|rel| dir.join(rel)).collect();
+    Ok((Some(Arc::new(config)), dirs))
+}
+
+/// A boundary rule can only fire against configured silos, so loading one
+/// without a `[silos]` section is a config mistake, not a clean scan.
+fn require_silos(rules: &RuleSet, config: Option<&Config>) -> Result<(), String> {
+    let boundary = rules
+        .rules
+        .iter()
+        .find(|rule| matches!(rule.payload, CompiledPayload::Boundary { .. }));
+    let Some(rule) = boundary else {
+        return Ok(());
+    };
+    if config.is_some_and(|config| !config.silos.is_empty()) {
+        return Ok(());
+    }
+    Err(format!(
+        "rule {}: boundary rules need a {} defining [silos]",
+        rule.id,
+        config::CONFIG_NAME
+    ))
 }
 
 /// Same loading order and duplicate check as the CLI: built-in pack first, then
@@ -278,10 +352,51 @@ mod tests {
     }
 
     #[test]
+    fn parses_the_config_override_in_both_forms() {
+        assert_eq!(
+            parse(&["--config", "a.toml"]).unwrap().config,
+            Some(PathBuf::from("a.toml"))
+        );
+        assert_eq!(
+            parse(&["--config=b.toml"]).unwrap().config,
+            Some(PathBuf::from("b.toml"))
+        );
+        assert_eq!(parse(&[]).unwrap().config, None);
+    }
+
+    #[test]
     fn rejects_bad_input() {
         assert!(parse(&["--rules"]).is_err());
         assert!(parse(&["--nope"]).is_err());
         assert!(parse(&["a", "b"]).is_err());
+        assert!(parse(&["--config"]).is_err());
+    }
+
+    #[test]
+    fn a_boundary_rule_without_silos_is_rejected() {
+        let rules = RuleSet {
+            rules: rules::load_str(
+                "version: 1\nrules:\n  - id: arch.a-b\n    severity: error\n    message: m\n    boundary:\n      from: api\n      deny: [\"db\"]\n",
+                "test",
+            )
+            .unwrap(),
+            ..Default::default()
+        };
+
+        let err = require_silos(&rules, None).unwrap_err();
+        assert!(err.contains("arch.a-b"), "{err}");
+        assert!(err.contains(config::CONFIG_NAME), "{err}");
+        assert!(require_silos(&rules, Some(&Config::default())).is_err());
+
+        let config = Config {
+            silos: std::collections::BTreeMap::from([(
+                "api".to_string(),
+                vec!["a/**".to_string()],
+            )]),
+            ..Config::default()
+        };
+        assert!(require_silos(&rules, Some(&config)).is_ok());
+        assert!(require_silos(&RuleSet::default(), None).is_ok());
     }
 
     #[test]

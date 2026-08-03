@@ -80,6 +80,58 @@ const AST_DBG_RULE: &str = concat!(
     "      rust: '(macro_invocation macro: (identifier) @report (#eq? @report \"dbg\"))'\n",
 );
 
+const BOUNDARY_RULE: &str = concat!(
+    "version: 1\n",
+    "rules:\n",
+    "  - id: arch.api-db\n",
+    "    severity: error\n",
+    "    message: api must not import db\n",
+    "    boundary:\n",
+    "      from: api\n",
+    "      deny: [\"db\"]\n",
+);
+
+const COVERAGE_RULE: &str = concat!(
+    "version: 1\n",
+    "rules:\n",
+    "  - id: cov.min\n",
+    "    severity: error\n",
+    "    message: line coverage below threshold\n",
+    "    coverage:\n",
+    "      min: 80\n",
+);
+
+const SILO_CONFIG: &str = concat!(
+    "[silos]\n",
+    "api = [\"src/api/**\"]\n",
+    "db = [\"src/db/**\"]\n",
+);
+
+/// `src/low.rs` is 20% covered, `src/high.rs` exactly 80%, so a `min: 80` rule
+/// reports the first and clears the second.
+const LCOV: &str = concat!(
+    "TN:\n",
+    "SF:src/low.rs\n",
+    "DA:1,1\n",
+    "DA:2,0\n",
+    "DA:3,0\n",
+    "DA:4,0\n",
+    "DA:5,0\n",
+    "LF:5\n",
+    "LH:1\n",
+    "end_of_record\n",
+    "TN:\n",
+    "SF:src/high.rs\n",
+    "DA:1,1\n",
+    "DA:2,1\n",
+    "DA:3,1\n",
+    "DA:4,1\n",
+    "DA:5,0\n",
+    "LF:5\n",
+    "LH:4\n",
+    "end_of_record\n",
+);
+
 fn write(dir: &Path, rel: &str, body: &str) {
     let path = dir.join(rel);
     if let Some(parent) = path.parent() {
@@ -100,6 +152,7 @@ fn rules_dir(rules_yaml: &str) -> TempDir {
 fn src_dir(files: &[(&str, &str)]) -> TempDir {
     let dir = tempfile::tempdir().unwrap();
     fs::create_dir_all(dir.path().join(".git")).unwrap();
+    write(dir.path(), ".git/HEAD", "ref: refs/heads/main\n");
     for (rel, body) in files {
         write(dir.path(), rel, body);
     }
@@ -152,6 +205,25 @@ fn cache_entries(src: &Path) -> Vec<PathBuf> {
     walk(&src.join(".siloscan/cache"), &mut out);
     out.sort();
     out
+}
+
+/// A two-silo repository: one cross-silo import that the rule denies, and one
+/// same-silo import that it must leave alone.
+fn boundary_src() -> TempDir {
+    src_dir(&[
+        ("siloscan.toml", SILO_CONFIG),
+        ("src/api/handler.js", "import x from '../db/client';\n"),
+        ("src/api/routes.js", "import u from './util';\n"),
+        ("src/api/util.js", "export const u = 1;\n"),
+        ("src/db/client.js", "export const x = 1;\n"),
+    ])
+}
+
+fn coverage_src() -> TempDir {
+    src_dir(&[
+        ("src/low.rs", "let x = 1;\n"),
+        ("src/high.rs", "let y = 2;\n"),
+    ])
 }
 
 fn run(rules: &Path, src: &Path, extra: &[&str]) -> Output {
@@ -481,6 +553,80 @@ fn editing_a_scanned_file_invalidates_its_cached_entry() {
         cache_entries(src.path()).len() > before.len(),
         "edited content should be a miss and add an entry"
     );
+}
+
+#[test]
+fn boundary_rule_reports_the_denied_import_and_leaves_same_silo_imports_alone() {
+    let rules = rules_dir(BOUNDARY_RULE);
+    let src = boundary_src();
+
+    let output = run(rules.path(), src.path(), &["--no-default-rules"]);
+
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    let text = stdout(&output);
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(
+        lines,
+        vec!["src/api/handler.js:1:15 error arch.api-db api must not import db"]
+    );
+}
+
+#[test]
+fn a_boundary_rule_without_a_config_exits_two() {
+    let rules = rules_dir(BOUNDARY_RULE);
+    let src = src_dir(&[
+        ("src/api/handler.js", "import x from '../db/client';\n"),
+        ("src/db/client.js", "export const x = 1;\n"),
+    ]);
+
+    let output = run(rules.path(), src.path(), &["--no-default-rules"]);
+
+    assert_eq!(output.status.code(), Some(2));
+    let text = stderr(&output);
+    assert!(text.contains("arch.api-db"), "stderr: {text}");
+    assert!(text.contains("siloscan.toml"), "stderr: {text}");
+    assert!(stdout(&output).is_empty(), "stdout: {}", stdout(&output));
+}
+
+#[test]
+fn coverage_rule_reports_a_file_below_the_threshold() {
+    let rules = rules_dir(COVERAGE_RULE);
+    let src = coverage_src();
+    let report = tempfile::tempdir().unwrap();
+    write(report.path(), "lcov.info", LCOV);
+
+    let output = run(
+        rules.path(),
+        src.path(),
+        &[
+            "--no-default-rules",
+            "--coverage-report",
+            report
+                .path()
+                .join("lcov.info")
+                .to_str()
+                .expect("temp path should be UTF-8"),
+        ],
+    );
+
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    let text = stdout(&output);
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(
+        lines,
+        vec!["src/low.rs:1:1 error cov.min line coverage below threshold"]
+    );
+}
+
+#[test]
+fn coverage_rules_are_inert_without_a_report() {
+    let rules = rules_dir(COVERAGE_RULE);
+    let src = coverage_src();
+
+    let output = run(rules.path(), src.path(), &["--no-default-rules"]);
+
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert!(stdout(&output).is_empty(), "stdout: {}", stdout(&output));
 }
 
 /// A consumer that exits early (`siloscan | head`) closes the read end of the

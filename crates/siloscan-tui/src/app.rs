@@ -1,14 +1,16 @@
 //! Scan lifecycle: run the core scanner off the UI thread and fold its result
 //! back into `AppState`.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc::Sender;
 use std::thread;
 
 use siloscan_core::baseline::Baseline;
+use siloscan_core::config::Config;
 use siloscan_core::rules::RuleSet;
-use siloscan_core::scan::{self, Progress, ScanReport};
+use siloscan_core::scan::{self, Progress, ScanOptions, ScanReport};
 
 use crate::state::{AppState, FindingRow, Scroll, Status};
 
@@ -18,6 +20,9 @@ use crate::state::{AppState, FindingRow, Scroll, Status};
 pub enum AppEvent {
     Progress(Progress),
     ScanDone(Box<ScanReport>),
+    /// The scan never ran: a boundary rule names a silo the config does not
+    /// define. Reported in the status line rather than killing the session.
+    Failed(String),
 }
 
 /// Run a scan on a worker thread, streaming progress and then the report.
@@ -26,6 +31,7 @@ pub fn spawn_scan(
     root: PathBuf,
     rules: Arc<RuleSet>,
     baseline: Option<Arc<Baseline>>,
+    config: Option<Arc<Config>>,
     tx: Sender<AppEvent>,
 ) {
     thread::spawn(move || {
@@ -33,14 +39,30 @@ pub fn spawn_scan(
         let mut on_progress = |progress: Progress| {
             let _ = progress_tx.send(AppEvent::Progress(progress));
         };
-        let report = scan::scan_with_progress(&root, &rules, baseline.as_deref(), &mut on_progress);
-        let _ = tx.send(AppEvent::ScanDone(Box::new(report)));
+        let options = ScanOptions {
+            baseline: baseline.as_deref(),
+            config: config.as_deref(),
+            ..Default::default()
+        };
+        let event = match scan::scan_opts(&root, &rules, &options, &mut on_progress) {
+            Ok(report) => AppEvent::ScanDone(Box::new(report)),
+            Err(e) => AppEvent::Failed(e),
+        };
+        let _ = tx.send(event);
     });
+}
+
+/// Report a scan that never produced findings. The rows already on screen are
+/// left alone: a failed rescan should not wipe the triage list.
+pub fn apply_failure(state: &mut AppState, message: String) {
+    state.scan_running = false;
+    state.status = message;
 }
 
 /// Replace the rows with the report's findings, merged back into canonical
 /// order (path, line, column, rule id) across all three statuses.
 pub fn apply_report(state: &mut AppState, report: ScanReport) {
+    let boundary_edges = report.boundary_edges;
     let mut rows: Vec<FindingRow> = Vec::with_capacity(
         report.findings.len() + report.baselined.len() + report.suppressed.len(),
     );
@@ -72,7 +94,26 @@ pub fn apply_report(state: &mut AppState, report: ScanReport) {
             )
     });
 
+    // The core reports each violating edge by fingerprint, since the silo pair
+    // is not recoverable from the finding; the silo screen wants row indices.
+    // A finding whose fingerprint is absent from the rows was never reported.
+    let mut by_fingerprint: HashMap<&str, usize> = HashMap::with_capacity(rows.len());
+    for (index, row) in rows.iter().enumerate() {
+        by_fingerprint
+            .entry(row.finding.fingerprint.as_str())
+            .or_insert(index);
+    }
+    let edges: Vec<(String, String, usize)> = boundary_edges
+        .into_iter()
+        .filter_map(|(from, to, fingerprint)| {
+            by_fingerprint
+                .get(fingerprint.as_str())
+                .map(|index| (from, to, *index))
+        })
+        .collect();
+
     state.rows = rows;
+    state.boundary_edges = edges;
     state.selected = 0;
     state.ratchet_cursor = 0;
     state.scroll = Scroll::default();
@@ -129,6 +170,7 @@ mod tests {
                 reason: "binary".to_string(),
             }],
             graph: Default::default(),
+            boundary_edges: Vec::new(),
         }
     }
 
@@ -208,12 +250,69 @@ mod tests {
                 suppressed: Vec::new(),
                 skipped: Vec::new(),
                 graph: Default::default(),
+                boundary_edges: Vec::new(),
             },
         );
 
         assert!(state.rows.is_empty());
         assert!(state.visible_rows().is_empty());
         assert_eq!(state.debt_counts(), (0, 0, 0));
+    }
+
+    #[test]
+    fn apply_report_maps_boundary_edges_onto_row_indices() {
+        let mut state = state();
+        let mut report = report();
+        // src/b.rs:1:1 a.rule sorts to row 2, a.rs:9:2 b.rule to row 1.
+        report.boundary_edges = vec![
+            (
+                "api".to_string(),
+                "db".to_string(),
+                report.findings[1].fingerprint.clone(),
+            ),
+            (
+                "web".to_string(),
+                "db".to_string(),
+                report.baselined[0].fingerprint.clone(),
+            ),
+            // A fingerprint no row carries is dropped.
+            ("web".to_string(), "api".to_string(), "absent".to_string()),
+        ];
+
+        apply_report(&mut state, report);
+
+        assert_eq!(
+            state.boundary_edges,
+            vec![
+                ("api".to_string(), "db".to_string(), 2),
+                ("web".to_string(), "db".to_string(), 1),
+            ]
+        );
+        let matrix = state.silo_matrix().expect("edges make a matrix");
+        assert_eq!(matrix.names, vec!["api", "db", "web"]);
+    }
+
+    #[test]
+    fn apply_report_clears_stale_boundary_edges() {
+        let mut state = state();
+        state.boundary_edges = vec![("api".to_string(), "db".to_string(), 0)];
+
+        apply_report(&mut state, report());
+
+        assert!(state.boundary_edges.is_empty());
+    }
+
+    #[test]
+    fn apply_failure_keeps_the_rows_and_reports_the_reason() {
+        let mut state = state();
+        apply_report(&mut state, report());
+        state.scan_running = true;
+
+        apply_failure(&mut state, "rule a.b: unknown silo: db".to_string());
+
+        assert!(!state.scan_running);
+        assert_eq!(state.status, "rule a.b: unknown silo: db");
+        assert_eq!(state.rows.len(), 5);
     }
 
     #[test]
@@ -235,7 +334,7 @@ mod tests {
             .unwrap(), ..Default::default() });
 
         let (tx, rx) = mpsc::channel();
-        spawn_scan(dir.clone(), Arc::clone(&rules), None, tx);
+        spawn_scan(dir.clone(), Arc::clone(&rules), None, None, tx);
 
         let mut progress = 0usize;
         let mut state = AppState::new(dir.clone(), Arc::clone(&rules), None);
@@ -247,6 +346,7 @@ mod tests {
                     state.progress = Some(p);
                 }
                 AppEvent::ScanDone(report) => apply_report(&mut state, *report),
+                AppEvent::Failed(e) => apply_failure(&mut state, e),
             }
         }
 

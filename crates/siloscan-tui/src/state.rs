@@ -17,6 +17,7 @@ pub enum Screen {
     Dashboard,
     Triage,
     Ratchet,
+    Silo,
 }
 
 impl Screen {
@@ -25,26 +26,45 @@ impl Screen {
             Screen::Dashboard => "dashboard",
             Screen::Triage => "triage",
             Screen::Ratchet => "ratchet",
+            Screen::Silo => "silo",
         }
     }
 
-    pub const ALL: [Screen; 3] = [Screen::Dashboard, Screen::Triage, Screen::Ratchet];
+    pub const ALL: [Screen; 4] = [
+        Screen::Dashboard,
+        Screen::Triage,
+        Screen::Ratchet,
+        Screen::Silo,
+    ];
 
     pub fn next(self) -> Screen {
         match self {
             Screen::Dashboard => Screen::Triage,
             Screen::Triage => Screen::Ratchet,
-            Screen::Ratchet => Screen::Dashboard,
+            Screen::Ratchet => Screen::Silo,
+            Screen::Silo => Screen::Dashboard,
         }
     }
 
     pub fn prev(self) -> Screen {
         match self {
-            Screen::Dashboard => Screen::Ratchet,
+            Screen::Dashboard => Screen::Silo,
             Screen::Triage => Screen::Dashboard,
             Screen::Ratchet => Screen::Triage,
+            Screen::Silo => Screen::Ratchet,
         }
     }
+}
+
+/// Boundary violations aggregated into a square silo-by-silo matrix.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SiloMatrix {
+    /// Every silo taking part in a violation, ascending.
+    pub names: Vec<String>,
+    /// `cells[from][to]` is the number of violating findings on that edge.
+    pub cells: Vec<Vec<usize>>,
+    /// Row indices into `AppState::rows`, ascending, keyed by (from, to).
+    pub edges: BTreeMap<(String, String), Vec<usize>>,
 }
 
 /// Where a finding sits relative to the baseline and inline suppressions.
@@ -187,6 +207,8 @@ pub struct AppState {
     pub baseline: Option<Arc<Baseline>>,
     /// Findings accepted in the ratchet console, pending a baseline write.
     pub dirty_baseline: Vec<Finding>,
+    /// Boundary violations as (from silo, to silo, index into `rows`).
+    pub boundary_edges: Vec<(String, String, usize)>,
     /// True while the filter text box owns the keyboard.
     pub input_mode: bool,
     /// Status bar message.
@@ -209,6 +231,7 @@ impl AppState {
             rules,
             baseline,
             dirty_baseline: Vec::new(),
+            boundary_edges: Vec::new(),
             input_mode: false,
             status: String::new(),
             should_quit: false,
@@ -395,6 +418,50 @@ impl AppState {
             }
         }
         counts
+    }
+
+    /// Boundary violations folded into a square matrix over the silos that
+    /// take part in one. `None` when nothing crossed a boundary.
+    pub fn silo_matrix(&self) -> Option<SiloMatrix> {
+        if self.boundary_edges.is_empty() {
+            return None;
+        }
+
+        let mut edges: BTreeMap<(String, String), Vec<usize>> = BTreeMap::new();
+        for (from, to, row) in &self.boundary_edges {
+            edges
+                .entry((from.clone(), to.clone()))
+                .or_default()
+                .push(*row);
+        }
+        for rows in edges.values_mut() {
+            rows.sort_unstable();
+            rows.dedup();
+        }
+
+        let mut set: BTreeSet<&str> = BTreeSet::new();
+        for (from, to) in edges.keys() {
+            set.insert(from.as_str());
+            set.insert(to.as_str());
+        }
+        let names: Vec<String> = set.into_iter().map(str::to_string).collect();
+
+        let mut cells = vec![vec![0usize; names.len()]; names.len()];
+        for ((from, to), rows) in &edges {
+            let (Ok(from), Ok(to)) = (
+                names.binary_search_by(|name| name.as_str().cmp(from.as_str())),
+                names.binary_search_by(|name| name.as_str().cmp(to.as_str())),
+            ) else {
+                continue;
+            };
+            cells[from][to] = rows.len();
+        }
+
+        Some(SiloMatrix {
+            names,
+            cells,
+            edges,
+        })
     }
 
     /// Fraction of the scan completed, 0.0 to 1.0.
@@ -768,6 +835,53 @@ mod tests {
             findings: 2,
         });
         assert_eq!(state.progress_ratio(), 0.25);
+    }
+
+    #[test]
+    fn silo_matrix_is_none_without_boundary_edges() {
+        assert!(sample().silo_matrix().is_none());
+    }
+
+    #[test]
+    fn silo_matrix_counts_each_edge_and_keeps_names_sorted() {
+        let mut state = sample();
+        state.boundary_edges = vec![
+            ("web".to_string(), "db".to_string(), 3),
+            ("api".to_string(), "db".to_string(), 1),
+            ("api".to_string(), "db".to_string(), 0),
+            // A duplicate row on the same edge counts once.
+            ("api".to_string(), "db".to_string(), 0),
+        ];
+
+        let matrix = state.silo_matrix().unwrap();
+        assert_eq!(matrix.names, vec!["api", "db", "web"]);
+        assert_eq!(
+            matrix.cells,
+            vec![vec![0, 2, 0], vec![0, 0, 0], vec![0, 1, 0]]
+        );
+        assert_eq!(
+            matrix.edges[&("api".to_string(), "db".to_string())],
+            vec![0, 1]
+        );
+        assert_eq!(
+            matrix.edges[&("web".to_string(), "db".to_string())],
+            vec![3]
+        );
+        assert_eq!(matrix.edges.len(), 2);
+    }
+
+    #[test]
+    fn silo_matrix_is_independent_of_edge_order() {
+        let mut forward = sample();
+        forward.boundary_edges = vec![
+            ("api".to_string(), "web".to_string(), 2),
+            ("web".to_string(), "api".to_string(), 0),
+            ("api".to_string(), "web".to_string(), 1),
+        ];
+        let mut reversed = forward.clone();
+        reversed.boundary_edges.reverse();
+
+        assert_eq!(forward.silo_matrix(), reversed.silo_matrix());
     }
 
     #[test]

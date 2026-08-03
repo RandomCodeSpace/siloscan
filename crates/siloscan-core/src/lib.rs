@@ -2,6 +2,8 @@
 // their own serde_json version.
 pub mod baseline;
 pub mod cache;
+pub mod config;
+pub mod coverage;
 pub mod default_pack;
 pub mod engines;
 pub mod findings;
