@@ -68,6 +68,9 @@ pub enum LoadError {
 
     #[error("{origin}: invalid glob: {detail}")]
     BadGlob { origin: String, detail: String },
+
+    #[error("{origin}: invalid entropy threshold: {detail}")]
+    BadEntropy { origin: String, detail: String },
 }
 
 // Raw schema. `deny_unknown_fields` does not compose with `serde(flatten)`, so
@@ -90,7 +93,7 @@ pub struct RawRule {
     pub paths: Option<RawPaths>,
     pub metadata: Option<RawMetadata>,
     pub regex: Option<RawRegex>,
-    pub secret: Option<serde_norway::Value>,
+    pub secret: Option<RawSecret>,
     pub ast: Option<serde_norway::Value>,
     pub boundary: Option<serde_norway::Value>,
 }
@@ -117,6 +120,24 @@ pub struct RawRegex {
     pub group: Option<usize>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RawSecret {
+    pub pattern: String,
+    pub group: Option<usize>,
+    pub entropy: Option<f64>,
+    pub keywords: Option<Vec<String>>,
+    pub allowlist: Option<RawAllowlist>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RawAllowlist {
+    pub patterns: Option<Vec<String>>,
+    pub paths: Option<Vec<String>>,
+    pub stopwords: Option<Vec<String>>,
+}
+
 #[derive(Debug, Clone)]
 pub struct RuleSet {
     pub rules: Vec<CompiledRule>,
@@ -135,7 +156,21 @@ pub struct CompiledRule {
 
 #[derive(Debug, Clone)]
 pub enum CompiledPayload {
-    Regex { regex: Regex, group: Option<usize> },
+    Regex {
+        regex: Regex,
+        group: Option<usize>,
+    },
+    Secret {
+        regex: Regex,
+        group: Option<usize>,
+        entropy: Option<f64>,
+        /// Lowercased at compile time; callers compare against lowercased input.
+        keywords: Vec<String>,
+        allow_patterns: Vec<Regex>,
+        allow_paths: Option<GlobSet>,
+        /// Lowercased at compile time.
+        stopwords: Vec<String>,
+    },
 }
 
 fn id_pattern() -> &'static Regex {
@@ -275,14 +310,15 @@ fn compile_rule(raw: RawRule, origin: &str) -> Result<CompiledRule, LoadError> {
         }
     }
 
-    let payload = match raw.regex {
-        Some(spec) => compile_regex(&raw.id, spec, origin)?,
-        None => {
-            return Err(LoadError::UnsupportedPayload {
-                origin: origin.to_string(),
-                detail: kinds[0].to_string(),
-            });
-        }
+    let payload = if let Some(spec) = raw.regex {
+        compile_regex(&raw.id, spec, origin)?
+    } else if let Some(spec) = raw.secret {
+        compile_secret(&raw.id, spec, origin)?
+    } else {
+        return Err(LoadError::UnsupportedPayload {
+            origin: origin.to_string(),
+            detail: kinds[0].to_string(),
+        });
     };
 
     let (include, exclude) = match raw.paths {
@@ -305,27 +341,84 @@ fn compile_rule(raw: RawRule, origin: &str) -> Result<CompiledRule, LoadError> {
 }
 
 fn compile_regex(id: &str, spec: RawRegex, origin: &str) -> Result<CompiledPayload, LoadError> {
-    let regex = Regex::new(&spec.pattern).map_err(|e| LoadError::BadPattern {
-        origin: origin.to_string(),
-        detail: format!("{id}: {e}"),
-    })?;
-
-    if let Some(group) = spec.group {
-        if group >= regex.captures_len() {
-            return Err(LoadError::BadGroup {
-                origin: origin.to_string(),
-                detail: format!(
-                    "{id}: group {group} out of range (pattern has {} groups)",
-                    regex.captures_len()
-                ),
-            });
-        }
-    }
+    let regex = compile_pattern(id, &spec.pattern, origin)?;
+    check_group(id, &regex, spec.group, origin)?;
 
     Ok(CompiledPayload::Regex {
         regex,
         group: spec.group,
     })
+}
+
+fn compile_secret(id: &str, spec: RawSecret, origin: &str) -> Result<CompiledPayload, LoadError> {
+    let regex = compile_pattern(id, &spec.pattern, origin)?;
+    check_group(id, &regex, spec.group, origin)?;
+
+    if let Some(entropy) = spec.entropy
+        && (!entropy.is_finite() || entropy < 0.0)
+    {
+        return Err(LoadError::BadEntropy {
+            origin: origin.to_string(),
+            detail: format!("{id}: {entropy}"),
+        });
+    }
+
+    let allowlist = spec.allowlist.unwrap_or_default();
+
+    let mut allow_patterns = Vec::new();
+    for pattern in allowlist.patterns.unwrap_or_default() {
+        allow_patterns.push(Regex::new(&pattern).map_err(|e| LoadError::BadPattern {
+            origin: origin.to_string(),
+            detail: format!("{id}: allowlist: {e}"),
+        })?);
+    }
+
+    let allow_paths = compile_globs(allowlist.paths, origin)?;
+
+    Ok(CompiledPayload::Secret {
+        regex,
+        group: spec.group,
+        entropy: spec.entropy,
+        keywords: lowercased(spec.keywords),
+        allow_patterns,
+        allow_paths,
+        stopwords: lowercased(allowlist.stopwords),
+    })
+}
+
+fn lowercased(values: Option<Vec<String>>) -> Vec<String> {
+    values
+        .unwrap_or_default()
+        .iter()
+        .map(|v| v.to_lowercase())
+        .collect()
+}
+
+fn compile_pattern(id: &str, pattern: &str, origin: &str) -> Result<Regex, LoadError> {
+    Regex::new(pattern).map_err(|e| LoadError::BadPattern {
+        origin: origin.to_string(),
+        detail: format!("{id}: {e}"),
+    })
+}
+
+fn check_group(
+    id: &str,
+    regex: &Regex,
+    group: Option<usize>,
+    origin: &str,
+) -> Result<(), LoadError> {
+    if let Some(group) = group
+        && group >= regex.captures_len()
+    {
+        return Err(LoadError::BadGroup {
+            origin: origin.to_string(),
+            detail: format!(
+                "{id}: group {group} out of range (pattern has {} groups)",
+                regex.captures_len()
+            ),
+        });
+    }
+    Ok(())
 }
 
 fn compile_globs(
@@ -401,7 +494,212 @@ rules:
                 assert!(regex.is_match("x.unwrap()"));
                 assert_eq!(*group, None);
             }
+            other => panic!("expected a regex payload, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn valid_secret_rule_loads() {
+        let src = r#"
+version: 1
+rules:
+  - id: aws.access-key
+    severity: error
+    message: "aws key"
+    secret:
+      pattern: '(AKIA[0-9A-Z]{16})'
+      group: 1
+      entropy: 3.5
+      keywords: ["AKIA", "Aws"]
+      allowlist:
+        patterns: ["EXAMPLE$"]
+        paths: ["**/testdata/**"]
+        stopwords: ["Sample", "FAKE"]
+"#;
+        let rules = load_str(src, "test").expect("should load");
+        assert_eq!(rules.len(), 1);
+        match &rules[0].payload {
+            CompiledPayload::Secret {
+                regex,
+                group,
+                entropy,
+                keywords,
+                allow_patterns,
+                allow_paths,
+                stopwords,
+            } => {
+                assert!(regex.is_match("AKIAIOSFODNN7EXAMPLE"));
+                assert_eq!(*group, Some(1));
+                assert_eq!(*entropy, Some(3.5));
+                assert_eq!(keywords, &["akia".to_string(), "aws".to_string()]);
+                assert_eq!(allow_patterns.len(), 1);
+                assert!(allow_patterns[0].is_match("AKIAIOSFODNN7EXAMPLE"));
+                assert!(allow_paths.as_ref().unwrap().is_match("src/testdata/a.tf"));
+                assert_eq!(stopwords, &["sample".to_string(), "fake".to_string()]);
+            }
+            other => panic!("expected a secret payload, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn secret_defaults_are_empty() {
+        let src = r#"
+version: 1
+rules:
+  - id: a.b
+    severity: info
+    message: m
+    secret: { pattern: "x" }
+"#;
+        let rules = load_str(src, "test").expect("should load");
+        match &rules[0].payload {
+            CompiledPayload::Secret {
+                group,
+                entropy,
+                keywords,
+                allow_patterns,
+                allow_paths,
+                stopwords,
+                ..
+            } => {
+                assert_eq!(*group, None);
+                assert_eq!(*entropy, None);
+                assert!(keywords.is_empty());
+                assert!(allow_patterns.is_empty());
+                assert!(allow_paths.is_none());
+                assert!(stopwords.is_empty());
+            }
+            other => panic!("expected a secret payload, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn secret_bad_pattern_is_fatal() {
+        let src = r#"
+version: 1
+rules:
+  - id: a.b
+    severity: info
+    message: m
+    secret: { pattern: "(" }
+"#;
+        assert!(matches!(
+            load_str(src, "test"),
+            Err(LoadError::BadPattern { .. })
+        ));
+    }
+
+    #[test]
+    fn secret_out_of_range_group_is_fatal() {
+        let src = r#"
+version: 1
+rules:
+  - id: a.b
+    severity: info
+    message: m
+    secret: { pattern: "(x)", group: 2 }
+"#;
+        assert!(matches!(
+            load_str(src, "test"),
+            Err(LoadError::BadGroup { .. })
+        ));
+    }
+
+    #[test]
+    fn secret_bad_allowlist_pattern_is_fatal() {
+        let src = r#"
+version: 1
+rules:
+  - id: a.b
+    severity: info
+    message: m
+    secret:
+      pattern: "x"
+      allowlist:
+        patterns: ["("]
+"#;
+        let err = load_str(src, "test").unwrap_err();
+        assert!(matches!(err, LoadError::BadPattern { .. }));
+        assert!(err.to_string().contains("allowlist"));
+    }
+
+    #[test]
+    fn secret_bad_allowlist_path_is_fatal() {
+        let src = r#"
+version: 1
+rules:
+  - id: a.b
+    severity: info
+    message: m
+    secret:
+      pattern: "x"
+      allowlist:
+        paths: ["a[b"]
+"#;
+        assert!(matches!(
+            load_str(src, "test"),
+            Err(LoadError::BadGlob { .. })
+        ));
+    }
+
+    #[test]
+    fn secret_negative_entropy_is_fatal() {
+        let src = r#"
+version: 1
+rules:
+  - id: a.b
+    severity: info
+    message: m
+    secret: { pattern: "x", entropy: -1.0 }
+"#;
+        assert!(matches!(
+            load_str(src, "test"),
+            Err(LoadError::BadEntropy { .. })
+        ));
+    }
+
+    #[test]
+    fn secret_non_finite_entropy_is_fatal() {
+        let src = r#"
+version: 1
+rules:
+  - id: a.b
+    severity: info
+    message: m
+    secret: { pattern: "x", entropy: .nan }
+"#;
+        assert!(matches!(
+            load_str(src, "test"),
+            Err(LoadError::BadEntropy { .. })
+        ));
+    }
+
+    #[test]
+    fn secret_unknown_key_is_fatal() {
+        let src = r#"
+version: 1
+rules:
+  - id: a.b
+    severity: info
+    message: m
+    secret: { pattern: "x", nonsense: true }
+"#;
+        assert!(matches!(load_str(src, "test"), Err(LoadError::Yaml { .. })));
+    }
+
+    #[test]
+    fn secret_unknown_allowlist_key_is_fatal() {
+        let src = r#"
+version: 1
+rules:
+  - id: a.b
+    severity: info
+    message: m
+    secret:
+      pattern: "x"
+      allowlist: { nonsense: true }
+"#;
+        assert!(matches!(load_str(src, "test"), Err(LoadError::Yaml { .. })));
     }
 
     #[test]
@@ -462,7 +760,7 @@ rules:
     severity: info
     message: m
     regex: { pattern: "x" }
-    secret: { entropy: 4.0 }
+    secret: { pattern: "y" }
 "#;
         assert!(matches!(
             load_str(src, "test"),
@@ -494,13 +792,11 @@ rules:
   - id: a.b
     severity: info
     message: m
-    secret: { entropy: 4.0 }
+    ast: { kind: call }
 "#;
         let err = load_str(src, "test").unwrap_err();
         assert!(matches!(err, LoadError::UnsupportedPayload { .. }));
-        assert!(err
-            .to_string()
-            .contains("payload not supported yet: secret"));
+        assert!(err.to_string().contains("payload not supported yet: ast"));
     }
 
     #[test]
