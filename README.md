@@ -3,7 +3,7 @@
 [![CI](https://img.shields.io/github/actions/workflow/status/RandomCodeSpace/siloscan/ci.yml?branch=main&style=for-the-badge&label=CI&logo=github)](https://github.com/RandomCodeSpace/siloscan/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue?style=for-the-badge)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-2024_edition-orange?style=for-the-badge&logo=rust)](https://www.rust-lang.org)
-[![Status](https://img.shields.io/badge/status-phase_1_of_4-yellow?style=for-the-badge)](https://github.com/RandomCodeSpace/siloscan/issues/1)
+[![Status](https://img.shields.io/badge/status-v1-brightgreen?style=for-the-badge)](https://github.com/RandomCodeSpace/siloscan/issues/1)
 
 A universal, rule-based static code scanner. Quick, deterministic, fully offline.
 
@@ -14,91 +14,140 @@ output, byte for byte.
 
 ## Features
 
-- **Universal**: regex and secret rules work on any text file in any language.
-  Structural (AST) and architecture-boundary rules cover a tiered set of
-  languages (planned: Rust, Python, JavaScript, TypeScript, Go, Java, C, C++,
-  C#, Ruby).
-- **Deterministic**: findings are sorted canonically (path, line, column,
-  rule id); parallelism never changes output.
-- **Offline**: a single static binary. Nothing is fetched, ever.
-- **Ignore-aware**: respects `.gitignore` and `.ignore`, skips binaries
-  (NUL detection) and files that are not valid UTF-8.
-- **Stable finding identity**: every finding carries a SHA-256 fingerprint that
-  survives unrelated line drift - the foundation for baselines and ratchet
-  gating on existing codebases.
+- **Four rule domains**: `regex:` and `secret:` rules work on any text file in
+  any language; `ast:` (tree-sitter structural queries) and `boundary:`
+  (architecture rules) cover ten tier-1 languages: Rust, Python, JavaScript,
+  TypeScript, Go, Java, C, C++, C#, Ruby. `coverage:` rules gate on parsed
+  test-coverage reports (lcov / cobertura).
+- **Batteries included**: a default secrets ruleset (derived from the MIT
+  gitleaks rules, see NOTICE) is embedded in the binary; `--no-default-rules`
+  opts out.
+- **Brownfield-ready**: `siloscan baseline` records existing findings as
+  accepted debt; from then on only new findings fail the build. Inline
+  `siloscan-ignore` comments handle per-site exceptions.
+- **Architecture boundaries**: declare named silos in `siloscan.toml`; boundary
+  rules flag direct cross-silo imports, resolved against the scanned tree.
+- **Interactive TUI**: `siloscan-tui` - dashboard charts, filterable triage
+  board with code context, a ratchet console for per-finding debt decisions,
+  and a silo dependency matrix. Mouse and keyboard.
+- **Deterministic**: canonical finding order (path, line, column, rule id);
+  warm and cold cache runs produce byte-identical output.
+- **Offline**: static binaries. Nothing is fetched, ever.
+- **Ignore-aware**: respects `.gitignore` and `.ignore`, skips binaries and
+  non-UTF-8 files.
+- **Stable finding identity**: SHA-256 fingerprints survive unrelated line
+  drift and feed baselines and SARIF `partialFingerprints`.
 
 ## Install
 
 ```sh
-cargo install --git https://github.com/RandomCodeSpace/siloscan siloscan
+cargo install siloscan        # scanner (binaries: siloscan and ss)
+cargo install siloscan-tui    # interactive TUI
 ```
 
-Prebuilt binaries and a crates.io release arrive with v1.
+Prebuilt binaries (Linux musl, macOS, Windows) are attached to
+[GitHub releases](https://github.com/RandomCodeSpace/siloscan/releases).
+`ss` is a short alias binary for `siloscan` - note it shadows the iproute2
+socket-statistics tool if `~/.cargo/bin` precedes `/usr/bin` in your PATH.
 
 ## Usage
 
-Write a rule file:
-
-```yaml
-# rules/no-todo.yaml
-version: 1
-rules:
-  - id: hygiene.no-todo
-    severity: warning
-    message: "TODO left in code"
-    regex:
-      pattern: "(?i)\\bTODO\\b"
-```
-
-Scan:
-
 ```sh
-siloscan . --rules ./rules
-# src/main.rs:14:8 warning hygiene.no-todo TODO left in code
-
-siloscan . --rules ./rules --format json   # machine-readable output
-siloscan . --rules ./rules --fail-on warning
+siloscan .                          # scan with the embedded secrets ruleset
+ss . --rules ./rules                # add your own rules (ss = same binary)
+siloscan . --format json            # machine-readable
+siloscan . --format sarif           # GitHub code scanning
+siloscan . --fail-on warning        # tighten the gate
+siloscan baseline .                 # accept current findings as debt
+siloscan test ./rules/fixtures      # verify rules against annotated fixtures
+siloscan . --coverage-report cov.lcov
+siloscan-tui .                      # interactive triage
 ```
 
-Exit codes: `0` clean, `1` findings at or above the `--fail-on` threshold
-(default `error`), `2` usage or rule-load error.
+Exit codes: `0` clean, `1` new findings at or above the `--fail-on` threshold
+(default `error`), `2` usage, config, or rule-load error. Baselined and
+suppressed findings are reported but never fail the build.
 
 ## Rule schema
 
-Every rule shares one envelope and carries exactly one payload
-(`regex:` today; `secret:`, `ast:`, and `boundary:` are on the roadmap):
+Every rule shares one envelope and carries exactly one payload:
 
 ```yaml
 version: 1
 rules:
-  - id: secrets.example        # lowercase dotted id, globally unique
-    severity: error            # error | warning | info
+  - id: secrets.example            # lowercase dotted id, globally unique
+    severity: error                # error | warning | info
     message: "shown with each finding"
     paths:
       exclude: ["**/testdata/**"]
-    metadata:
-      description: "longer explanation"
-      tags: [example]
-    regex:
-      pattern: "..."           # Rust regex syntax, whole-file matching
-      group: 1                 # optional: report this capture's span
+    secret:
+      pattern: "(?i)key(.{0,20})?([a-z0-9]{20,})"
+      group: 2
+      entropy: 3.5
+      keywords: [key]
+      allowlist:
+        stopwords: [example]
+
+  - id: debug.print-statement
+    severity: info
+    message: "debug print left in code"
+    ast:                           # per-language tree-sitter queries
+      rust: |
+        (macro_invocation
+          macro: (identifier) @m
+          (#eq? @m "dbg")) @report
+      python: |
+        (call function: (identifier) @f (#eq? @f "print")) @report
+
+  - id: arch.core-no-web
+    severity: error
+    message: "core must not depend on web"
+    boundary:
+      from: core                   # silos declared in siloscan.toml
+      deny: [web]
+
+  - id: quality.min-coverage
+    severity: warning
+    message: "coverage below threshold"
+    coverage:
+      min: 80
 ```
 
-Unknown keys, duplicate ids, and invalid patterns are load errors - rules
-fail loudly, never silently.
+```toml
+# siloscan.toml - discovered walking up from the scan root
+[silos]
+core = ["crates/core/**"]
+web  = ["crates/web/**"]
+```
 
-## Roadmap
+Unknown keys, duplicate ids, invalid patterns, and unknown silo names are load
+errors - rules fail loudly, never silently.
 
-| Phase | Scope | Status |
-|-------|-------|--------|
-| 1 | Substrate: walker, YAML rules, regex engine, fingerprints, CLI/JSON | this PR |
-| 2 | Secrets engine, embedded ruleset, baseline/ratchet, SARIF | [planned](https://github.com/RandomCodeSpace/siloscan/issues/13) |
-| 3 | tree-sitter AST rules, semantic graph, incremental cache | designed |
-| 4 | Architecture boundary (silo) rules | designed |
+## Suppression and baselines
+
+```text
+let key = load();        // siloscan-ignore-line: secrets.example
+// siloscan-ignore: debug.print-statement
+print(diagnostics)
+```
+
+`siloscan baseline .` writes `.siloscan/baseline.json` (check it in). Only an
+explicit re-baseline updates it; the ratchet only tightens. The TUI's ratchet
+console makes these decisions per finding.
+
+## Architecture
+
+Cargo workspace: `siloscan-core` (library: walker, loader, four engines,
+semantic graph, cache, baseline, outputs), `siloscan` (CLI, also built as
+`ss`), `siloscan-tui` (ratatui interface). Grammars sit behind per-language
+cargo features (`lang-all` by default). The incremental cache
+(`.siloscan/cache/`, content-hash keyed) keeps rescans fast; `--no-cache`
+bypasses it.
 
 The full design record - every decision with its alternatives - lives in the
 [planning map](https://github.com/RandomCodeSpace/siloscan/issues/1).
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+MIT. See [LICENSE](LICENSE). The embedded secrets ruleset is derived from
+[gitleaks](https://github.com/gitleaks/gitleaks) (MIT); see [NOTICE](NOTICE).

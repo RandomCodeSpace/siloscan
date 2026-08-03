@@ -1,0 +1,74 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  binaries:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+          - os: macos-latest
+            target: aarch64-apple-darwin
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+      - name: Install musl tools
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }} -p siloscan -p siloscan-tui
+      - name: Package (unix)
+        if: runner.os != 'Windows'
+        env:
+          REF_NAME: ${{ github.ref_name }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          cd "target/$TARGET/release"
+          tar czf "siloscan-$REF_NAME-$TARGET.tar.gz" siloscan ss siloscan-tui
+      - name: Package (windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          REF_NAME: ${{ github.ref_name }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          cd "target/$env:TARGET/release"
+          Compress-Archive -Path siloscan.exe, ss.exe, siloscan-tui.exe -DestinationPath "siloscan-$env:REF_NAME-$env:TARGET.zip"
+      - name: Upload to release
+        uses: softprops/action-gh-release@v3
+        with:
+          files: |
+            target/${{ matrix.target }}/release/siloscan-*.tar.gz
+            target/${{ matrix.target }}/release/siloscan-*.zip
+
+  publish:
+    name: Publish to crates.io
+    runs-on: ubuntu-latest
+    needs: binaries
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Publish crates in dependency order
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          cargo publish -p siloscan-core
+          cargo publish -p siloscan
+          cargo publish -p siloscan-tui

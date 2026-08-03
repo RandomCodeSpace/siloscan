@@ -12,3 +12,11 @@ siloscan-core = { path = "../siloscan-core" }
 
 [dev-dependencies]
 tempfile = "3.27.0"
+
+[[bin]]
+name = "siloscan"
+path = "src/main.rs"
+
+[[bin]]
+name = "ss"
+path = "src/main.rs"
