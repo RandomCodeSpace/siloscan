@@ -205,6 +205,7 @@ mod tests {
             suppressed: vec![],
             skipped: vec![],
             graph: Default::default(),
+            boundary_edges: Vec::new(),
         };
         let rules = RuleSet {
             rules: vec![],
@@ -224,6 +225,7 @@ mod tests {
             suppressed: vec![],
             skipped: vec![],
             graph: Default::default(),
+            boundary_edges: Vec::new(),
         };
         let rules = RuleSet {
             rules: vec![],
@@ -253,6 +255,7 @@ mod tests {
             suppressed: vec![],
             skipped: vec![],
             graph: Default::default(),
+            boundary_edges: Vec::new(),
         };
         let rules = RuleSet {
             rules: vec![],
@@ -306,6 +309,7 @@ mod tests {
             suppressed: vec![],
             skipped: vec![],
             graph: Default::default(),
+            boundary_edges: Vec::new(),
         };
         let rule_text = r#"
 version: 1
@@ -357,6 +361,7 @@ rules:
             suppressed: vec![],
             skipped: vec![],
             graph: Default::default(),
+            boundary_edges: Vec::new(),
         };
         let rules = RuleSet {
             rules: vec![],
@@ -387,6 +392,7 @@ rules:
             suppressed: vec![],
             skipped: vec![],
             graph: Default::default(),
+            boundary_edges: Vec::new(),
         };
         let rules = RuleSet {
             rules: vec![],
@@ -436,6 +442,7 @@ rules:
             suppressed: vec![],
             skipped: vec![],
             graph: Default::default(),
+            boundary_edges: Vec::new(),
         };
         let rule_text = r#"
 version: 1

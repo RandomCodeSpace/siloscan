@@ -45,6 +45,7 @@ mod tests {
             suppressed: vec![],
             skipped: vec![],
             graph: Default::default(),
+            boundary_edges: Vec::new(),
         };
 
         let json = to_json(&report);
@@ -76,6 +77,7 @@ mod tests {
             suppressed: vec![finding],
             skipped: vec![skipped],
             graph: Default::default(),
+            boundary_edges: Vec::new(),
         };
 
         let json1 = to_json(&report);

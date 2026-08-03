@@ -62,9 +62,6 @@ pub enum LoadError {
     #[error("{origin}: rule has multiple payloads: {detail}")]
     MultiplePayloads { origin: String, detail: String },
 
-    #[error("{origin}: payload not supported yet: {detail}")]
-    UnsupportedPayload { origin: String, detail: String },
-
     #[error("{origin}: invalid regex pattern: {detail}")]
     BadPattern { origin: String, detail: String },
 
@@ -85,6 +82,22 @@ pub enum LoadError {
 
     #[error("{origin}: invalid ast query: {detail}")]
     BadAstQuery { origin: String, detail: String },
+
+    #[error("{origin}: {kind} rule must not set languages: {detail}")]
+    PayloadLanguages {
+        origin: String,
+        kind: String,
+        detail: String,
+    },
+
+    #[error("{origin}: invalid silo name: {detail}")]
+    BadSilo { origin: String, detail: String },
+
+    #[error("{origin}: boundary rule has an empty deny list: {detail}")]
+    EmptyDeny { origin: String, detail: String },
+
+    #[error("{origin}: invalid coverage minimum: {detail}")]
+    BadCoverageMin { origin: String, detail: String },
 }
 
 // Raw schema. `deny_unknown_fields` does not compose with `serde(flatten)`, so
@@ -111,7 +124,8 @@ pub struct RawRule {
     /// Language name -> tree-sitter query source. `BTreeMap` so the compiled
     /// order is deterministic regardless of the order written in YAML.
     pub ast: Option<BTreeMap<String, String>>,
-    pub boundary: Option<serde_norway::Value>,
+    pub boundary: Option<RawBoundary>,
+    pub coverage: Option<RawCoverage>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -144,6 +158,22 @@ pub struct RawSecret {
     pub entropy: Option<f64>,
     pub keywords: Option<Vec<String>>,
     pub allowlist: Option<RawAllowlist>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RawBoundary {
+    /// Silo the rule constrains.
+    pub from: String,
+    /// Silos `from` must not import. Never empty.
+    pub deny: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RawCoverage {
+    /// Minimum line coverage percentage, 0..=100.
+    pub min: f64,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -216,6 +246,15 @@ pub enum CompiledPayload {
     Ast {
         /// Sorted by language; queries are shared, never mutated.
         queries: Vec<(String, Arc<Query>)>,
+    },
+    Boundary {
+        /// Silo names are format-checked at load; whether they exist is
+        /// checked at scan setup against the repository config.
+        from: String,
+        deny: Vec<String>,
+    },
+    Coverage {
+        min: f64,
     },
 }
 
@@ -341,6 +380,9 @@ fn compile_rule(raw: RawRule, origin: &str) -> Result<CompiledRule, LoadError> {
     if raw.boundary.is_some() {
         kinds.push("boundary");
     }
+    if raw.coverage.is_some() {
+        kinds.push("coverage");
+    }
 
     match kinds.len() {
         0 => {
@@ -365,6 +407,20 @@ fn compile_rule(raw: RawRule, origin: &str) -> Result<CompiledRule, LoadError> {
         });
     }
 
+    // Boundary and coverage rules are evaluated per silo and per report, not
+    // per source language, so a `languages` filter would be meaningless.
+    if raw.languages.is_some()
+        && let Some(kind) = ["boundary", "coverage"]
+            .into_iter()
+            .find(|k| kinds.contains(k))
+    {
+        return Err(LoadError::PayloadLanguages {
+            origin: origin.to_string(),
+            kind: kind.to_string(),
+            detail: raw.id,
+        });
+    }
+
     let mut languages = raw.languages;
     let payload = if let Some(spec) = raw.regex {
         compile_regex(&raw.id, spec, origin)?
@@ -375,10 +431,15 @@ fn compile_rule(raw: RawRule, origin: &str) -> Result<CompiledRule, LoadError> {
         // An ast rule's language coverage is exactly its query map keys.
         languages = Some(queries.iter().map(|(lang, _)| lang.clone()).collect());
         CompiledPayload::Ast { queries }
+    } else if let Some(spec) = raw.boundary {
+        compile_boundary(&raw.id, spec, origin)?
+    } else if let Some(spec) = raw.coverage {
+        compile_coverage(&raw.id, spec, origin)?
     } else {
-        return Err(LoadError::UnsupportedPayload {
+        // Unreachable: the payload count was checked above.
+        return Err(LoadError::NoPayload {
             origin: origin.to_string(),
-            detail: kinds[0].to_string(),
+            detail: raw.id,
         });
     };
 
@@ -445,6 +506,48 @@ fn compile_secret(id: &str, spec: RawSecret, origin: &str) -> Result<CompiledPay
         allow_paths,
         stopwords: lowercased(allowlist.stopwords),
     })
+}
+
+fn compile_boundary(
+    id: &str,
+    spec: RawBoundary,
+    origin: &str,
+) -> Result<CompiledPayload, LoadError> {
+    if spec.deny.is_empty() {
+        return Err(LoadError::EmptyDeny {
+            origin: origin.to_string(),
+            detail: id.to_string(),
+        });
+    }
+
+    for name in std::iter::once(&spec.from).chain(spec.deny.iter()) {
+        if !crate::config::is_silo_name(name) {
+            return Err(LoadError::BadSilo {
+                origin: origin.to_string(),
+                detail: format!("{id}: {name}"),
+            });
+        }
+    }
+
+    Ok(CompiledPayload::Boundary {
+        from: spec.from,
+        deny: spec.deny,
+    })
+}
+
+fn compile_coverage(
+    id: &str,
+    spec: RawCoverage,
+    origin: &str,
+) -> Result<CompiledPayload, LoadError> {
+    if !spec.min.is_finite() || !(0.0..=100.0).contains(&spec.min) {
+        return Err(LoadError::BadCoverageMin {
+            origin: origin.to_string(),
+            detail: format!("{id}: {}", spec.min),
+        });
+    }
+
+    Ok(CompiledPayload::Coverage { min: spec.min })
 }
 
 fn compile_ast(
@@ -875,21 +978,165 @@ rules:
     }
 
     #[test]
-    fn unsupported_payload_is_fatal() {
+    fn valid_boundary_rule_loads() {
+        let src = r#"
+version: 1
+rules:
+  - id: arch.api-must-not-import-db
+    severity: error
+    message: "api must not import db"
+    boundary:
+      from: api
+      deny: ["db", "infra-2"]
+"#;
+        let rules = load_str(src, "test").expect("should load");
+        match &rules[0].payload {
+            CompiledPayload::Boundary { from, deny } => {
+                assert_eq!(from, "api");
+                assert_eq!(deny, &["db".to_string(), "infra-2".to_string()]);
+            }
+            other => panic!("expected a boundary payload, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn boundary_empty_deny_is_fatal() {
         let src = r#"
 version: 1
 rules:
   - id: a.b
     severity: info
     message: m
-    boundary: { from: a, to: b }
+    boundary: { from: api, deny: [] }
+"#;
+        assert!(matches!(
+            load_str(src, "test"),
+            Err(LoadError::EmptyDeny { .. })
+        ));
+    }
+
+    #[test]
+    fn boundary_bad_silo_name_is_fatal() {
+        let src = r#"
+version: 1
+rules:
+  - id: a.b
+    severity: info
+    message: m
+    boundary: { from: Api, deny: [db] }
+"#;
+        assert!(matches!(
+            load_str(src, "test"),
+            Err(LoadError::BadSilo { .. })
+        ));
+
+        let src = r#"
+version: 1
+rules:
+  - id: a.b
+    severity: info
+    message: m
+    boundary: { from: api, deny: ["db layer"] }
+"#;
+        assert!(matches!(
+            load_str(src, "test"),
+            Err(LoadError::BadSilo { .. })
+        ));
+    }
+
+    #[test]
+    fn boundary_unknown_key_is_fatal() {
+        let src = r#"
+version: 1
+rules:
+  - id: a.b
+    severity: info
+    message: m
+    boundary: { from: api, to: db }
+"#;
+        assert!(matches!(load_str(src, "test"), Err(LoadError::Yaml { .. })));
+    }
+
+    #[test]
+    fn boundary_with_languages_is_fatal() {
+        let src = r#"
+version: 1
+rules:
+  - id: a.b
+    severity: info
+    message: m
+    languages: ["rust"]
+    boundary: { from: api, deny: [db] }
 "#;
         let err = load_str(src, "test").unwrap_err();
-        assert!(matches!(err, LoadError::UnsupportedPayload { .. }));
-        assert!(
-            err.to_string()
-                .contains("payload not supported yet: boundary")
-        );
+        assert!(matches!(err, LoadError::PayloadLanguages { .. }));
+        assert!(err.to_string().contains("boundary rule must not set"));
+    }
+
+    #[test]
+    fn valid_coverage_rule_loads() {
+        let src = r#"
+version: 1
+rules:
+  - id: quality.line-coverage
+    severity: warning
+    message: "coverage below threshold"
+    coverage: { min: 80 }
+"#;
+        let rules = load_str(src, "test").expect("should load");
+        match &rules[0].payload {
+            CompiledPayload::Coverage { min } => assert_eq!(*min, 80.0),
+            other => panic!("expected a coverage payload, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn coverage_out_of_range_is_fatal() {
+        for min in ["-1", "100.5", ".nan"] {
+            let src = format!(
+                "version: 1\nrules:\n  - id: a.b\n    severity: info\n    message: m\n    coverage: {{ min: {min} }}\n"
+            );
+            assert!(
+                matches!(
+                    load_str(&src, "test"),
+                    Err(LoadError::BadCoverageMin { .. })
+                ),
+                "min {min} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn coverage_with_languages_is_fatal() {
+        let src = r#"
+version: 1
+rules:
+  - id: a.b
+    severity: info
+    message: m
+    languages: ["rust"]
+    coverage: { min: 50 }
+"#;
+        let err = load_str(src, "test").unwrap_err();
+        assert!(matches!(err, LoadError::PayloadLanguages { .. }));
+        assert!(err.to_string().contains("coverage rule must not set"));
+    }
+
+    #[test]
+    fn boundary_and_coverage_together_is_fatal() {
+        let src = r#"
+version: 1
+rules:
+  - id: a.b
+    severity: info
+    message: m
+    boundary: { from: api, deny: [db] }
+    coverage: { min: 50 }
+"#;
+        assert!(matches!(
+            load_str(src, "test"),
+            Err(LoadError::MultiplePayloads { .. })
+        ));
     }
 
     #[cfg(feature = "tree-sitter-rust")]
