@@ -10,10 +10,13 @@ pub enum FileKind {
 /// Walk root directory using ignore crate with standard VCS filters:
 /// respects .gitignore, .ignore, excludes .git, skips hidden files.
 /// Files only, sorted bytewise by path, walk errors silently skipped.
+/// require_git(false): .gitignore is honored whether or not a .git entry
+/// exists, so output never depends on the environment around the scan root.
 pub fn collect_files(root: &Path) -> Vec<PathBuf> {
     let walker = ignore::WalkBuilder::new(root)
         .standard_filters(true)
         .hidden(true)
+        .require_git(false)
         .build();
 
     let mut files = Vec::new();

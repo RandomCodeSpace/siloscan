@@ -7,7 +7,6 @@ repository.workspace = true
 description = "Universal offline rule-based static code scanner"
 
 [dependencies]
-anyhow = "1.0.104"
 clap = { version = "4.6.5", features = ["derive"] }
 siloscan-core = { path = "../siloscan-core" }
 
