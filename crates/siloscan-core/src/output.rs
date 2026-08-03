@@ -52,7 +52,7 @@ mod tests {
         assert!(json.contains("findings"));
         assert!(json.contains("baselined"));
         assert!(json.contains("suppressed"));
-        assert!(json.contains("0.1.0"));
+        assert!(json.contains(env!("CARGO_PKG_VERSION")));
     }
 
     #[test]
