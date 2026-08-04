@@ -1523,7 +1523,7 @@ dependencies = [
 
 [[package]]
 name = "siloscan"
-version = "1.0.2"
+version = "1.1.0"
 dependencies = [
  "clap",
  "siloscan-core",
@@ -1532,7 +1532,7 @@ dependencies = [
 
 [[package]]
 name = "siloscan-core"
-version = "1.0.2"
+version = "1.1.0"
 dependencies = [
  "globset",
  "ignore",
@@ -1561,7 +1561,7 @@ dependencies = [
 
 [[package]]
 name = "siloscan-tui"
-version = "1.0.2"
+version = "1.1.0"
 dependencies = [
  "crossterm",
  "ratatui",
