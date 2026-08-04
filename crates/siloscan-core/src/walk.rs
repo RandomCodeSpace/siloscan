@@ -1,3 +1,48 @@
+//! Enumerating the files a scan reads, and reading them.
+//!
+//! # Which ignore sources a scan consults
+//!
+//! A scan must be a function of the tree it was pointed at. Anything else means
+//! two machines scanning the same commit can disagree about whether a secret is
+//! there, and the disagreement is silent: an ignored file produces no finding
+//! and no skipped-file record, so the report says "clean" rather than "did not
+//! look". [`IgnoreOptions`] makes every ignore source an explicit, named
+//! decision instead of an inherited default.
+//!
+//! ## Deliberate behavior change (1.1.2)
+//!
+//! Up to 1.1.1 the walker enabled the `ignore` crate's standard filters, which
+//! turned on *every* ignore source git knows. Three of them read files outside
+//! the scan root, and each could erase findings with no trace in the report:
+//!
+//! - a `.gitignore` in any *parent* directory of the scan root,
+//! - `.git/info/exclude`, which is untracked and so invisible to review,
+//! - git's global `core.excludesFile`, which belongs to whoever invoked the
+//!   scan, not to the repository being scanned.
+//!
+//! All three now default to **off** ([`IgnoreOptions::respect_parent_ignores`],
+//! [`IgnoreOptions::respect_git_exclude`],
+//! [`IgnoreOptions::respect_global_gitignore`]). A scan is therefore
+//! self-contained: it depends on the scan root's contents and nothing above or
+//! outside it, and the same tree scanned in CI, in a container, and on a
+//! developer's laptop yields the same files.
+//!
+//! Consequence worth stating plainly: a repository that relied on a parent
+//! `.gitignore` or on `.git/info/exclude` to keep files out of a scan will see
+//! those files scanned from 1.1.2 on, and may see new findings. That is the
+//! point - those findings were always there. Callers that want the old,
+//! environment-dependent behavior can opt back into each source individually.
+//!
+//! Ignore files *inside* the scan root are unchanged: `.gitignore` and
+//! `.ignore` are still honored by default, because they are part of the tree
+//! under review. [`IgnoreOptions::respect_gitignore`] and
+//! [`IgnoreOptions::respect_dot_ignore`] exist so a caller can turn even those
+//! off - a one-line `.gitignore` must not be able to hide a live secret with no
+//! way to look past it - and [`IgnoreOptions::all_files`] turns off the lot.
+//!
+//! Walk order is unaffected by any of this: results are sorted bytewise by
+//! path after collection.
+
 use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -32,8 +77,86 @@ fn is_excluded_name(name: &OsStr) -> bool {
     name == OsStr::new(STATE_DIR_NAME) || VCS_DIR_NAMES.iter().any(|vcs| name == OsStr::new(vcs))
 }
 
-/// Walk root directory using the ignore crate: respects `.gitignore` and
-/// `.ignore`, scans hidden files and directories, excludes version-control
+/// Which ignore sources a walk consults.
+///
+/// Every field is a decision about whether some file may remove other files
+/// from the scan. See the [module docs](self) for why the defaults are what
+/// they are; the short version is that a scan depends on the scan root and
+/// nothing above or outside it.
+///
+/// [`Default`] is the shipped behavior. Constructing this struct literally is
+/// deliberate: adding a field is a breaking change for anyone who did, which is
+/// the right amount of friction for "a new way to not scan something".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IgnoreOptions {
+    /// Honor `.gitignore` files found inside the scan root. Default `true`.
+    pub respect_gitignore: bool,
+    /// Honor `.ignore` files found inside the scan root. Default `true`.
+    ///
+    /// Same format as `.gitignore`, understood by ripgrep and friends. It is
+    /// separate from `respect_gitignore` only so that turning off one does not
+    /// silently leave the other hiding files.
+    pub respect_dot_ignore: bool,
+    /// Honor git's global `core.excludesFile`. Default `false`.
+    ///
+    /// That file belongs to whoever invoked the scan, not to the repository
+    /// under review, so honoring it makes results differ between machines
+    /// scanning the same commit.
+    pub respect_global_gitignore: bool,
+    /// Honor ignore files in directories *above* the scan root. Default
+    /// `false`.
+    ///
+    /// A file outside the tree siloscan was told to scan must not be able to
+    /// remove findings from inside it.
+    pub respect_parent_ignores: bool,
+    /// Honor `<root>/.git/info/exclude`. Default `false`.
+    ///
+    /// It is untracked, so it never appears in review, and it is per-clone, so
+    /// it is not part of the repository's own definition of what to skip.
+    pub respect_git_exclude: bool,
+}
+
+impl Default for IgnoreOptions {
+    fn default() -> Self {
+        IgnoreOptions {
+            respect_gitignore: true,
+            respect_dot_ignore: true,
+            respect_global_gitignore: false,
+            respect_parent_ignores: false,
+            respect_git_exclude: false,
+        }
+    }
+}
+
+impl IgnoreOptions {
+    /// Every ignore source off: nothing but the walker's own exclusions
+    /// (version-control internals, siloscan's state directory) keeps a file out
+    /// of the scan.
+    ///
+    /// This is what a `--no-ignore` style flag wants. It does not re-enable the
+    /// out-of-root sources - "scan everything under the root" is not a reason
+    /// to start reading files above it.
+    pub fn all_files() -> Self {
+        IgnoreOptions {
+            respect_gitignore: false,
+            respect_dot_ignore: false,
+            respect_global_gitignore: false,
+            respect_parent_ignores: false,
+            respect_git_exclude: false,
+        }
+    }
+}
+
+/// Walk root directory using the ignore crate, with the default
+/// [`IgnoreOptions`].
+///
+/// Equivalent to [`collect_files_with`] passing `&IgnoreOptions::default()`.
+pub fn collect_files(root: &Path) -> Vec<PathBuf> {
+    collect_files_with(root, &IgnoreOptions::default())
+}
+
+/// Walk root directory using the ignore crate: honors the ignore sources
+/// `opts` selects, scans hidden files and directories, excludes version-control
 /// internals (`.git`, `.hg`, `.svn`, `.jj`, `.bzr`) and siloscan's own
 /// `.siloscan` state directory anywhere below the scan root.
 /// Files only, sorted bytewise by path, walk errors silently skipped.
@@ -41,17 +164,24 @@ fn is_excluded_name(name: &OsStr) -> bool {
 /// hidden(false): dotfiles carry secrets as often as any other file - `.env`,
 /// `.npmrc`, `.github/workflows/` - so skipping them would silently hide the
 /// findings this scanner exists to report. Ignore-file semantics are unchanged
-/// by this: a dotfile listed in `.gitignore` stays ignored.
+/// by this: a dotfile listed in a respected `.gitignore` stays ignored.
 ///
-/// require_git(false): .gitignore is honored whether or not a .git entry
-/// exists, so output never depends on the environment around the scan root.
-pub fn collect_files(root: &Path) -> Vec<PathBuf> {
-    let walker = ignore::WalkBuilder::new(root)
-        .standard_filters(true)
+/// require_git(false): `.gitignore` inside the root is honored whether or not a
+/// `.git` entry exists, so a scan of an exported tree sees what a scan of the
+/// checkout sees. This knob does not widen where ignore files are read from -
+/// that is `respect_parent_ignores`, which is off by default.
+pub fn collect_files_with(root: &Path, opts: &IgnoreOptions) -> Vec<PathBuf> {
+    let mut builder = ignore::WalkBuilder::new(root);
+    builder
         .hidden(false)
+        .parents(opts.respect_parent_ignores)
+        .ignore(opts.respect_dot_ignore)
+        .git_ignore(opts.respect_gitignore)
+        .git_global(opts.respect_global_gitignore)
+        .git_exclude(opts.respect_git_exclude)
         .require_git(false)
-        .filter_entry(|entry| !is_excluded_name(entry.file_name()))
-        .build();
+        .filter_entry(|entry| !is_excluded_name(entry.file_name()));
+    let walker = builder.build();
 
     let mut files = Vec::new();
     for entry in walker.flatten() {
@@ -94,7 +224,12 @@ mod tests {
 
     /// Paths relative to `root`, forward-slashed, in walk order.
     fn relative_names(root: &Path) -> Vec<String> {
-        collect_files(root)
+        names_with(root, &IgnoreOptions::default())
+    }
+
+    /// As [`relative_names`], under an explicit ignore policy.
+    fn names_with(root: &Path, opts: &IgnoreOptions) -> Vec<String> {
+        collect_files_with(root, opts)
             .iter()
             .map(|p| {
                 p.strip_prefix(root)
@@ -314,6 +449,279 @@ mod tests {
 
         for _ in 0..5 {
             assert_eq!(relative_names(dir.path()), expected);
+        }
+    }
+
+    /// A `.gitignore` above the scan root used to erase findings from inside
+    /// it, with nothing in the report to say so.
+    #[test]
+    fn parent_gitignore_does_not_suppress_by_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("repo");
+        fs::create_dir(&root).unwrap();
+        fs::write(dir.path().join(".gitignore"), "secret.txt\n").unwrap();
+        fs::write(root.join("secret.txt"), "AKIAIOSFODNN7EXAMPLE\n").unwrap();
+        fs::write(root.join("main.rs"), "fn main() {}").unwrap();
+
+        let names = relative_names(&root);
+        assert!(names.contains(&"secret.txt".to_string()), "{names:?}");
+
+        // The setup does suppress once the walk is told to read upward, which
+        // is what 1.1.1 did unconditionally.
+        let opted_in = IgnoreOptions {
+            respect_parent_ignores: true,
+            ..IgnoreOptions::default()
+        };
+        let names = names_with(&root, &opted_in);
+        assert!(!names.contains(&"secret.txt".to_string()), "{names:?}");
+    }
+
+    /// `.git/info/exclude` is untracked and per-clone, so it never shows up in
+    /// review. It no longer removes files from a scan unless asked.
+    #[test]
+    fn git_info_exclude_does_not_suppress_by_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let info = dir.path().join(".git/info");
+        fs::create_dir_all(&info).unwrap();
+        fs::write(info.join("exclude"), "secret.txt\n").unwrap();
+        fs::write(dir.path().join("secret.txt"), "AKIAIOSFODNN7EXAMPLE\n").unwrap();
+        fs::write(dir.path().join("main.rs"), "fn main() {}").unwrap();
+
+        let names = relative_names(dir.path());
+        assert!(names.contains(&"secret.txt".to_string()), "{names:?}");
+        // The `.git` directory itself is still not walked.
+        assert!(!names.iter().any(|n| n.starts_with(".git/")), "{names:?}");
+
+        let opted_in = IgnoreOptions {
+            respect_git_exclude: true,
+            ..IgnoreOptions::default()
+        };
+        let names = names_with(dir.path(), &opted_in);
+        assert!(!names.contains(&"secret.txt".to_string()), "{names:?}");
+    }
+
+    /// Marks the re-executed child of the test below, and carries the repo it
+    /// is to walk. Set with `Command::env` on a child process, never on this one.
+    const GLOBAL_IGNORE_CHILD: &str = "SILOSCAN_TEST_GLOBAL_IGNORE_ROOT";
+
+    /// Printed by the child and required by the parent, so a filter that
+    /// matched no test fails the parent instead of passing it vacuously.
+    const CHILD_RAN: &str = "global-ignore child ran";
+
+    /// Git's global `core.excludesFile` belongs to the invoking user, not to
+    /// the repository, so a scan must not consult it.
+    ///
+    /// The behaviour is exercised in a child process, and the reason is that
+    /// the `ignore` crate leaves no other way in. It resolves the global
+    /// excludes path from the environment alone - `GIT_CONFIG_GLOBAL`, then
+    /// `$HOME/.gitconfig`, then the XDG and system files
+    /// (`ignore::gitignore::global`) - and `WalkBuilder` exposes `git_global`
+    /// as a bool with no path beside it. Pointing it at a fixture in-process
+    /// therefore means `std::env::set_var`, which is `unsafe` for a reason:
+    /// it races every concurrent `getenv` in the process, and the sibling tests
+    /// in this binary call `tempfile::tempdir`, which reads `TMPDIR`. That race
+    /// is a real one, and it can take the whole suite down rather than fail a
+    /// test.
+    ///
+    /// `Command::env` sets the variable on a process that does not exist yet,
+    /// which races nothing. The child re-runs this same test with the fixture
+    /// path handed to it, takes the other branch, and asserts both directions
+    /// for real. The parent requires [`CHILD_RAN`] on the child's stdout: a
+    /// renamed test would otherwise filter to zero tests, exit 0, and quietly
+    /// assert nothing.
+    #[test]
+    fn global_excludes_file_does_not_suppress_by_default() {
+        let Some(root) = std::env::var_os(GLOBAL_IGNORE_CHILD) else {
+            return spawn_global_ignore_child();
+        };
+
+        // Child: `GIT_CONFIG_GLOBAL` is already in this process's environment,
+        // inherited at spawn. Nothing here mutates it.
+        let root = PathBuf::from(root);
+        let default_names = relative_names(&root);
+        let opted_in = IgnoreOptions {
+            respect_global_gitignore: true,
+            ..IgnoreOptions::default()
+        };
+        let opted_in_names = names_with(&root, &opted_in);
+
+        assert!(
+            default_names.contains(&"secret.txt".to_string()),
+            "the user's global excludes must not reach a default scan: {default_names:?}"
+        );
+        // The setup does suppress once the walk is told to read the user's
+        // config, which is what 1.1.1 did unconditionally. Without this the
+        // test above would pass on a fixture that never worked.
+        assert!(
+            !opted_in_names.contains(&"secret.txt".to_string()),
+            "--respect-global-gitignore must reach the walker: {opted_in_names:?}"
+        );
+        println!("{CHILD_RAN}");
+    }
+
+    /// Build the fixture, then re-run this test binary against just the test
+    /// above with `GIT_CONFIG_GLOBAL` pointed at it.
+    fn spawn_global_ignore_child() {
+        let dir = tempfile::tempdir().unwrap();
+        let global_ignore = dir.path().join("global_ignore");
+        fs::write(&global_ignore, "secret.txt\n").unwrap();
+        let gitconfig = dir.path().join("gitconfig");
+        fs::write(
+            &gitconfig,
+            format!("[core]\nexcludesFile = {}\n", global_ignore.display()),
+        )
+        .unwrap();
+
+        let root = dir.path().join("repo");
+        fs::create_dir(&root).unwrap();
+        fs::write(root.join("secret.txt"), "AKIAIOSFODNN7EXAMPLE\n").unwrap();
+        fs::write(root.join("main.rs"), "fn main() {}").unwrap();
+
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "walk::tests::global_excludes_file_does_not_suppress_by_default",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(GLOBAL_IGNORE_CHILD, &root)
+            .env("GIT_CONFIG_GLOBAL", &gitconfig)
+            .output()
+            .expect("re-running the test binary");
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success(),
+            "child failed:\n{stdout}{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            stdout.contains(CHILD_RAN),
+            "the child never ran the test - has it been renamed?\n{stdout}"
+        );
+    }
+
+    /// An ignore file inside the root is part of the tree under review, so it
+    /// keeps its say by default.
+    #[test]
+    fn in_root_ignore_files_still_suppress_by_default() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join(".gitignore"), "hidden_by_git.txt\n").unwrap();
+        fs::write(dir.path().join(".ignore"), "hidden_by_dot.txt\n").unwrap();
+        fs::write(dir.path().join("hidden_by_git.txt"), "a").unwrap();
+        fs::write(dir.path().join("hidden_by_dot.txt"), "b").unwrap();
+        fs::write(dir.path().join("main.rs"), "fn main() {}").unwrap();
+
+        let names = relative_names(dir.path());
+
+        assert!(
+            !names.contains(&"hidden_by_git.txt".to_string()),
+            "{names:?}"
+        );
+        assert!(
+            !names.contains(&"hidden_by_dot.txt".to_string()),
+            "{names:?}"
+        );
+        assert!(names.contains(&"main.rs".to_string()), "{names:?}");
+    }
+
+    /// A one-line ignore file must not be able to hide a live secret with no
+    /// way to look past it.
+    #[test]
+    fn all_files_scans_ignored_files() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join(".gitignore"), "hidden_by_git.txt\n").unwrap();
+        fs::write(dir.path().join(".ignore"), "hidden_by_dot.txt\n").unwrap();
+        fs::write(dir.path().join("hidden_by_git.txt"), "a").unwrap();
+        fs::write(dir.path().join("hidden_by_dot.txt"), "b").unwrap();
+
+        let names = names_with(dir.path(), &IgnoreOptions::all_files());
+
+        assert!(
+            names.contains(&"hidden_by_git.txt".to_string()),
+            "{names:?}"
+        );
+        assert!(
+            names.contains(&"hidden_by_dot.txt".to_string()),
+            "{names:?}"
+        );
+    }
+
+    /// Turning off one in-root source leaves the other alone.
+    #[test]
+    fn gitignore_and_dot_ignore_toggle_independently() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join(".gitignore"), "hidden_by_git.txt\n").unwrap();
+        fs::write(dir.path().join(".ignore"), "hidden_by_dot.txt\n").unwrap();
+        fs::write(dir.path().join("hidden_by_git.txt"), "a").unwrap();
+        fs::write(dir.path().join("hidden_by_dot.txt"), "b").unwrap();
+
+        let no_git = IgnoreOptions {
+            respect_gitignore: false,
+            ..IgnoreOptions::default()
+        };
+        let names = names_with(dir.path(), &no_git);
+        assert!(
+            names.contains(&"hidden_by_git.txt".to_string()),
+            "{names:?}"
+        );
+        assert!(
+            !names.contains(&"hidden_by_dot.txt".to_string()),
+            "{names:?}"
+        );
+
+        let no_dot = IgnoreOptions {
+            respect_dot_ignore: false,
+            ..IgnoreOptions::default()
+        };
+        let names = names_with(dir.path(), &no_dot);
+        assert!(
+            !names.contains(&"hidden_by_git.txt".to_string()),
+            "{names:?}"
+        );
+        assert!(
+            names.contains(&"hidden_by_dot.txt".to_string()),
+            "{names:?}"
+        );
+    }
+
+    /// The exclusions the walker owns are policy, not ignore rules: they hold
+    /// even when every ignore source is off.
+    #[test]
+    fn all_files_still_excludes_vcs_and_state_directories() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join(".git/objects")).unwrap();
+        fs::write(dir.path().join(".git/objects/blob"), "x").unwrap();
+        fs::create_dir_all(dir.path().join(".siloscan/cache")).unwrap();
+        fs::write(dir.path().join(".siloscan/cache/entry.json"), "{}").unwrap();
+        fs::write(dir.path().join("main.rs"), "fn main() {}").unwrap();
+
+        let names = names_with(dir.path(), &IgnoreOptions::all_files());
+
+        assert_eq!(names, vec!["main.rs".to_string()], "{names:?}");
+    }
+
+    /// Walk order is a property of the sort, not of the ignore policy.
+    #[test]
+    fn walk_order_deterministic_under_every_policy() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("src")).unwrap();
+        fs::write(dir.path().join("src/b.rs"), "b").unwrap();
+        fs::write(dir.path().join("src/a.rs"), "a").unwrap();
+        fs::write(dir.path().join("README.md"), "r").unwrap();
+        fs::write(dir.path().join(".env"), "TOKEN=value\n").unwrap();
+
+        let expected = vec![
+            ".env".to_string(),
+            "README.md".to_string(),
+            "src/a.rs".to_string(),
+            "src/b.rs".to_string(),
+        ];
+
+        for opts in [IgnoreOptions::default(), IgnoreOptions::all_files()] {
+            for _ in 0..5 {
+                assert_eq!(names_with(dir.path(), &opts), expected, "{opts:?}");
+            }
         }
     }
 }

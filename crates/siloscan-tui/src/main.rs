@@ -23,6 +23,7 @@ use siloscan_core::baseline;
 use siloscan_core::config::{self, Config};
 use siloscan_core::default_pack;
 use siloscan_core::rules::{self, CompiledPayload, CompiledRule, RuleSet};
+use siloscan_core::walk::IgnoreOptions;
 
 use app::AppEvent;
 use state::{AppState, READ_ONLY_RESCAN, Screen};
@@ -46,6 +47,14 @@ Options:
                        above PATH)
       --report FILE    Open a JSON report as a read-only snapshot instead of
                        scanning; cannot be combined with PATH
+      --no-ignore      Scan every file: ignore no .gitignore and no .ignore
+      --no-gitignore   Ignore .ignore files but not .gitignore files
+      --respect-parent-ignores
+                       Also honor ignore files above the scan root
+      --respect-git-exclude
+                       Also honor PATH/.git/info/exclude
+      --respect-global-gitignore
+                       Also honor git's global core.excludesFile
   -h, --help           Print help
   -V, --version        Print version
 ";
@@ -58,6 +67,11 @@ struct Args {
     config: Option<PathBuf>,
     /// A report to open instead of scanning. Mutually exclusive with `path`.
     report: Option<PathBuf>,
+    /// Which ignore sources the walk consults. Defaults to the self-contained
+    /// policy: ignore files inside the scan root count, nothing above or
+    /// outside it does. The `--respect-*` flags each re-admit one out-of-root
+    /// source, which is the only way back to the pre-1.1.2 behavior.
+    ignore: IgnoreOptions,
     help: bool,
     version: bool,
 }
@@ -85,7 +99,7 @@ fn main() {
         Ok(terminal) => terminal,
         Err(e) => fail(&format!("error: terminal setup failed: {e}")),
     };
-    let result = run(&mut terminal, &mut state, config);
+    let result = run(&mut terminal, &mut state, config, args.ignore);
     let restored = term::restore();
 
     if let Err(e) = result {
@@ -156,11 +170,12 @@ fn run(
     terminal: &mut term::Tui,
     state: &mut AppState,
     config: Option<Arc<Config>>,
+    ignore: IgnoreOptions,
 ) -> io::Result<()> {
     let (tx, rx): (Sender<AppEvent>, Receiver<AppEvent>) = mpsc::channel();
     // A snapshot is already loaded and never scans; the channel stays empty.
     if state.snapshot.is_none() {
-        start_scan(state, config.clone(), &tx);
+        start_scan(state, config.clone(), ignore, &tx);
     }
 
     while !state.should_quit {
@@ -170,7 +185,7 @@ fn run(
         if event::poll(POLL_INTERVAL)? {
             match event::read()? {
                 Event::Key(key) if key.kind == KeyEventKind::Press => {
-                    on_key(state, key, config.clone(), &tx)
+                    on_key(state, key, config.clone(), ignore, &tx)
                 }
                 Event::Mouse(mouse) => ui::handle_mouse(state, mouse),
                 // Resize needs no bookkeeping: the next draw re-lays out.
@@ -195,7 +210,13 @@ fn drain_events(state: &mut AppState, rx: &Receiver<AppEvent>, config: Option<&C
 
 /// Global bindings win unless a screen is capturing text (the filter box), in
 /// which case every key is forwarded verbatim. Ctrl-C always quits.
-fn on_key(state: &mut AppState, key: KeyEvent, config: Option<Arc<Config>>, tx: &Sender<AppEvent>) {
+fn on_key(
+    state: &mut AppState,
+    key: KeyEvent,
+    config: Option<Arc<Config>>,
+    ignore: IgnoreOptions,
+    tx: &Sender<AppEvent>,
+) {
     if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
         state.should_quit = true;
         return;
@@ -211,7 +232,7 @@ fn on_key(state: &mut AppState, key: KeyEvent, config: Option<Arc<Config>>, tx: 
         KeyCode::Char('r') => {
             if !state.refuse_if_snapshot(READ_ONLY_RESCAN) && !state.scan_running {
                 reload_baseline(state);
-                start_scan(state, config, tx);
+                start_scan(state, config, ignore, tx);
             }
         }
         KeyCode::Char('1') => state.screen = Screen::Dashboard,
@@ -222,13 +243,19 @@ fn on_key(state: &mut AppState, key: KeyEvent, config: Option<Arc<Config>>, tx: 
     }
 }
 
-fn start_scan(state: &mut AppState, config: Option<Arc<Config>>, tx: &Sender<AppEvent>) {
+fn start_scan(
+    state: &mut AppState,
+    config: Option<Arc<Config>>,
+    ignore: IgnoreOptions,
+    tx: &Sender<AppEvent>,
+) {
     state.begin_scan();
     app::spawn_scan(
         state.root.clone(),
         Arc::clone(&state.rules),
         state.baseline.clone(),
         config,
+        ignore,
         tx.clone(),
     );
 }
@@ -256,6 +283,16 @@ fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<Args, String> {
             "-h" | "--help" => args.help = true,
             "-V" | "--version" => args.version = true,
             "--no-default-rules" => args.no_default_rules = true,
+            // Each of these sets one field, and no two set the same field in
+            // opposite directions, so the flags are order-independent.
+            "--no-ignore" => {
+                args.ignore.respect_gitignore = false;
+                args.ignore.respect_dot_ignore = false;
+            }
+            "--no-gitignore" => args.ignore.respect_gitignore = false,
+            "--respect-parent-ignores" => args.ignore.respect_parent_ignores = true,
+            "--respect-git-exclude" => args.ignore.respect_git_exclude = true,
+            "--respect-global-gitignore" => args.ignore.respect_global_gitignore = true,
             "--report" => {
                 let file = argv
                     .next()
@@ -296,6 +333,13 @@ fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<Args, String> {
     // A snapshot is the whole input: there is nothing for a scan path to mean.
     if args.report.is_some() && path_seen {
         return Err("--report cannot be combined with a scan path".to_string());
+    }
+    // Nor is there a walk to configure. Accepting the flags would show a
+    // report built under whatever policy wrote it while the command line
+    // claimed another, which is the silent disagreement these flags exist to
+    // end.
+    if args.report.is_some() && args.ignore != IgnoreOptions::default() {
+        return Err("--report does not scan, so ignore options cannot apply to it".to_string());
     }
 
     Ok(args)
@@ -465,6 +509,61 @@ mod tests {
             let err = parse(&argv).unwrap_err();
             assert!(err.contains("--report"), "{err}");
         }
+    }
+
+    /// The TUI has to be able to look past an ignore file too: a session that
+    /// cannot be told to scan everything is a session that reports whatever the
+    /// repository's `.gitignore` allows, with nothing on screen saying so.
+    #[test]
+    fn parses_the_ignore_flags() {
+        assert_eq!(parse(&[]).unwrap().ignore, IgnoreOptions::default());
+
+        let all = parse(&["--no-ignore"]).unwrap().ignore;
+        assert_eq!(all, IgnoreOptions::all_files());
+
+        let no_git = parse(&["--no-gitignore"]).unwrap().ignore;
+        assert!(!no_git.respect_gitignore);
+        assert!(no_git.respect_dot_ignore, "only gitignore was named");
+
+        let legacy = parse(&[
+            "--respect-parent-ignores",
+            "--respect-git-exclude",
+            "--respect-global-gitignore",
+        ])
+        .unwrap()
+        .ignore;
+        assert!(legacy.respect_parent_ignores);
+        assert!(legacy.respect_git_exclude);
+        assert!(legacy.respect_global_gitignore);
+        assert!(legacy.respect_gitignore, "in-root sources are untouched");
+
+        // Order cannot change the policy: no two flags write the same field.
+        assert_eq!(
+            parse(&["--no-ignore", "--respect-parent-ignores"])
+                .unwrap()
+                .ignore,
+            parse(&["--respect-parent-ignores", "--no-ignore"])
+                .unwrap()
+                .ignore
+        );
+    }
+
+    /// A snapshot never walks anything, so an ignore flag beside `--report` is
+    /// a policy that silently would not apply. Refusing beats showing a report
+    /// built one way while the command line claimed another.
+    #[test]
+    fn ignore_flags_are_rejected_alongside_a_report() {
+        for flag in [
+            "--no-ignore",
+            "--no-gitignore",
+            "--respect-parent-ignores",
+            "--respect-git-exclude",
+            "--respect-global-gitignore",
+        ] {
+            let err = parse(&["--report=r.json", flag]).unwrap_err();
+            assert!(err.contains("--report"), "{flag}: {err}");
+        }
+        assert!(parse(&["--report=r.json"]).is_ok());
     }
 
     #[test]

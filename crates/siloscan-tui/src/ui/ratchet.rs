@@ -15,7 +15,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Gauge, Paragraph, Wrap};
 
-use siloscan_core::findings::Finding;
+use siloscan_core::findings::{Finding, sanitize_for_terminal};
 
 use crate::actions;
 use crate::state::{AppState, Pane, Status};
@@ -250,8 +250,17 @@ fn draw_code(frame: &mut Frame, state: &AppState, finding: &Finding, area: Rect)
         // Unreadable source is a dead end for this finding, not a crash: say so
         // in the same dim guidance voice the other empty panes use.
         Err(e) => vec![
-            Line::styled(format!("cannot read {}", path.display()), theme::dim()),
-            Line::styled(e.to_string(), theme::dim()),
+            Line::styled(
+                format!(
+                    "cannot read {}",
+                    sanitize_for_terminal(&path.display().to_string())
+                ),
+                theme::dim(),
+            ),
+            Line::styled(
+                sanitize_for_terminal(&e.to_string()).into_owned(),
+                theme::dim(),
+            ),
             Line::styled(
                 "the file moved or was deleted since the scan; press r to rescan",
                 theme::dim(),
@@ -297,7 +306,7 @@ pub fn code_lines(
             if number == target {
                 spans.extend(highlight(text, finding.column, &finding.matched));
             } else {
-                spans.push(Span::raw((*text).to_string()));
+                spans.push(Span::raw(sanitize_for_terminal(text).into_owned()));
             }
             Line::from(spans)
         })
@@ -318,15 +327,18 @@ fn highlight(text: &str, column: u64, matched: &str) -> Vec<Span<'static>> {
     } else {
         match text.find(matched) {
             Some(found) => found,
-            None => return vec![Span::raw(text.to_string())],
+            None => return vec![Span::raw(sanitize_for_terminal(text).into_owned())],
         }
     };
     let end = start + matched.len();
 
+    // Sanitizing follows the slicing: `column` and `matched.len()` are byte
+    // offsets into the file's own bytes, and escaping one byte to four
+    // characters would move every offset behind it.
     vec![
-        Span::raw(text[..start].to_string()),
-        Span::styled(text[start..end].to_string(), style),
-        Span::raw(text[end..].to_string()),
+        Span::raw(sanitize_for_terminal(&text[..start]).into_owned()),
+        Span::styled(sanitize_for_terminal(&text[start..end]).into_owned(), style),
+        Span::raw(sanitize_for_terminal(&text[end..]).into_owned()),
     ]
 }
 
@@ -338,7 +350,7 @@ fn draw_details(frame: &mut Frame, state: &AppState, finding: &Finding, area: Re
         detail_line(
             "rule",
             Span::styled(
-                finding.rule_id.clone(),
+                sanitize_for_terminal(&finding.rule_id).into_owned(),
                 Style::default()
                     .fg(theme::ACCENT)
                     .add_modifier(Modifier::BOLD),
@@ -353,13 +365,16 @@ fn draw_details(frame: &mut Frame, state: &AppState, finding: &Finding, area: Re
                     .add_modifier(Modifier::BOLD),
             ),
         ),
-        detail("where", &format!("{}:{}", finding.path, finding.line)),
+        detail(
+            "where",
+            &format!("{}:{}", sanitize_for_terminal(&finding.path), finding.line),
+        ),
         detail_line(
             "print",
             Span::styled(short(&finding.fingerprint).to_string(), theme::dim()),
         ),
         Line::from(""),
-        Line::from(finding.message.clone()),
+        Line::from(sanitize_for_terminal(&finding.message).into_owned()),
         Line::from(""),
         Line::from(Span::styled(
             crate::ui::display_match(&state.rules, finding).to_string(),

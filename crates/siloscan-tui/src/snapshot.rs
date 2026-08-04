@@ -17,6 +17,15 @@
 //!
 //! The report carries no timestamp and no scan root, so a snapshot is
 //! identified by the file it was read from.
+//!
+//! Tolerance across minor versions has a consequence the UI has to honour.
+//! Reports began redacting a secret rule's `matched` at the source in schema
+//! 1.2; a 1.0 or 1.1 report carries the credential itself, in plain text, and
+//! the major-1 gate accepts it. Snapshot mode boots with no rule set, so it
+//! cannot tell which of those findings came from a secret rule and cannot
+//! redact selectively. [`SnapshotData::hides_match_text`] is the answer: below
+//! 1.2 no match text is shown at all, and the reason is said out loud rather
+//! than left to look like an empty column.
 
 use std::fmt;
 use std::fs;
@@ -34,6 +43,15 @@ pub const SUPPORTED_MAJOR: u32 = 1;
 /// Version assumed for a report written before `schema_version` existed.
 const ASSUMED_VERSION: &str = "1.0";
 
+/// First schema version whose `matched` fields are redacted by the writer.
+/// Everything below it may carry a credential in plain text.
+const REDACTING_VERSION: (u32, u32) = (1, 2);
+
+/// What the footer says while match text is being withheld. It names the cause,
+/// not just the effect: an empty match column is otherwise indistinguishable
+/// from a report that had nothing to show.
+pub const HIDDEN_MATCH_NOTE: &str = "pre-1.2 report: match text hidden";
+
 /// A report read from disk, in the shape the UI consumes.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SnapshotData {
@@ -47,6 +65,31 @@ pub struct SnapshotData {
     pub baselined: Vec<Finding>,
     pub suppressed: Vec<Finding>,
     pub metrics: Metrics,
+}
+
+impl SnapshotData {
+    /// Whether the UI must withhold every finding's match text.
+    ///
+    /// True for any report below [`REDACTING_VERSION`], and for a version
+    /// string that does not read as `MAJOR.MINOR` at all. Withholding is the
+    /// safe direction: showing a credential cannot be undone, and a redacted
+    /// non-secret is a legible column short of one detail.
+    pub fn hides_match_text(&self) -> bool {
+        !redacts_at_source(&self.schema_version)
+    }
+}
+
+/// Whether a report of this schema version had its match text redacted before
+/// it was written. Anything unparseable is treated as older, never as newer.
+fn redacts_at_source(version: &str) -> bool {
+    let mut parts = version.split('.');
+    let Ok(major) = parts.next().unwrap_or_default().parse::<u32>() else {
+        return false;
+    };
+    let Ok(minor) = parts.next().unwrap_or_default().parse::<u32>() else {
+        return false;
+    };
+    (major, minor) >= REDACTING_VERSION
 }
 
 #[derive(Debug)]
@@ -416,6 +459,41 @@ mod tests {
         // A declared version is enough on its own: a report may legitimately
         // carry no findings key at all.
         assert!(load_str(r#"{ "schema_version": "1.1" }"#).is_ok());
+    }
+
+    /// The loader accepts every 1.x report, but only 1.2 and up redact a
+    /// secret's match text before writing it. The older ones must be treated as
+    /// carrying credentials, because they do.
+    #[test]
+    fn reports_below_one_two_hide_their_match_text() {
+        for version in ["1.0", "1.1"] {
+            let data = load_str(&report_json(Some(version))).unwrap();
+            assert!(data.hides_match_text(), "{version} carries raw matches");
+        }
+        // The 1.0 reports that predate the key are the same case.
+        assert!(load_str(&report_json(None)).unwrap().hides_match_text());
+
+        for version in ["1.2", "1.3", "1.10"] {
+            let data = load_str(&report_json(Some(version))).unwrap();
+            assert!(!data.hides_match_text(), "{version} is redacted already");
+        }
+
+        // The version this build's core writes must not be withheld.
+        let current = load_str(&report_json(Some(siloscan_core::output::SCHEMA_VERSION))).unwrap();
+        assert!(!current.hides_match_text());
+    }
+
+    /// A version string that does not read as `MAJOR.MINOR` says nothing about
+    /// what the writer did, so it is treated as an older report.
+    #[test]
+    fn an_unreadable_version_is_treated_as_pre_redaction() {
+        for version in ["", "1", "1.x", "x.2", "1..2", " 1.2", "v1.2"] {
+            assert!(
+                !redacts_at_source(version),
+                "{version:?} must not be trusted"
+            );
+        }
+        assert!(redacts_at_source("1.2.7"), "a patch component is ignored");
     }
 
     #[test]

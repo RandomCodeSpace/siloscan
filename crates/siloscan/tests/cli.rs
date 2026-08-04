@@ -101,6 +101,31 @@ const COVERAGE_RULE: &str = concat!(
     "      min: 80\n",
 );
 
+/// A rule whose message is a terminal escape sequence: `ESC [ 2 K` erases the
+/// line the cursor sits on and `\r` returns to its start, so a report line
+/// written raw overwrites itself with whatever follows. A repository reaches
+/// this by pointing `rules` in its own `siloscan.toml` at a rule file it ships.
+const ESC_MESSAGE_RULE: &str = concat!(
+    "version: 1\n",
+    "rules:\n",
+    "  - id: test.needle\n",
+    "    severity: error\n",
+    "    message: \"\\e[2K\\rscan complete: 0 findings\"\n",
+    "    regex:\n",
+    "      pattern: 'needle'\n",
+);
+
+/// The second vector, and the one needing no config at all: a file name. Any
+/// byte but `/` and NUL is legal in one, so the escape arrives through the
+/// walker without the repository configuring anything.
+const ESC_PATH: &str = "ev\u{1b}[2Kil.js";
+
+/// The fingerprint `siloscan` 1.1.1 produced for the finding in [`ESC_PATH`],
+/// recorded before the terminal escaping existed. Escaping is a rendering
+/// concern, so this value may not move: a baseline written by an older release
+/// has to keep covering the same finding.
+const ESC_FINGERPRINT: &str = "a5421000a7dd76b51bd5b139caaf6746668891ada868f7b47d0437039dea245a";
+
 const SILO_CONFIG: &str = concat!(
     "[silos]\n",
     "api = [\"src/api/**\"]\n",
@@ -184,8 +209,13 @@ fn ast_fixture() -> (TempDir, TempDir) {
     (rules_dir(AST_DBG_RULE), ast_src())
 }
 
-/// Every file under the scan root's cache directory, sorted. Empty when the
-/// directory does not exist.
+/// Every cache entry under the scan root's cache directory, sorted. Empty when
+/// the directory does not exist.
+///
+/// The prune stamp is not an entry and is filtered out: it is bookkeeping about
+/// which build last swept the directory, and it appears or not depending on
+/// whether the run had a directory to write it into. Tests that care about it
+/// look for it by name.
 fn cache_entries(src: &Path) -> Vec<PathBuf> {
     fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
         let Ok(entries) = fs::read_dir(dir) else {
@@ -195,7 +225,7 @@ fn cache_entries(src: &Path) -> Vec<PathBuf> {
             let path = entry.path();
             if path.is_dir() {
                 walk(&path, out);
-            } else {
+            } else if path.extension().is_some_and(|ext| ext == "json") {
                 out.push(path);
             }
         }
@@ -238,6 +268,16 @@ fn run(rules: &Path, src: &Path, extra: &[&str]) -> Output {
 
 fn run_args(args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_siloscan"))
+        .args(args)
+        .output()
+        .expect("siloscan binary should run")
+}
+
+/// [`run_args`] with the process started inside `cwd`, so a test can tell a scan
+/// of the named tree from a scan of the working directory.
+fn run_args_in(cwd: &Path, args: &[&str]) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_siloscan"))
+        .current_dir(cwd)
         .args(args)
         .output()
         .expect("siloscan binary should run")
@@ -827,4 +867,271 @@ fn a_warm_run_over_a_hidden_tree_is_byte_identical_to_the_cold_one() {
     let mut keys: Vec<&str> = files.keys().map(String::as_str).collect();
     keys.sort_unstable();
     assert_eq!(keys, vec![".env", "src/a.rs"]);
+}
+
+/// One file whose name carries an escape sequence, matched by a rule whose
+/// message carries another: the two ways a scanned repository reaches the
+/// operator's terminal.
+fn esc_fixture() -> (TempDir, TempDir) {
+    (
+        rules_dir(ESC_MESSAGE_RULE),
+        src_dir(&[(ESC_PATH, "const a = needle;\n")]),
+    )
+}
+
+/// Written raw, `ESC [ 2 K` followed by a carriage return erases the report
+/// line and rewrites it, so a repository holding a live credential could render
+/// as a clean scan. The bytes are rendered instead, and the finding still shows.
+#[test]
+fn no_escape_byte_from_a_scanned_repository_reaches_the_terminal() {
+    let (rules, src) = esc_fixture();
+
+    let output = run(rules.path(), src.path(), &["--no-default-rules"]);
+
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    assert!(
+        !output.stdout.contains(&0x1b),
+        "stdout: {:?}",
+        stdout(&output)
+    );
+    assert!(
+        !output.stderr.contains(&0x1b),
+        "stderr: {:?}",
+        stderr(&output)
+    );
+    assert_eq!(
+        report_lines(&stdout(&output)),
+        vec![concat!(
+            "ev\\x1b[2Kil.js:1:11 error test.needle ",
+            "\\x1b[2K\\x0dscan complete: 0 findings"
+        )]
+    );
+}
+
+/// Escaping is a rendering concern and stops at the human format: the JSON
+/// report still carries the bytes, and the fingerprint an older release wrote
+/// into a baseline still identifies the same finding.
+#[test]
+fn escaping_leaves_the_json_report_and_its_fingerprints_where_they_were() {
+    let (rules, src) = esc_fixture();
+
+    let output = run(
+        rules.path(),
+        src.path(),
+        &["--no-default-rules", "--format", "json"],
+    );
+
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    let value: Value =
+        siloscan_core::serde_json::from_str(&stdout(&output)).expect("stdout should be JSON");
+
+    let finding = &value["findings"][0];
+    assert_eq!(finding["path"], ESC_PATH);
+    assert_eq!(finding["message"], "\u{1b}[2K\rscan complete: 0 findings");
+    assert_eq!(finding["fingerprint"], ESC_FINGERPRINT);
+
+    // JSON escapes C0 controls per RFC 8259, so the structured report carries
+    // the bytes without a terminal reading one.
+    assert!(!output.stdout.contains(&0x1b));
+}
+
+#[test]
+fn a_bare_invocation_scans_the_working_directory() {
+    let rules = rules_dir(MATCHING_RULE);
+    let src = src_dir(&[("a.rs", "needle\n")]);
+
+    let output = run_args_in(
+        src.path(),
+        &["--rules", path_str(&rules), "--no-default-rules"],
+    );
+
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    assert_eq!(
+        report_lines(&stdout(&output)),
+        vec!["a.rs:1:1 error test.needle needle found"]
+    );
+}
+
+#[test]
+fn a_scan_path_scans_that_tree_and_not_the_working_directory() {
+    let rules = rules_dir(MATCHING_RULE);
+    let src = src_dir(&[("a.rs", "needle\n")]);
+    let elsewhere = src_dir(&[("other.rs", "needle\n")]);
+
+    let output = run_args_in(
+        elsewhere.path(),
+        &[
+            path_str(&src),
+            "--rules",
+            path_str(&rules),
+            "--no-default-rules",
+        ],
+    );
+
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    assert_eq!(
+        report_lines(&stdout(&output)),
+        vec!["a.rs:1:1 error test.needle needle found"]
+    );
+}
+
+#[test]
+fn baseline_writes_into_the_tree_it_was_given_and_not_the_working_directory() {
+    let rules = rules_dir(MATCHING_RULE);
+    let src = src_dir(&[("a.rs", "needle\n")]);
+    let elsewhere = src_dir(&[("other.rs", "needle\n")]);
+
+    let output = run_args_in(
+        elsewhere.path(),
+        &[
+            "baseline",
+            path_str(&src),
+            "--rules",
+            path_str(&rules),
+            "--no-default-rules",
+        ],
+    );
+
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(stdout(&output).trim(), "baseline written: 1 entries");
+    assert!(src.path().join(".siloscan/baseline.json").is_file());
+    assert!(!elsewhere.path().join(".siloscan/baseline.json").exists());
+}
+
+#[test]
+fn test_checks_the_tree_it_was_given_and_not_the_working_directory() {
+    let rules = rules_dir(MATCHING_RULE);
+    let fixture = src_dir(&[("a.rs", "// siloscan-expect: test.needle\nlet x = needle;\n")]);
+    let elsewhere = src_dir(&[("other.rs", "needle\n")]);
+
+    let output = run_args_in(
+        elsewhere.path(),
+        &[
+            "test",
+            path_str(&fixture),
+            "--rules",
+            path_str(&rules),
+            "--no-default-rules",
+        ],
+    );
+
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(stdout(&output).trim(), "1 matched, 0 missing, 0 unexpected");
+}
+
+/// `siloscan <PATH> baseline` used to accept the working directory's findings
+/// as debt: the top-level positional took PATH and `BaselineArgs::path` kept its
+/// default of `.`. It is now refused, so no tree is baselined by accident.
+#[test]
+fn a_path_before_baseline_is_refused_and_baselines_nothing() {
+    let rules = rules_dir(MATCHING_RULE);
+    let src = src_dir(&[("a.rs", "needle\n")]);
+    let elsewhere = src_dir(&[("other.rs", "needle\n")]);
+
+    let output = run_args_in(
+        elsewhere.path(),
+        &[
+            path_str(&src),
+            "baseline",
+            "--rules",
+            path_str(&rules),
+            "--no-default-rules",
+        ],
+    );
+
+    assert_eq!(output.status.code(), Some(2));
+    let text = stderr(&output);
+    assert!(text.contains("siloscan baseline <PATH>"), "stderr: {text}");
+    assert!(!src.path().join(".siloscan/baseline.json").exists());
+    assert!(!elsewhere.path().join(".siloscan/baseline.json").exists());
+    assert!(stdout(&output).is_empty(), "stdout: {}", stdout(&output));
+}
+
+#[test]
+fn a_path_before_test_is_refused() {
+    let rules = rules_dir(MATCHING_RULE);
+    let src = src_dir(&[("a.rs", "needle\n")]);
+    let fixture = src_dir(&[("a.rs", "// siloscan-expect: test.needle\nlet x = needle;\n")]);
+
+    let output = run_args(&[
+        path_str(&src),
+        "test",
+        path_str(&fixture),
+        "--rules",
+        path_str(&rules),
+        "--no-default-rules",
+    ]);
+
+    assert_eq!(output.status.code(), Some(2));
+    let text = stderr(&output);
+    assert!(text.contains("siloscan test <PATH>"), "stderr: {text}");
+    assert!(stdout(&output).is_empty(), "stdout: {}", stdout(&output));
+}
+
+/// The usage line used to read `siloscan [OPTIONS] [PATH] [COMMAND]`, which
+/// documented the refused order as a supported one.
+#[test]
+fn help_documents_only_the_forms_that_work() {
+    let output = run_args(&["--help"]);
+
+    assert_eq!(output.status.code(), Some(0));
+    let text = stdout(&output);
+    assert!(text.contains("siloscan [OPTIONS] [PATH]"), "stdout: {text}");
+    assert!(text.contains("siloscan <COMMAND>"), "stdout: {text}");
+    assert!(!text.contains("[PATH] [COMMAND]"), "stdout: {text}");
+}
+
+/// An asset-heavy repository must not bury stderr under one warning per file.
+///
+/// The record is not dropped - every skipped file is still in the JSON report,
+/// which is the point of reporting them at all - but the human channel names a
+/// handful and counts the rest. 200 PNGs was 200 lines; it is now 11.
+#[test]
+fn a_binary_heavy_tree_summarises_its_skip_warnings() {
+    const BINARIES: usize = 200;
+
+    let rules = rules_dir(MATCHING_RULE);
+    let src = src_dir(&[("a.rs", "needle\n")]);
+    for index in 0..BINARIES {
+        fs::write(
+            src.path().join(format!("asset{index:03}.png")),
+            b"\x89PNG\r\n\x1a\n\0binary",
+        )
+        .unwrap();
+    }
+
+    let output = run(rules.path(), src.path(), &["--no-default-rules"]);
+    let text = stderr(&output);
+    let warnings = text
+        .lines()
+        .filter(|line| line.starts_with("warning: skipped "))
+        .count();
+
+    assert!(
+        warnings <= 10,
+        "{warnings} individual warnings for {BINARIES} binaries:\n{text}"
+    );
+    assert!(
+        text.contains(&format!("and {} more files skipped", BINARIES - warnings)),
+        "the remainder must be counted, not dropped:\n{text}"
+    );
+
+    // The sample is the head of a path-sorted list, so it is the same on every
+    // run of the same tree.
+    let again = stderr(&run(rules.path(), src.path(), &["--no-default-rules"]));
+    assert_eq!(again, text, "the summary must be deterministic");
+    assert!(text.contains("asset000.png"), "{text}");
+
+    // The full list is still machine-readable.
+    let json = run(
+        rules.path(),
+        src.path(),
+        &["--no-default-rules", "--format", "json"],
+    );
+    let report: Value = siloscan_core::serde_json::from_str(&stdout(&json)).unwrap();
+    assert_eq!(
+        report["skipped"].as_array().unwrap().len(),
+        BINARIES,
+        "the JSON record is what the warnings summarise"
+    );
 }

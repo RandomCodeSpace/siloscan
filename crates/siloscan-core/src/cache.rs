@@ -12,14 +12,24 @@
 //! fingerprints from the wrong convention, which no amount of downstream
 //! sorting could repair.
 //!
-//! Entries live inside the scanned tree and are never evicted, so they hold no
-//! match text: a finding's match is frequently the secret that was found.
-//! Only its length is stored, and the text is read back out of the scanned file
-//! itself. A `.gitignore` is written beside the cache directory so entries
-//! cannot be committed to the scanned repository.
+//! Entries live inside the scanned tree and hold no match text: a finding's
+//! match is frequently the secret that was found. Only its length is stored,
+//! and the text is read back out of the scanned file itself. A `.gitignore` is
+//! written beside the cache directory so entries cannot be committed to the
+//! scanned repository.
+//!
+//! The crate version inside an entry makes it a miss after an upgrade, but a
+//! miss is not a removal: without one, every release left the whole of the
+//! previous release's cache on disk for good. [`Cache::open`] therefore prunes
+//! entries stamped with a different version, once, up front. The pass is
+//! tolerant by construction - it only removes a file that says, in its own
+//! bytes, which build wrote it and names another one. Anything unreadable,
+//! unrecognised or foreign is left exactly where it is, and a removal that
+//! fails is ignored: a cache that cannot be tidied is still a correct cache.
 
 use std::fmt::Write as _;
 use std::fs;
+use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -38,6 +48,21 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// How much of the scope hash goes into the entry file name.
 const SCOPE_HASH_PREFIX: usize = 16;
+
+/// The bytes every entry this build writes starts with: `version` is the first
+/// field of [`StoredEntry`], and serde emits fields in declaration order.
+const VERSION_PREFIX: &[u8] = b"{\"version\":\"";
+
+/// How much of an entry is read to recover the version it declares. The field
+/// sits at the very front, so this is a single short read per file rather than
+/// a parse of the whole document.
+const VERSION_PROBE_BYTES: u64 = 128;
+
+/// Stamp naming the build that last pruned this cache directory. Its presence
+/// with this build's version is the evidence that no entry from another build
+/// is left, which is what makes the prune skippable. It lives inside
+/// `.siloscan/cache`, which the `.gitignore` below already covers.
+const STAMP_NAME: &str = ".version";
 
 /// Written to `.siloscan/.gitignore`. Scoped to `cache/` so a committed
 /// baseline beside it stays visible to git.
@@ -175,13 +200,24 @@ pub struct Cache {
 }
 
 impl Cache {
-    /// Bind a cache to a scan root, a rule set and a path convention. Nothing
-    /// touches the file system until the first [`Cache::put`].
+    /// Bind a cache to a scan root, a rule set and a path convention, and drop
+    /// whatever a different build left behind (see [`prune`]). Nothing is
+    /// created here beyond the prune stamp: an absent cache directory is nothing
+    /// to prune and nothing to write until the first [`Cache::put`].
+    ///
+    /// The prune is skipped when the stamp already names this build. It has to
+    /// be, because it is not free: the pass opens and reads the head of every
+    /// entry in the directory, which on a 20k-entry cache is a measured 0.4s
+    /// added to every scan, forever, to find nothing. The stamp turns that into
+    /// one `read` on the steady path and leaves the full pass for the run after
+    /// an upgrade, which is the only run that can find anything.
     pub fn open(scan_root: &Path, rules: &RuleSet, scope: &PathScope) -> Cache {
         let rules_hash = rules.source_hash();
         let path_scope = scope.discriminator();
+        let root = scan_root.join(CACHE_DIR);
+        prune_if_stale(&root);
         Cache {
-            root: scan_root.join(CACHE_DIR),
+            root,
             scope_hash: scope_hash(&rules_hash, &path_scope),
             rules_hash,
             path_scope,
@@ -304,6 +340,111 @@ impl Cache {
                 .join(format!("{content_hash}-{prefix}.json")),
         )
     }
+}
+
+/// Drop every cache entry under `scan_root` that a different build wrote, and
+/// report how many went.
+///
+/// This is what [`Cache::open`] does for the scan it is opening; it is exposed
+/// so the same tidy-up can be asked for on its own. It removes entries across
+/// every rule set and path convention in the directory, not just the caller's:
+/// a stale entry is stale whoever wrote it.
+///
+/// Unlike the open path this always walks the directory, stamp or no stamp: a
+/// user who asked for a prune asked for the pass, not for this build's opinion
+/// about whether it would find anything.
+pub fn prune(scan_root: &Path) -> usize {
+    let root = scan_root.join(CACHE_DIR);
+    let removed = prune_dir(&root);
+    write_stamp(&root);
+    removed
+}
+
+/// Prune unless the stamp says this build already did.
+///
+/// Every failure mode leads to pruning: no stamp, an unreadable stamp, a stamp
+/// naming another version. The stamp is only ever trusted to say "this build has
+/// already swept here", never to say the opposite, so a missing or corrupt one
+/// costs a pass that was correct to run anyway. It is written after the pass, so
+/// a prune that dies halfway leaves no stamp and the next open retries.
+fn prune_if_stale(root: &Path) {
+    if fs::read_to_string(root.join(STAMP_NAME)).is_ok_and(|stamp| stamp.trim() == VERSION) {
+        return;
+    }
+    prune_dir(root);
+    write_stamp(root);
+}
+
+/// Record this build as the last to sweep `root`.
+///
+/// Written only into a cache directory that already exists: a scan of a tree
+/// with no cache must not create one, and the first [`Cache::put`] stamps it
+/// through the next [`Cache::open`]. Failures are ignored - an unwritable stamp
+/// costs a prune pass per scan, which is only where this started.
+fn write_stamp(root: &Path) {
+    if root.is_dir() {
+        let _ = fs::write(root.join(STAMP_NAME), format!("{VERSION}\n"));
+    }
+}
+
+/// One pass over `<root>/<shard>/*.json`, removing the entries that name a
+/// version other than this build's. Returns how many were removed.
+///
+/// Every step is permissive. A directory that cannot be listed ends the pass, a
+/// shard that cannot be listed is skipped, a file that is not an entry is
+/// skipped, and a removal that fails is dropped on the floor. Nothing here is
+/// allowed to turn a cache into a scan failure, and nothing here touches a file
+/// that has not identified itself as this crate's. A removal that failed is not
+/// counted: the number is what left, not what was attempted.
+fn prune_dir(root: &Path) -> usize {
+    let mut removed = 0;
+    let Ok(shards) = fs::read_dir(root) else {
+        return removed;
+    };
+    for shard in shards.flatten() {
+        if !shard.file_type().is_ok_and(|kind| kind.is_dir()) {
+            continue;
+        }
+        let Ok(entries) = fs::read_dir(shard.path()) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            // Temporary files belong to a writer that is still running.
+            if path.extension().is_none_or(|ext| ext != "json") {
+                continue;
+            }
+            if entry_version(&path).is_some_and(|version| version != VERSION)
+                && fs::remove_file(&path).is_ok()
+            {
+                removed += 1;
+            }
+        }
+    }
+    removed
+}
+
+/// The version an entry declares, read from its first [`VERSION_PROBE_BYTES`]
+/// rather than by parsing it.
+///
+/// `None` means "not an entry this build recognises": the file could not be
+/// opened or read, does not begin the way [`StoredEntry`] serializes, or has no
+/// closing quote on its version within the probe. Every one of those is a
+/// reason to leave the file alone rather than a reason to delete it. The
+/// comparison is on raw bytes because a crate version is a semver string, which
+/// carries no JSON escape and no multi-byte character.
+fn entry_version(path: &Path) -> Option<String> {
+    let file = fs::File::open(path).ok()?;
+    let mut head = Vec::with_capacity(VERSION_PROBE_BYTES as usize);
+    file.take(VERSION_PROBE_BYTES).read_to_end(&mut head).ok()?;
+
+    let rest = head.strip_prefix(VERSION_PREFIX)?;
+    let end = rest.iter().position(|byte| *byte == b'"')?;
+    let version = rest.get(..end)?;
+    if version.contains(&b'\\') {
+        return None;
+    }
+    std::str::from_utf8(version).ok().map(str::to_string)
 }
 
 /// Hex SHA-256 of the rules hash and the path scope, NUL-separated so no pair
@@ -743,6 +884,230 @@ mod tests {
             cache.put(bad, &entry());
         }
         assert!(!cache.root().exists());
+    }
+
+    /// Write an entry byte-for-byte as `version` would have written it, so the
+    /// prune pass sees exactly what an older release left behind. The rewrite
+    /// asserts the layout the probe depends on: an entry opens with its own
+    /// version field.
+    fn seed_foreign_entry(cache: &Cache, content_hash: &str, version: &str) -> PathBuf {
+        cache.put(content_hash, &entry());
+        let path = cache.entry_path(content_hash).unwrap();
+        let text = String::from_utf8(fs::read(&path).unwrap()).unwrap();
+        let rewritten = text.replacen(
+            &format!("{{\"version\":\"{VERSION}\""),
+            &format!("{{\"version\":\"{version}\""),
+            1,
+        );
+        assert_ne!(rewritten, text, "an entry must open with its version");
+        fs::write(&path, rewritten.as_bytes()).unwrap();
+        path
+    }
+
+    /// The whole point of the pass: an upgrade must not leave the previous
+    /// release's entries on disk for ever, and must not take this one's with
+    /// them.
+    #[test]
+    fn open_removes_entries_written_by_another_version() {
+        let dir = tempdir();
+        let cache = Cache::open(dir.path(), &ruleset("a"), &PathScope::ScanRoot);
+        // Opened before anything is seeded: opening prunes, which is the
+        // behaviour under test and would otherwise clear the fixture early.
+        let other_rules = Cache::open(dir.path(), &ruleset("b"), &PathScope::ScanRoot);
+
+        let mine = hash();
+        cache.put(&mine, &entry());
+        let theirs = seed_foreign_entry(&cache, &content_hash(b"older release"), "0.0.0-old");
+        // A stale entry from a different rule set is stale all the same.
+        let other_scope = seed_foreign_entry(&other_rules, &content_hash(b"older too"), "1.0.0");
+
+        assert!(theirs.exists());
+        assert!(other_scope.exists());
+
+        let reopened = Cache::open(dir.path(), &ruleset("a"), &PathScope::ScanRoot);
+
+        assert!(!theirs.exists(), "a foreign-version entry survived open");
+        assert!(!other_scope.exists(), "only this cache's scope was pruned");
+        assert!(
+            reopened.entry_path(&mine).unwrap().exists(),
+            "this build's entry was removed"
+        );
+        assert!(reopened.get(&mine, &content()).is_some());
+    }
+
+    /// Removal is only ever justified by a file that names another build. A
+    /// file that says nothing intelligible says nothing about its version
+    /// either, and deleting it would be this pass guessing.
+    #[test]
+    fn unreadable_and_foreign_files_are_left_in_place() {
+        let dir = tempdir();
+        let cache = Cache::open(dir.path(), &ruleset("a"), &PathScope::ScanRoot);
+        cache.put(&hash(), &entry());
+        let shard = cache.root().join(&hash()[..2]);
+
+        let corrupt = shard.join("corrupt.json");
+        let truncated = shard.join("truncated.json");
+        let unrelated = shard.join("notes.txt");
+        let temp = shard.join(temp_name(&hash()));
+        let long = shard.join("padded.json");
+        fs::write(&corrupt, b"{ not json").unwrap();
+        fs::write(&truncated, b"{\"version\":\"9.9.9").unwrap();
+        fs::write(&unrelated, b"whatever").unwrap();
+        fs::write(&temp, b"{\"version\":\"0.0.0\"}").unwrap();
+        // A version that runs past the probe window is unreadable, not foreign.
+        fs::write(&long, format!("{{\"version\":\"{}\"}}", "9".repeat(200))).unwrap();
+
+        Cache::open(dir.path(), &ruleset("a"), &PathScope::ScanRoot);
+
+        for path in [&corrupt, &truncated, &unrelated, &temp, &long] {
+            assert!(path.exists(), "{} was removed", path.display());
+        }
+        assert!(cache.get(&hash(), &content()).is_some(), "still a hit");
+    }
+
+    #[test]
+    fn pruning_is_idempotent_and_creates_nothing() {
+        let dir = tempdir();
+
+        // Nothing on disk yet: open must not conjure the directory.
+        let cache = Cache::open(dir.path(), &ruleset("a"), &PathScope::ScanRoot);
+        assert!(!cache.root().exists());
+        prune(dir.path());
+        assert!(!cache.root().exists());
+
+        cache.put(&hash(), &entry());
+        let stale = seed_foreign_entry(&cache, &content_hash(b"older release"), "0.0.0-old");
+        let mine = cache.entry_path(&hash()).unwrap();
+        let bytes = fs::read(&mine).unwrap();
+
+        for _ in 0..3 {
+            prune(dir.path());
+            assert!(!stale.exists());
+            assert_eq!(
+                fs::read(&mine).unwrap(),
+                bytes,
+                "a live entry was rewritten"
+            );
+        }
+        assert!(cache.get(&hash(), &content()).is_some());
+    }
+
+    /// The prune pass opens every entry in the directory, so on a large cache
+    /// it is the most expensive thing about opening one. A stamp naming this
+    /// build is proof the sweep already happened, and the sweep is skipped.
+    #[test]
+    fn a_current_stamp_skips_the_prune() {
+        let dir = tempdir();
+        let cache = Cache::open(dir.path(), &ruleset("a"), &PathScope::ScanRoot);
+        cache.put(&hash(), &entry());
+        let stale = seed_foreign_entry(&cache, &content_hash(b"older release"), "0.0.0-old");
+
+        // Claim the sweep already happened. Nothing else does this - the point
+        // is that the stamp alone is what open trusts.
+        fs::write(cache.root().join(STAMP_NAME), format!("{VERSION}\n")).unwrap();
+        Cache::open(dir.path(), &ruleset("a"), &PathScope::ScanRoot);
+        assert!(stale.exists(), "a current stamp must skip the pass");
+
+        // An explicit prune ignores the stamp: the user asked for the pass.
+        assert_eq!(prune(dir.path()), 1);
+        assert!(!stale.exists());
+    }
+
+    /// Every way of not having a usable stamp leads to the same place: sweep,
+    /// then stamp. The stamp is trusted to skip work, never to authorise it.
+    #[test]
+    fn an_absent_or_foreign_stamp_prunes_and_then_stamps() {
+        for stamp in [
+            None,
+            Some(""),
+            Some("0.0.0-old"),
+            Some("\u{0}\u{1}not a version"),
+        ] {
+            let dir = tempdir();
+            let cache = Cache::open(dir.path(), &ruleset("a"), &PathScope::ScanRoot);
+            cache.put(&hash(), &entry());
+            let stale = seed_foreign_entry(&cache, &content_hash(b"older release"), "0.0.0-old");
+
+            let path = cache.root().join(STAMP_NAME);
+            match stamp {
+                Some(text) => fs::write(&path, text).unwrap(),
+                None => {
+                    let _ = fs::remove_file(&path);
+                }
+            }
+
+            Cache::open(dir.path(), &ruleset("a"), &PathScope::ScanRoot);
+
+            assert!(!stale.exists(), "stamp {stamp:?} must not skip the pass");
+            assert_eq!(
+                fs::read_to_string(&path).unwrap().trim(),
+                VERSION,
+                "the pass must leave this build's stamp"
+            );
+            // The live entry is untouched, stamp or no stamp.
+            assert!(cache.get(&hash(), &content()).is_some());
+        }
+    }
+
+    /// A tree with no cache directory must not grow one, so there is nowhere to
+    /// put a stamp and the next open sweeps an empty directory. That is the
+    /// cheap case anyway.
+    #[test]
+    fn a_missing_cache_directory_is_not_created_by_the_stamp() {
+        let dir = tempdir();
+        let cache = Cache::open(dir.path(), &ruleset("a"), &PathScope::ScanRoot);
+        assert!(!cache.root().exists());
+        assert_eq!(prune(dir.path()), 0);
+        assert!(!cache.root().exists(), "prune created a cache directory");
+    }
+
+    /// The count is what the CLI prints, so it has to be the number of entries
+    /// that actually left.
+    #[test]
+    fn prune_counts_the_entries_it_removed() {
+        let dir = tempdir();
+        let cache = Cache::open(dir.path(), &ruleset("a"), &PathScope::ScanRoot);
+        cache.put(&hash(), &entry());
+        assert_eq!(prune(dir.path()), 0, "nothing foreign yet");
+
+        for (index, version) in ["0.0.1", "0.9.0", "1.0.0"].iter().enumerate() {
+            seed_foreign_entry(
+                &cache,
+                &content_hash(format!("old {index}").as_bytes()),
+                version,
+            );
+        }
+        assert_eq!(prune(dir.path()), 3);
+        assert_eq!(prune(dir.path()), 0, "a second pass finds nothing");
+        assert!(cache.get(&hash(), &content()).is_some());
+    }
+
+    #[test]
+    fn entry_version_reads_the_declared_version_only() {
+        let dir = tempdir();
+        let cache = Cache::open(dir.path(), &ruleset("a"), &PathScope::ScanRoot);
+        cache.put(&hash(), &entry());
+
+        assert_eq!(
+            entry_version(&cache.entry_path(&hash()).unwrap()).as_deref(),
+            Some(VERSION),
+            "an entry this build wrote must name this build"
+        );
+        assert_eq!(entry_version(&dir.path().join("absent.json")), None);
+
+        let probe = |bytes: &[u8]| {
+            let path = dir.path().join("probe.json");
+            fs::write(&path, bytes).unwrap();
+            entry_version(&path)
+        };
+        assert_eq!(
+            probe(b"{\"version\":\"1.2.3\",\"rest\":1}").as_deref(),
+            Some("1.2.3")
+        );
+        assert_eq!(probe(b"{\"version\":\"\"}").as_deref(), Some(""));
+        assert_eq!(probe(b"{ \"version\": \"1.2.3\" }"), None, "not our shape");
+        assert_eq!(probe(b"{\"version\":\"1.2\\\"3\"}"), None, "escaped quote");
+        assert_eq!(probe(b""), None);
     }
 
     #[test]

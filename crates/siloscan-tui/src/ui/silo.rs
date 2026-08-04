@@ -15,6 +15,8 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
+use siloscan_core::findings::sanitize_for_terminal;
+
 use crate::state::{AppState, SiloMatrix};
 use crate::ui::LayoutMap;
 use crate::ui::theme;
@@ -352,7 +354,7 @@ fn draw_detail(
             let finding = &row.finding;
             Line::from(vec![
                 Span::styled(
-                    format!("{}:{}", finding.path, finding.line),
+                    format!("{}:{}", sanitize_for_terminal(&finding.path), finding.line),
                     theme::accent(),
                 ),
                 Span::raw("  "),
@@ -367,9 +369,13 @@ fn draw_detail(
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
-/// Truncate to `width` characters without splitting one.
+/// Truncate to `width` characters without splitting one. Silo names come from
+/// the repository's config, so they are sanitized before the cut.
 fn fit(text: &str, width: u16) -> String {
-    text.chars().take(width as usize).collect()
+    sanitize_for_terminal(text)
+        .chars()
+        .take(width as usize)
+        .collect()
 }
 
 pub fn handle_key_silo(state: &mut AppState, key: KeyEvent) {
