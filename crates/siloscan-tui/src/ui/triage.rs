@@ -19,7 +19,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Row, Table};
 
-use siloscan_core::findings::Finding;
+use siloscan_core::findings::{Finding, sanitize_for_terminal};
 use siloscan_core::metrics::DUPLICATE_BLOCK_RULE_ID;
 use siloscan_core::output::REDACTED_MATCH;
 use siloscan_core::rules::Severity;
@@ -827,7 +827,12 @@ fn column_widths(total: u16, rule_w: u16) -> [u16; 5] {
 }
 
 /// Truncate the middle, keeping the tail: `core/.../app.js:1`.
+///
+/// Sanitizing happens here, before the cut, because it is what decides how wide
+/// the text is: an escape byte becomes four characters, and truncating first
+/// would let a control byte through in whatever survived the cut.
 fn middle_truncate(text: &str, width: usize) -> String {
+    let text = &*sanitize_for_terminal(text);
     let chars: Vec<char> = text.chars().collect();
     if chars.len() <= width {
         return text.to_string();
@@ -842,8 +847,10 @@ fn middle_truncate(text: &str, width: usize) -> String {
     format!("{head}...{tail}")
 }
 
-/// Truncate the tail, marking the cut with an ellipsis.
+/// Truncate the tail, marking the cut with an ellipsis. Sanitized before the
+/// cut, for the reason [`middle_truncate`] gives.
 fn tail_truncate(text: &str, width: usize) -> String {
+    let text = &*sanitize_for_terminal(text);
     let count = text.chars().count();
     if count <= width {
         return text.to_string();
@@ -889,7 +896,10 @@ fn draw_code(frame: &mut Frame, state: &AppState, area: Rect) {
             inner.height as usize,
             state.scroll.code,
         ),
-        Err(reason) => vec![Line::from(format!("source unavailable: {reason}"))],
+        Err(reason) => vec![Line::from(format!(
+            "source unavailable: {}",
+            sanitize_for_terminal(&reason)
+        ))],
     };
     frame.render_widget(Paragraph::new(lines), inner);
 }
@@ -938,17 +948,23 @@ fn code_lines(source: &str, finding: &Finding, height: usize, scroll: usize) -> 
             // the severity stays readable inside the highlight.
             let color = theme::severity_color(finding.severity);
             let context = Style::default().fg(color);
+            // Sanitizing comes after `split_span`: the split is by byte offset
+            // into the file's own bytes, and escaping one of them to four
+            // characters would move every offset behind it.
             lines.push(Line::from(vec![
                 gutter,
-                Span::styled(before.to_string(), context),
+                Span::styled(sanitize_for_terminal(before).into_owned(), context),
                 Span::styled(
-                    matched.to_string(),
+                    sanitize_for_terminal(matched).into_owned(),
                     context.add_modifier(Modifier::REVERSED | Modifier::BOLD),
                 ),
-                Span::styled(after.to_string(), context),
+                Span::styled(sanitize_for_terminal(after).into_owned(), context),
             ]));
         } else {
-            lines.push(Line::from(vec![gutter, Span::raw(text.to_string())]));
+            lines.push(Line::from(vec![
+                gutter,
+                Span::raw(sanitize_for_terminal(text).into_owned()),
+            ]));
         }
     }
     lines
@@ -1353,6 +1369,64 @@ mod tests {
             out.push('\n');
         }
         out
+    }
+
+    /// Nothing a scanned repository controls may reach the terminal as a
+    /// control byte. The path, the rule id and the message are all drawn from
+    /// the finding, and the code pane draws the file's own bytes, so all four
+    /// are hostile here at once.
+    #[test]
+    fn no_control_byte_from_a_finding_or_its_source_reaches_the_buffer() {
+        let root = temp_root("escapes");
+        // The file the code pane will read, with an escape on the finding's own
+        // line and on a neighbour, so both the highlighted and the plain branch
+        // of `code_lines` are exercised.
+        fs::write(
+            root.join("src/a.rs"),
+            "fn main() {\n    let token = \"needle\";\u{1b}[2K\n    \u{1b}[Aprintln!();\n}\n",
+        )
+        .unwrap();
+
+        let mut state = state(root.clone());
+        state.rows[0].finding.path = "src/a.rs".to_string();
+        state.rows[0].finding.message = "sec\u{1b}[2K\rret in \u{7f}file".to_string();
+        state.rows[0].finding.rule_id = "secret.\u{1b}[31mtoken".to_string();
+        state.selected = 0;
+
+        let (buffer, _) = render(&state, 120, 30);
+        let text = dump(&buffer);
+
+        // `\n` is `dump`'s own row separator and never a cell's content.
+        assert!(
+            !text
+                .chars()
+                .filter(|ch| *ch != '\n')
+                .any(|ch| matches!(ch, '\u{00}'..='\u{1f}' | '\u{7f}'..='\u{9f}')),
+            "a control byte reached the screen: {text:?}"
+        );
+        // The escape is shown, not dropped: a suppressed byte would hide that
+        // the repository tried.
+        assert!(text.contains("\\x1b"), "{text}");
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// The block title is built by hand from the finding's path rather than
+    /// through either truncation helper, so it gets its own case.
+    #[test]
+    fn the_code_pane_title_sanitizes_the_path() {
+        let root = temp_root("title");
+        let mut state = state(root.clone());
+        state.rows[0].finding.path = "src/\u{1b}[2Ka.rs".to_string();
+        state.selected = 0;
+
+        let (buffer, _) = render(&state, 120, 30);
+        let text = dump(&buffer);
+
+        assert!(!text.contains('\u{1b}'), "{text:?}");
+        assert!(text.contains("\\x1b"), "{text}");
+
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]

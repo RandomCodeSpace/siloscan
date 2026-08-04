@@ -312,10 +312,117 @@ semantic graph, cache, baseline, metrics, outputs), `siloscan` (CLI, also
 built as `ss`), `siloscan-tui` (ratatui interface). Grammars sit behind
 per-language cargo features (`lang-all` by default). The incremental cache
 (`.siloscan/cache/`, content-hash keyed) keeps rescans fast; `--no-cache`
-bypasses it.
+bypasses it, and `siloscan cache prune PATH` drops entries left behind by an
+older build when no scan is coming to do it.
 
 The full design record - every decision with its alternatives - lives in the
 [planning map](https://github.com/RandomCodeSpace/siloscan/issues/1).
+
+## Default pack coverage
+
+The embedded secrets ruleset is derived from [gitleaks](https://github.com/gitleaks/gitleaks)
+v8.30.1 (MIT); see [NOTICE](NOTICE) for full attribution.
+
+Three high-noise gitleaks rules are intentionally omitted:
+- `generic-api-key`: pattern's compiled regex exceeds the Rust regex crate's 10 MiB size limit
+- `pypi-upload-token`: same regex size limit
+- `vault-batch-token`: same regex size limit
+
+If you need a generic high-entropy secret rule, write a `secret:` rule with a pattern
+narrower than the gitleaks version, a minimal keyword requirement, or both. Example:
+
+```yaml
+- id: secrets.high-entropy-token
+  severity: warning
+  message: "high-entropy string without obvious use"
+  secret:
+    pattern: '[a-f0-9]{64,}'
+    entropy: 4.5
+    keywords: [token, key, secret]
+```
+
+## Scanner scope and ignore semantics
+
+A scan reads the ignore files inside the tree it was pointed at, and no others.
+`.gitignore` and `.ignore` files at or below `PATH` are honored, whether or not
+a `.git` directory exists. Ignore files in parent directories, git's global
+`core.excludesFile`, and `PATH/.git/info/exclude` are deliberately **not**
+consulted.
+
+That is a narrower rule than "files ignored in version control stay ignored in
+the scan", and the difference is the point: the three sources left out all live
+outside the tree under review. `core.excludesFile` belongs to whoever invoked
+the scan, `.git/info/exclude` is per-clone and untracked, and a parent
+directory's `.gitignore` is not part of the tree at all. Consulting them makes
+the same commit scan differently on two machines. Leaving them out makes a scan
+self-contained and reproducible.
+
+**Behavior change from 1.1.1**: those three sources used to affect the walk and
+no longer do. Each is recoverable with the matching `--respect-*` flag below.
+
+### Scanning a subdirectory
+
+The rule has a consequence worth stating plainly. A scan rooted below the
+repository root only sees ignore files at or below that root, so a repository
+whose `.gitignore` sits at the top does not prune anything for
+`siloscan services/api`. The scan will descend into build output, `node_modules`,
+`target/`, `vendor/` and anything else the root `.gitignore` would have
+excluded - slower, and noisy with findings from code nobody wrote.
+
+Three ways out, in the order worth trying:
+
+- scan from the repository root and narrow with a rule's `paths` envelope or a
+  silo config;
+- put a `.gitignore` or `.ignore` inside the directory being scanned, which
+  makes the exclusion part of the tree and therefore reproducible;
+- pass `--respect-parent-ignores`, which restores the 1.1.1 behavior for this
+  source and reintroduces its machine-dependence.
+
+Every ignore source is a flag, on both `siloscan` and `siloscan-tui`:
+
+| Flag | Effect |
+| --- | --- |
+| `--no-ignore` | Scan every file: no `.gitignore`, no `.ignore` |
+| `--no-gitignore` | Ignore `.ignore` files but not `.gitignore` files |
+| `--respect-parent-ignores` | Also honor ignore files above the scan root |
+| `--respect-git-exclude` | Also honor `PATH/.git/info/exclude` |
+| `--respect-global-gitignore` | Also honor git's global `core.excludesFile` |
+
+The three `--respect-*` flags restore the 1.1.1 walk, one source at a time.
+Each one makes the scan depend on something outside the tree it was pointed
+at, which is why none is on by default, and why `--no-ignore` does not turn
+them on either - "scan everything under the root" is not a reason to start
+reading files above it.
+
+When a boundary rule is loaded, a file over `[limits] max_parse_bytes`
+(default 2 MiB) is not dropped and does not halt the scan. It is entered in the
+import graph as a node with no imports of its own: imports *of* it still
+resolve, so other files' violations are still reported, while the imports it
+makes are not analysed. The skip is recorded per file in the report's `skipped`
+array, with a reason naming the file's size and the cap. The reason names no
+rule, because the decision is per file rather than per rule - the cap is a
+property of the file, and the same file is skipped whichever rule wanted its
+tree.
+
+Binary files and non-UTF-8 files are detected and skipped. Every skipped file is
+recorded in the report's `skipped` array with a reason, so findings are never
+silently omitted.
+
+### Skip reporting caps
+
+The `skipped` array in the JSON report is never capped: it is the complete
+record, and consumers that care read it there. The two human- and
+tool-facing summaries are bounded, because an asset-heavy repository can skip
+tens of thousands of files:
+
+| Channel | Cap | Behavior past the cap |
+| --- | --- | --- |
+| CLI stderr | 10 individual `warning: skipped` lines | one `warning: ... and N more files skipped` line |
+| SARIF `siloscan/skipped` | 100 entries | a `siloscan/skippedTruncated` count of the remainder |
+| JSON `skipped` | none | every skipped file, always |
+
+Both caps keep the head of a list the scanner already sorted by path, so the
+sample and the count are identical across runs of the same tree.
 
 ## License
 

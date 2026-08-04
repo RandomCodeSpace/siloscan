@@ -10,10 +10,13 @@ use std::thread;
 use siloscan_core::baseline::Baseline;
 use siloscan_core::config::Config;
 use siloscan_core::findings::Finding;
+use siloscan_core::metrics::DUPLICATE_BLOCK_RULE_ID;
+use siloscan_core::output::REDACTED_MATCH;
 use siloscan_core::rules::RuleSet;
 use siloscan_core::scan::{self, Progress, ScanOptions, ScanReport};
+use siloscan_core::walk::IgnoreOptions;
 
-use crate::snapshot::SnapshotData;
+use crate::snapshot::{HIDDEN_MATCH_NOTE, SnapshotData};
 use crate::state::{AppState, FindingRow, Scroll, Status};
 use crate::ui::dashboard;
 
@@ -35,6 +38,7 @@ pub fn spawn_scan(
     rules: Arc<RuleSet>,
     baseline: Option<Arc<Baseline>>,
     config: Option<Arc<Config>>,
+    ignore: IgnoreOptions,
     tx: Sender<AppEvent>,
 ) {
     thread::spawn(move || {
@@ -42,11 +46,12 @@ pub fn spawn_scan(
         let mut on_progress = |progress: Progress| {
             let _ = progress_tx.send(AppEvent::Progress(progress));
         };
-        let options = ScanOptions {
-            baseline: baseline.as_deref(),
-            config: config.as_deref(),
-            ..Default::default()
-        };
+        // `ScanOptions` is `#[non_exhaustive]`: built from its default, not as
+        // a struct literal.
+        let mut options = ScanOptions::default();
+        options.baseline = baseline.as_deref();
+        options.config = config.as_deref();
+        options.ignore = ignore;
         let event = match scan::scan_opts(&root, &rules, &options, &mut on_progress) {
             Ok(report) => AppEvent::ScanDone(Box::new(report)),
             Err(e) => AppEvent::Failed(e),
@@ -99,8 +104,41 @@ pub fn apply_report(state: &mut AppState, report: ScanReport, config: Option<&Co
 /// boundary edges - the silo pair behind a violation is not recoverable from a
 /// finding - so the silo matrix is empty in snapshot mode, by construction.
 /// `snapshot` is set last: it is what every live-only action is gated on.
+///
+/// A pre-1.2 report predates redaction at the writer, so its `matched` fields
+/// may be the credentials themselves, and snapshot mode has no rule set to tell
+/// which ones are. Every match is therefore replaced by [`REDACTED_MATCH`]
+/// here, in the data, rather than at each pane that draws it: the panes read
+/// `matched` for several purposes beyond the match column, and a rule that only
+/// covers the drawing code is a rule the next pane forgets.
+///
+/// One rule is exempt, and only one. [`DUPLICATE_BLOCK_RULE_ID`] is a reserved
+/// id: `rules::load_str` refuses to compile a user rule that claims it, so a
+/// finding carrying it cannot have come from anywhere but the duplication
+/// engine, whose `matched` is the fixed `"N duplicated lines (block HHHH...)"`
+/// and never a credential. Redacting it bought no secrecy and cost the whole
+/// duplicate-set grouping, which parses the block key back out of that text.
+///
+/// The coverage tile is deliberately *not* exempted. In snapshot mode it
+/// recognises its findings by the shape of `matched` itself
+/// (`ui::dashboard::is_coverage_matched`), so exempting it would mean deciding
+/// whether to reveal a string by looking at that same string - a secret that
+/// happens to read as `12/40 lines (30.0%)` would exempt itself. A compile-time
+/// reserved id is a safe signal; text from the report is not. The tile falls
+/// back to "no coverage report" on a pre-1.2 snapshot, and the footer says why.
 pub fn apply_snapshot(state: &mut AppState, data: SnapshotData, config: Option<&Config>) {
-    state.rows = merge_rows(data.findings, data.baselined, data.suppressed);
+    let hidden = data.hides_match_text();
+    let mut rows = merge_rows(data.findings, data.baselined, data.suppressed);
+    if hidden {
+        for row in &mut rows {
+            if row.finding.rule_id == DUPLICATE_BLOCK_RULE_ID {
+                continue;
+            }
+            row.finding.matched = REDACTED_MATCH.to_string();
+        }
+    }
+
+    state.rows = rows;
     state.boundary_edges = Vec::new();
     state.metrics = data.metrics;
     state.snapshot_anchor = data.anchor;
@@ -108,6 +146,9 @@ pub fn apply_snapshot(state: &mut AppState, data: SnapshotData, config: Option<&
     reset_cursors(state);
     refresh_silos(state, config);
     report_debt(state);
+    if hidden {
+        state.status = format!("{} | {HIDDEN_MATCH_NOTE}", state.status);
+    }
 }
 
 /// The three finding lists folded into one row list in canonical order (path,
@@ -374,12 +415,18 @@ mod tests {
         assert!(state.boundary_edges.is_empty());
     }
 
+    /// A report at the version this build's core writes, whose match text is
+    /// already redacted at the source and is carried through untouched.
     fn snapshot_data() -> SnapshotData {
+        snapshot_data_at(siloscan_core::output::SCHEMA_VERSION)
+    }
+
+    fn snapshot_data_at(schema_version: &str) -> SnapshotData {
         use siloscan_core::metrics::{FileMetrics, Metrics, MetricsTotals};
 
         SnapshotData {
             source: "report.json".to_string(),
-            schema_version: "1.1".to_string(),
+            schema_version: schema_version.to_string(),
             anchor: Default::default(),
             findings: vec![finding("z.rule", "api/b.rs", 1, 1)],
             baselined: vec![finding("b.rule", "core/a.rs", 9, 2)],
@@ -517,6 +564,185 @@ mod tests {
         assert_eq!(state.metrics.files["src/b.rs"].lines, 12);
     }
 
+    // -- pre-1.2 reports -------------------------------------------------
+
+    /// Stands in for the credential a 1.1 report carries in the clear.
+    const RAW_MATCH: &str = "AKIAIOSFODNN7EXAMPLE";
+
+    /// Every cell of the terminal, one row per line, for a state drawn at this
+    /// size. The whole buffer, not one pane: the claim being tested is that no
+    /// pane anywhere puts the text on screen.
+    fn render_text(state: &AppState, width: u16, height: u16) -> String {
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
+        terminal
+            .draw(|frame| crate::ui::draw(frame, state))
+            .unwrap();
+        let buffer = terminal.backend().buffer().clone();
+
+        let mut out = String::new();
+        for y in 0..height {
+            for x in 0..width {
+                out.push_str(buffer.cell((x, y)).map_or(" ", |cell| cell.symbol()));
+            }
+            out.push('\n');
+        }
+        out
+    }
+
+    /// A pre-1.2 report with a credential in it, and the rule ids of the two
+    /// findings that would otherwise be read out of their match text.
+    fn pre_redaction_data() -> SnapshotData {
+        let mut data = snapshot_data_at("1.1");
+        data.findings[0].matched = RAW_MATCH.to_string();
+        data.baselined[0].matched = "20 duplicated lines (block 0123456789ab)".to_string();
+        data
+    }
+
+    /// The gate accepts a 1.1 report, and a 1.1 report predates redaction at
+    /// the writer. With no rule set to say which finding came from a secret
+    /// rule, every match goes.
+    #[test]
+    fn a_pre_one_two_report_renders_no_match_text_anywhere() {
+        let mut state = state();
+        apply_snapshot(&mut state, pre_redaction_data(), None);
+
+        let matches: Vec<&str> = state
+            .rows
+            .iter()
+            .map(|row| row.finding.matched.as_str())
+            .collect();
+        assert_eq!(
+            matches,
+            vec![REDACTED_MATCH, REDACTED_MATCH],
+            "the credential survived into the rows"
+        );
+
+        // Nothing draws it either, on any screen, at any of the sizes the board
+        // lays out for.
+        for screen in [
+            crate::state::Screen::Dashboard,
+            crate::state::Screen::Triage,
+            crate::state::Screen::Ratchet,
+            crate::state::Screen::Silo,
+        ] {
+            state.screen = screen;
+            for (width, height) in [(200, 50), (80, 24), (40, 12)] {
+                let text = render_text(&state, width, height);
+                assert!(
+                    !text.contains(RAW_MATCH),
+                    "{screen:?} at {width}x{height} drew the credential:\n{text}"
+                );
+                assert!(
+                    !text.contains("0123456789ab"),
+                    "{screen:?} at {width}x{height} drew match text:\n{text}"
+                );
+            }
+        }
+    }
+
+    /// The reserved duplicate-block id is the one exemption, and it has to work
+    /// alongside the redaction rather than instead of it: the same report
+    /// carries a credential, and that still goes.
+    ///
+    /// Blanket redaction was correct about secrets and wrong about this: the
+    /// block key lives in `matched`, so redacting it dissolved every duplicate
+    /// set into ungrouped rows and cost the feature for no secrecy gained.
+    #[test]
+    fn a_pre_one_two_duplicate_block_survives_while_the_secret_is_redacted() {
+        use crate::ui::triage::block_key;
+
+        let mut data = snapshot_data_at("1.1");
+        data.findings[0].matched = RAW_MATCH.to_string();
+        data.baselined[0].rule_id = DUPLICATE_BLOCK_RULE_ID.to_string();
+        data.baselined[0].matched = "20 duplicated lines (block 0123456789ab)".to_string();
+
+        let mut state = state();
+        apply_snapshot(&mut state, data, None);
+
+        let secret = state
+            .rows
+            .iter()
+            .find(|row| row.finding.rule_id == "z.rule")
+            .expect("the secret finding");
+        assert_eq!(
+            secret.finding.matched, REDACTED_MATCH,
+            "the credential survived the exemption"
+        );
+
+        let duplicate = state
+            .rows
+            .iter()
+            .find(|row| row.finding.rule_id == DUPLICATE_BLOCK_RULE_ID)
+            .expect("the duplicate-block finding");
+        assert_eq!(
+            duplicate.finding.matched, "20 duplicated lines (block 0123456789ab)",
+            "a reserved-id finding must keep the text its grouping is built on"
+        );
+        assert_eq!(
+            block_key(&duplicate.finding).as_deref(),
+            Some("0123456789ab"),
+            "the block key must still parse"
+        );
+
+        // The exemption is not a hole: nothing draws the credential.
+        state.screen = crate::state::Screen::Triage;
+        for (width, height) in [(200, 50), (80, 24)] {
+            let text = render_text(&state, width, height);
+            assert!(
+                !text.contains(RAW_MATCH),
+                "the credential reached the screen at {width}x{height}:\n{text}"
+            );
+        }
+        // And the footer still says match text is being withheld.
+        assert!(state.status.contains(HIDDEN_MATCH_NOTE), "{}", state.status);
+    }
+
+    /// Redaction that is not announced is indistinguishable from a report that
+    /// had nothing to show, which is the failure this whole fix is about.
+    #[test]
+    fn a_pre_one_two_report_says_why_the_match_column_is_empty() {
+        let mut state = state();
+        apply_snapshot(&mut state, pre_redaction_data(), None);
+
+        assert!(
+            state.status.contains(HIDDEN_MATCH_NOTE),
+            "status: {}",
+            state.status
+        );
+        assert!(
+            state.status.starts_with("1 new, 1 baselined"),
+            "the debt counts are still reported: {}",
+            state.status
+        );
+
+        state.screen = crate::state::Screen::Triage;
+        let text = render_text(&state, 200, 50);
+        assert!(
+            text.contains(HIDDEN_MATCH_NOTE),
+            "not in the footer:\n{text}"
+        );
+    }
+
+    /// A 1.2 report was redacted by the writer, so the UI has no reason to
+    /// second-guess it and no reason to say anything.
+    #[test]
+    fn a_current_report_keeps_its_match_text_and_its_status() {
+        let mut state = state();
+        let mut data = snapshot_data();
+        data.findings[0].matched = "20 duplicated lines (block 0123456789ab)".to_string();
+
+        apply_snapshot(&mut state, data, None);
+
+        let kept = state
+            .rows
+            .iter()
+            .any(|row| row.finding.matched == "20 duplicated lines (block 0123456789ab)");
+        assert!(kept, "a 1.2 report's match text must be left alone");
+        assert_eq!(state.status, "1 new, 1 baselined, 0 suppressed");
+        assert!(!state.status.contains(HIDDEN_MATCH_NOTE));
+    }
+
     #[test]
     fn apply_failure_keeps_the_rows_and_reports_the_reason() {
         let mut state = state();
@@ -549,7 +775,14 @@ mod tests {
             .unwrap(), ..Default::default() });
 
         let (tx, rx) = mpsc::channel();
-        spawn_scan(dir.clone(), Arc::clone(&rules), None, None, tx);
+        spawn_scan(
+            dir.clone(),
+            Arc::clone(&rules),
+            None,
+            None,
+            IgnoreOptions::default(),
+            tx,
+        );
 
         let mut progress = 0usize;
         let mut state = AppState::new(dir.clone(), Arc::clone(&rules), None);

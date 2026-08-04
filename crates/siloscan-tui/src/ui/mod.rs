@@ -16,6 +16,7 @@ pub mod silo;
 pub mod theme;
 pub mod triage;
 
+use std::borrow::Cow;
 use std::cell::RefCell;
 
 use crossterm::event::{KeyCode, KeyEvent, MouseEvent, MouseEventKind};
@@ -25,7 +26,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Gauge, Paragraph};
 use siloscan_core::config::Anchor;
-use siloscan_core::findings::Finding;
+use siloscan_core::findings::{Finding, sanitize_for_terminal};
 use siloscan_core::output::{self, REDACTED_MATCH};
 use siloscan_core::rules::RuleSet;
 
@@ -127,11 +128,16 @@ impl LayoutMap {
 /// placeholder. `rules` is whatever rule set the session loaded; a finding
 /// whose rule is not in it keeps its text, which is what a snapshot loaded
 /// against unrelated rules needs.
-pub fn display_match<'a>(rules: &RuleSet, finding: &'a Finding) -> &'a str {
+///
+/// The kept text is a non-secret rule's match, which is a slice of the scanned
+/// file and so may hold control bytes; it is sanitized on the way out. This is
+/// display only - `matched` is also a grouping key and a highlight length, and
+/// neither of those may see the rendered form.
+pub fn display_match<'a>(rules: &RuleSet, finding: &'a Finding) -> Cow<'a, str> {
     if output::is_secret_rule(rules, &finding.rule_id) {
-        REDACTED_MATCH
+        Cow::Borrowed(REDACTED_MATCH)
     } else {
-        &finding.matched
+        sanitize_for_terminal(&finding.matched)
     }
 }
 
@@ -285,7 +291,12 @@ fn status_spans(state: &AppState) -> Line<'static> {
     let mut spans: Vec<Span<'static>> = Vec::new();
 
     if !state.status.is_empty() {
-        spans.push(Span::styled(state.status.clone(), theme::accent()));
+        // Every status writer funnels through here, and several of them quote a
+        // path, a rule id or an io error naming a file in the scanned tree.
+        spans.push(Span::styled(
+            sanitize_for_terminal(&state.status).into_owned(),
+            theme::accent(),
+        ));
         spans.push(Span::styled(" | ", theme::dim()));
     }
     if state.screen == Screen::Triage && !state.filters.is_empty() {
@@ -1059,6 +1070,10 @@ mod tests {
     /// A 1.1 report with two duplicate copies of one block, one error, and the
     /// metrics the dashboard prints. Two top-level directories, so the module
     /// card row has something to group by without a config.
+    ///
+    /// Deliberately pre-1.2: snapshot mode withholds match text below that
+    /// version, and this fixture is what proves the duplicate-block exemption
+    /// survives it - the grouping reads the block key back out of `matched`.
     const FIXTURE: &str = r#"{
   "version": "1.1.0",
   "schema_version": "1.1",
@@ -1309,7 +1324,13 @@ mod tests {
 
         // (a) Rescan: the global binding, refused with its reason.
         let (tx, _rx) = std::sync::mpsc::channel();
-        crate::on_key(&mut state, key(KeyCode::Char('r')), None, &tx);
+        crate::on_key(
+            &mut state,
+            key(KeyCode::Char('r')),
+            None,
+            siloscan_core::walk::IgnoreOptions::default(),
+            &tx,
+        );
         assert_eq!(state.status, crate::state::READ_ONLY_RESCAN);
         assert!(!state.scan_running);
         assert_eq!(state.rows, before.rows);

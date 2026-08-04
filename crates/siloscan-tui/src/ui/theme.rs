@@ -8,6 +8,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Span;
 use ratatui::widgets::{Block, BorderType};
 
+use siloscan_core::findings::sanitize_for_terminal;
 use siloscan_core::rules::Severity;
 
 /// Errors, failing findings, debt that still has to be paid.
@@ -58,7 +59,12 @@ pub fn severity_name_span(severity: Severity) -> Span<'static> {
 
 /// Border of a pane. Focused panes get an accent border and a bold title;
 /// everything else recedes.
-pub fn pane_block(title: &str, focused: bool) -> Block<'_> {
+///
+/// Pane titles carry scanned content - a finding's path, a silo name from the
+/// repository's config - so the title is sanitized here rather than at each of
+/// the four call sites. That is what makes the returned block `'static`: the
+/// title it holds is a rendering of the caller's string, not a borrow of it.
+pub fn pane_block(title: &str, focused: bool) -> Block<'static> {
     let (border, title_style) = if focused {
         (
             Style::default().fg(ACCENT),
@@ -71,17 +77,20 @@ pub fn pane_block(title: &str, focused: bool) -> Block<'_> {
     Block::bordered()
         .border_type(BorderType::Rounded)
         .border_style(border)
-        .title(Span::styled(title, title_style))
+        .title(Span::styled(
+            sanitize_for_terminal(title).into_owned(),
+            title_style,
+        ))
 }
 
 /// Border of a tile whose color carries meaning: the metric of a KPI card, the
 /// verdict of the quality gate.
-pub fn colored_block(title: &str, color: Color) -> Block<'_> {
+pub fn colored_block(title: &str, color: Color) -> Block<'static> {
     Block::bordered()
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(color))
         .title(Span::styled(
-            title,
+            sanitize_for_terminal(title).into_owned(),
             Style::default().fg(color).add_modifier(Modifier::BOLD),
         ))
 }

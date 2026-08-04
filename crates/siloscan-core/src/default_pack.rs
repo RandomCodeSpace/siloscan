@@ -1,6 +1,10 @@
 /// The built-in secrets rule pack, translated from the gitleaks default config
-/// by `scripts/convert_gitleaks.py`. See `NOTICE` for attribution and the tag
-/// it was generated from.
+/// (v8.30.1) by `scripts/convert_gitleaks.py`. See `NOTICE` for attribution.
+///
+/// Three gitleaks rules are intentionally dropped due to regex size constraints
+/// (Rust regex crate's 10 MiB limit): `generic-api-key`, `pypi-upload-token`,
+/// and `vault-batch-token`. Users needing generic high-entropy detection can add
+/// custom `secret:` rules with narrower patterns or tighter keyword requirements.
 pub fn default_rules() -> &'static str {
     include_str!("../rules/default/secrets.yaml")
 }

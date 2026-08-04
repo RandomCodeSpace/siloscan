@@ -22,6 +22,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Bar, BarChart, Gauge, Paragraph};
 
+use siloscan_core::findings::sanitize_for_terminal;
 use siloscan_core::metrics::FileMetrics;
 use siloscan_core::rules::{CompiledPayload, Severity};
 
@@ -929,9 +930,10 @@ fn size_line(card: &SiloCard, width: usize) -> Line<'static> {
     )])
 }
 
-/// Silo names read from the front: the head is the informative half.
+/// Silo names read from the front: the head is the informative half. Sanitized
+/// before the cut, so an escape byte cannot ride through inside what survives.
 fn head_truncate(text: &str, width: usize) -> String {
-    text.chars().take(width).collect()
+    sanitize_for_terminal(text).chars().take(width).collect()
 }
 
 fn draw_charts(frame: &mut Frame, area: Rect, state: &AppState) {
@@ -1019,8 +1021,10 @@ fn bar_line(name: &str, count: usize, max: usize, color: Color, width: u16) -> L
     ])
 }
 
-/// Rule ids are dotted and the tail is the informative half.
+/// Rule ids are dotted and the tail is the informative half. Sanitized before
+/// the cut, for the reason [`head_truncate`] gives.
 fn tail_truncate(text: &str, width: usize) -> String {
+    let text = &*sanitize_for_terminal(text);
     let chars: Vec<char> = text.chars().collect();
     if chars.len() <= width {
         return text.to_string();
@@ -1490,6 +1494,15 @@ mod tests {
     /// A snapshot boots with no rules, so the tile has no coverage rule id to
     /// match on and has to read the finding's own shape. The duplicate-block
     /// wording is the near miss that must not be counted.
+    ///
+    /// Schema 1.2, because shape detection needs the match text and snapshot
+    /// mode withholds it below that version. The duplicate-block rule is
+    /// exempted from that redaction and this one deliberately is not: the
+    /// exemption there is a reserved rule id, fixed at compile time, while the
+    /// only signal here is the shape of `matched` itself. Keying an exemption
+    /// on the text being protected would let a secret that reads as
+    /// `12/40 lines (30.0%)` exempt itself. On a pre-1.2 snapshot the tile
+    /// reads "no coverage report" instead, and the footer says why.
     #[test]
     fn a_snapshot_shows_coverage_findings_without_a_rule_set() {
         let mut coverage = finding("quality.line-coverage", Severity::Warning, "src/a.rs", 1);
@@ -1502,7 +1515,7 @@ mod tests {
             &mut state,
             crate::snapshot::SnapshotData {
                 source: "report.json".to_string(),
-                schema_version: "1.1".to_string(),
+                schema_version: "1.2".to_string(),
                 anchor: Default::default(),
                 findings: vec![coverage, duplicate],
                 baselined: Vec::new(),

@@ -5,18 +5,50 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process;
 
+use clap::error::ErrorKind;
 use clap::{Args, Parser, Subcommand};
 use siloscan_core::baseline::{self, Baseline};
 use siloscan_core::cache::{Cache, PathScope};
 use siloscan_core::config::{self, Anchor, Config};
 use siloscan_core::coverage::{self, CoverageReport};
+// Renders scanned text so a terminal displays it instead of obeying it. The
+// TUI draws its spans through the same function, so the two front ends cannot
+// drift apart; see the core definition for what is escaped and why.
+use siloscan_core::findings::sanitize_for_terminal as safe;
 use siloscan_core::harness;
 use siloscan_core::rules::{self, CompiledPayload, CompiledRule, RuleSet, Severity};
 use siloscan_core::scan;
-use siloscan_core::{default_pack, output, output_sarif};
+use siloscan_core::walk;
+use siloscan_core::{cache, default_pack, output, output_sarif};
 
+// `args_conflicts_with_subcommands` is what keeps `siloscan services/api
+// baseline` from baselining the current directory. The top-level positional and
+// the subcommand's own positional are two separate arguments, so clap bound the
+// path to the scan one and left `BaselineArgs::path` at its default of `.`: a
+// monorepo user asking to accept one module's findings as debt accepted the
+// whole repository's instead, secrets included, and nothing said so.
+//
+// The flag also fixes the usage line, which used to offer the path and a
+// subcommand together and so documented the broken order as supported; it now
+// renders the two forms that exist. A doc comment here would become clap's
+// long help, so this stays a plain comment.
 #[derive(Parser)]
-#[command(about = "Universal offline rule-based static code scanner", version)]
+#[command(
+    about = "Universal offline rule-based static code scanner",
+    long_about = "Universal offline rule-based static code scanner.\n\n\
+        Scans PATH against YAML rule packs and reports findings as human text, \
+        JSON or SARIF. Everything runs locally: no network, no telemetry, no \
+        service.\n\n\
+        A scan is self-contained by default. Ignore files inside PATH are \
+        honoured; parent directories, git's global excludes and \
+        .git/info/exclude are not consulted, so two checkouts of the same tree \
+        scan the same way. The --respect-* flags opt each of those sources back \
+        in.\n\n\
+        Subcommands take their own PATH and their own flags, and cannot be \
+        combined with the scan options above them.",
+    version,
+    args_conflicts_with_subcommands = true
+)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
@@ -32,6 +64,81 @@ enum Command {
 
     /// Check a fixture tree against its inline `siloscan-expect:` markers
     Test(TestArgs),
+
+    /// Maintain the on-disk scan cache
+    #[command(subcommand)]
+    Cache(CacheCommand),
+}
+
+#[derive(Subcommand)]
+enum CacheCommand {
+    /// Delete cache entries written by a different siloscan build
+    Prune(CacheArgs),
+}
+
+#[derive(Args)]
+struct CacheArgs {
+    /// Path whose `.siloscan/cache` is pruned
+    #[arg(default_value = ".")]
+    path: PathBuf,
+}
+
+/// Which ignore sources a scan consults.
+///
+/// Every flag here widens or narrows what gets read, so every one of them is
+/// spelled out rather than inherited. The defaults are `IgnoreOptions::default`:
+/// ignore files inside the scan root count, nothing above or outside it does.
+///
+/// The three `--respect-*` flags exist so the pre-1.1.2 behavior is recoverable,
+/// but only by asking for it. Each one makes the scan depend on something
+/// outside the tree it was pointed at, which is why none of them is on by
+/// default and why `--no-ignore` does not turn them on either: "scan everything
+/// under the root" is not a reason to start reading files above it.
+#[derive(Args, Clone, Copy, Default)]
+struct IgnoreArgs {
+    /// Scan every file: ignore no `.gitignore` and no `.ignore`
+    #[arg(long)]
+    no_ignore: bool,
+
+    /// Ignore `.ignore` files but not `.gitignore` files
+    #[arg(long)]
+    no_gitignore: bool,
+
+    /// Also honor ignore files in directories above the scan root
+    #[arg(long)]
+    respect_parent_ignores: bool,
+
+    /// Also honor `<PATH>/.git/info/exclude`
+    #[arg(long)]
+    respect_git_exclude: bool,
+
+    /// Also honor git's global `core.excludesFile`
+    #[arg(long)]
+    respect_global_gitignore: bool,
+}
+
+impl IgnoreArgs {
+    /// The walk policy these flags describe.
+    ///
+    /// `--no-ignore` clears both in-root sources and is applied first, so
+    /// `--no-ignore --respect-parent-ignores` still reads the parent ignore
+    /// files it was asked for while scanning everything the root's own ignore
+    /// files would have hidden. The two settings are about different
+    /// directories and neither one implies the other.
+    fn to_options(self) -> walk::IgnoreOptions {
+        let mut options = if self.no_ignore {
+            walk::IgnoreOptions::all_files()
+        } else {
+            walk::IgnoreOptions::default()
+        };
+        if self.no_gitignore {
+            options.respect_gitignore = false;
+        }
+        options.respect_parent_ignores |= self.respect_parent_ignores;
+        options.respect_git_exclude |= self.respect_git_exclude;
+        options.respect_global_gitignore |= self.respect_global_gitignore;
+        options
+    }
 }
 
 #[derive(Args)]
@@ -72,6 +179,9 @@ struct ScanArgs {
     /// Do not read or write the scan cache under `.siloscan/cache`
     #[arg(long)]
     no_cache: bool,
+
+    #[command(flatten)]
+    ignore: IgnoreArgs,
 }
 
 #[derive(Args)]
@@ -99,6 +209,9 @@ struct BaselineArgs {
     /// Do not read or write the scan cache under `.siloscan/cache`
     #[arg(long)]
     no_cache: bool,
+
+    #[command(flatten)]
+    ignore: IgnoreArgs,
 }
 
 #[derive(Args)]
@@ -140,12 +253,69 @@ impl FailOn {
 }
 
 fn main() {
-    let cli = Cli::parse();
+    let cli = parse_cli();
 
     match cli.command {
         None => run_scan(cli.scan),
         Some(Command::Baseline(args)) => run_baseline(args),
         Some(Command::Test(args)) => run_test(args),
+        Some(Command::Cache(CacheCommand::Prune(args))) => run_cache_prune(args),
+    }
+}
+
+/// Drop cache entries left behind by other siloscan builds.
+///
+/// A scan already prunes the directory it is about to use, so this exists for
+/// the case where no scan is coming: an upgrade in CI, or a checkout whose
+/// `.siloscan/cache` outlived the build that wrote it. Pruning is best-effort
+/// by design - an entry that cannot be read or removed is left alone - so there
+/// is nothing here to fail on and the exit code is 0 unless the path itself is
+/// unusable.
+///
+/// The count is printed because 0 and 400 are both successes and the user asked
+/// which one it was; a command that says nothing is indistinguishable from one
+/// that silently did not run.
+fn run_cache_prune(args: CacheArgs) {
+    require_root(&args.path);
+    let removed = cache::prune(&state_root(&args.path));
+    let plural = if removed == 1 { "entry" } else { "entries" };
+    println!("pruned {removed} cache {plural}");
+}
+
+/// Parses the command line, and turns the one conflict this CLI declares into a
+/// message naming the form that works.
+///
+/// A top-level path alongside a subcommand is rejected rather than forwarded to
+/// the subcommand: forwarding would have to decide which of two positionals the
+/// user meant when both are given, and guessing that is exactly what wrote a
+/// baseline over the wrong tree. Refusing cannot pick the wrong one.
+fn parse_cli() -> Cli {
+    match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(e) if e.kind() == ErrorKind::ArgumentConflict => {
+            let _ = e.print();
+            // The binary name rather than a literal, because this file is
+            // also compiled as the `ss` alias.
+            let bin = env!("CARGO_BIN_NAME");
+            // Not "a subcommand takes its own path": that describes only the
+            // `PATH baseline` order. `--format json baseline PATH` reaches here
+            // too, and there the path is not the problem - the scan option in
+            // front of the subcommand is. Clap has already named the arguments
+            // it refused, so this says what the rule is and what the shape is.
+            eprintln!(
+                "\nA subcommand comes first and carries its own path and flags:\n\
+                 \x20 {bin} baseline <PATH>\n\
+                 \x20 {bin} test <PATH>\n\
+                 \x20 {bin} cache prune <PATH>\n\
+                 Scan options and the top-level PATH belong to a scan and cannot \
+                 precede a subcommand.\n\
+                 Run `{bin} <COMMAND> --help` for what each subcommand accepts."
+            );
+            process::exit(2);
+        }
+        // Help, version and every other parse failure keep clap's own reporting
+        // and its exit codes.
+        Err(e) => e.exit(),
     }
 }
 
@@ -180,35 +350,37 @@ fn run_scan(args: ScanArgs) {
     };
 
     let cache = open_cache(&args.path, &rules, args.no_cache, &anchoring);
-    let options = scan::ScanOptions {
-        baseline: baseline.as_ref(),
-        cache: cache.as_ref(),
-        config: config.as_ref(),
-        coverage: coverage.as_ref(),
-    };
+    // `ScanOptions` is `#[non_exhaustive]`, so it is built from its default and
+    // assigned into rather than written as a literal.
+    let mut options = scan::ScanOptions::default();
+    options.baseline = baseline.as_ref();
+    options.cache = cache.as_ref();
+    options.config = config.as_ref();
+    options.coverage = coverage.as_ref();
+    options.ignore = args.ignore.to_options();
     let report = match scan::scan_opts(&args.path, &rules, &options, &mut |_| {}) {
         Ok(report) => report,
         Err(e) => fail(&format!("error: {e}")),
     };
 
-    for skipped in &report.skipped {
-        eprintln!("warning: skipped {}: {}", skipped.path, skipped.reason);
-    }
+    warn_skipped(&report.skipped);
 
     let mut out = io::stdout().lock();
     match args.format {
         Format::Human => {
             for finding in &report.findings {
+                // Path, rule id and message are all scanned-repository text;
+                // line, column and severity are not.
                 emit(
                     &mut out,
                     format_args!(
                         "{}:{}:{} {} {} {}",
-                        finding.path,
+                        safe(&finding.path),
                         finding.line,
                         finding.column,
                         finding.severity,
-                        finding.rule_id,
-                        finding.message
+                        safe(&finding.rule_id),
+                        safe(&finding.message)
                     ),
                 );
             }
@@ -271,20 +443,17 @@ fn run_baseline(args: BaselineArgs) {
         .unwrap_or_else(|e| fail(&format!("error: {e}")));
 
     let cache = open_cache(&args.path, &rules, args.no_cache, &anchoring);
-    let options = scan::ScanOptions {
-        cache: cache.as_ref(),
-        config: config.as_ref(),
-        coverage: coverage.as_ref(),
-        ..Default::default()
-    };
+    let mut options = scan::ScanOptions::default();
+    options.cache = cache.as_ref();
+    options.config = config.as_ref();
+    options.coverage = coverage.as_ref();
+    options.ignore = args.ignore.to_options();
     let report = match scan::scan_opts(&args.path, &rules, &options, &mut |_| {}) {
         Ok(report) => report,
         Err(e) => fail(&format!("error: {e}")),
     };
 
-    for skipped in &report.skipped {
-        eprintln!("warning: skipped {}: {}", skipped.path, skipped.reason);
-    }
+    warn_skipped(&report.skipped);
 
     // The findings already speak the active convention, and a baseline entry is
     // its finding's fingerprint and path verbatim, so the entries need nothing
@@ -314,11 +483,12 @@ fn run_test(args: TestArgs) {
     };
 
     let mut out = io::stdout().lock();
+    // Each line is `<path>:<line> <rule id>`, built from the fixture tree.
     for line in &report.missing {
-        emit(&mut out, format_args!("missing: {line}"));
+        emit(&mut out, format_args!("missing: {}", safe(line)));
     }
     for line in &report.unexpected {
-        emit(&mut out, format_args!("unexpected: {line}"));
+        emit(&mut out, format_args!("unexpected: {}", safe(line)));
     }
     emit(
         &mut out,
@@ -620,17 +790,58 @@ fn validate_root(path: &Path) -> io::Result<()> {
 
 /// Writes one stdout line, ignoring write errors. `println!` panics on a closed
 /// pipe (`siloscan | head`), which would exit 101 and break the 0/1/2 contract.
+///
+/// Deliberately writes what it is given: JSON and SARIF reports go through here
+/// whole. Human text is passed through [`safe`] at the point it is built.
 fn emit(out: &mut impl Write, args: std::fmt::Arguments) {
     let _ = writeln!(out, "{args}");
 }
 
+/// Individual `warning: skipped` lines before the rest are counted instead.
+///
+/// One line per skipped file is right for a source tree and wrong for an asset
+/// tree: a repository with 50k images buries whatever else stderr had to say
+/// under 50k identical warnings. The names of the first few are the useful
+/// part - they say which kind of file is being skipped - and a count says the
+/// rest.
+const MAX_SKIP_WARNINGS: usize = 10;
+
+/// Report the files the scan did not read, bounded.
+///
+/// `report.skipped` is sorted by path, so the sample is the same on every run
+/// of the same tree. The full list is in the JSON and SARIF reports; this is
+/// the human channel and is allowed to summarise.
+fn warn_skipped(skipped: &[scan::SkippedFile]) {
+    for entry in skipped.iter().take(MAX_SKIP_WARNINGS) {
+        eprintln!(
+            "warning: skipped {}: {}",
+            safe(&entry.path),
+            safe(&entry.reason)
+        );
+    }
+    if let Some(rest) = skipped
+        .len()
+        .checked_sub(MAX_SKIP_WARNINGS)
+        .filter(|n| *n > 0)
+    {
+        eprintln!(
+            "warning: ... and {rest} more files skipped (see --format json for the full list)"
+        );
+    }
+}
+
+/// Every exit-2 message is human text on stderr, and several of them quote a
+/// path or a rule file, so the sanitising happens here once rather than at
+/// twenty call sites.
 fn fail(message: &str) -> ! {
-    eprintln!("{message}");
+    eprintln!("{}", safe(message));
     process::exit(2);
 }
 
 #[cfg(test)]
 mod tests {
+    use std::borrow::Cow;
+
     use super::*;
 
     const BOUNDARY_RULE: &str = "\
@@ -668,6 +879,107 @@ rules:
             rules: rules::load_str(BOUNDARY_RULE, "test").unwrap(),
             ..Default::default()
         }
+    }
+
+    /// Every ignore flag maps to exactly the field it names, and no flag turns
+    /// on a source the user did not ask for. The last case is the one worth
+    /// having: `--no-ignore` widening the walk to files above the scan root
+    /// would reintroduce the machine-dependence 1.1.2 removed, and it would do
+    /// it under a flag whose name says nothing about parents.
+    #[test]
+    fn ignore_flags_map_to_the_sources_they_name() {
+        let default = IgnoreArgs::default().to_options();
+        assert_eq!(default, walk::IgnoreOptions::default());
+        assert!(default.respect_gitignore && default.respect_dot_ignore);
+
+        let all = IgnoreArgs {
+            no_ignore: true,
+            ..IgnoreArgs::default()
+        }
+        .to_options();
+        assert_eq!(all, walk::IgnoreOptions::all_files());
+        assert!(!all.respect_parent_ignores);
+        assert!(!all.respect_git_exclude);
+        assert!(!all.respect_global_gitignore);
+
+        let no_git = IgnoreArgs {
+            no_gitignore: true,
+            ..IgnoreArgs::default()
+        }
+        .to_options();
+        assert!(!no_git.respect_gitignore);
+        assert!(no_git.respect_dot_ignore, "only gitignore was named");
+
+        // The 1.1.1 walk, recovered explicitly: every out-of-root source back
+        // on, the in-root ones untouched.
+        let legacy = IgnoreArgs {
+            respect_parent_ignores: true,
+            respect_git_exclude: true,
+            respect_global_gitignore: true,
+            ..IgnoreArgs::default()
+        }
+        .to_options();
+        assert_eq!(
+            legacy,
+            walk::IgnoreOptions {
+                respect_gitignore: true,
+                respect_dot_ignore: true,
+                respect_global_gitignore: true,
+                respect_parent_ignores: true,
+                respect_git_exclude: true,
+            }
+        );
+
+        // The two settings are about different directories, so combining them
+        // is neither a contradiction nor a no-op.
+        let both = IgnoreArgs {
+            no_ignore: true,
+            respect_parent_ignores: true,
+            ..IgnoreArgs::default()
+        }
+        .to_options();
+        assert!(!both.respect_gitignore && !both.respect_dot_ignore);
+        assert!(both.respect_parent_ignores);
+    }
+
+    /// The flags have to survive clap, on both commands that scan, or they are
+    /// a struct nobody can reach.
+    #[test]
+    fn ignore_flags_are_accepted_by_scan_and_baseline() {
+        let cli = Cli::try_parse_from(["siloscan", "src", "--no-ignore"]).unwrap();
+        assert!(cli.command.is_none());
+        assert!(cli.scan.ignore.no_ignore);
+        assert_eq!(
+            cli.scan.ignore.to_options(),
+            walk::IgnoreOptions::all_files()
+        );
+
+        let cli =
+            Cli::try_parse_from(["siloscan", "baseline", "src", "--respect-git-exclude"]).unwrap();
+        let Some(Command::Baseline(args)) = cli.command else {
+            panic!("baseline subcommand");
+        };
+        assert!(args.ignore.to_options().respect_git_exclude);
+
+        // A flag that does not exist is refused rather than ignored.
+        assert!(Cli::try_parse_from(["siloscan", "--respect-everything"]).is_err());
+    }
+
+    #[test]
+    fn cache_prune_is_reachable_and_defaults_to_the_current_directory() {
+        let cli = Cli::try_parse_from(["siloscan", "cache", "prune"]).unwrap();
+        let Some(Command::Cache(CacheCommand::Prune(args))) = cli.command else {
+            panic!("cache prune subcommand");
+        };
+        assert_eq!(args.path, PathBuf::from("."));
+
+        // Pruning a tree with no cache at all is a no-op, not a failure: there
+        // is nothing to report and nothing to remove.
+        let dir = tempdir();
+        run_cache_prune(CacheArgs {
+            path: dir.path().to_path_buf(),
+        });
+        assert!(!dir.path().join(".siloscan").exists());
     }
 
     #[test]
@@ -870,6 +1182,50 @@ rules:
         assert!(require_silos(&rules, Some(&config)).is_ok());
         // No boundary rule, no requirement.
         assert!(require_silos(&RuleSet::default(), None).is_ok());
+    }
+
+    #[test]
+    fn safe_text_is_returned_untouched_and_unallocated() {
+        let text = "src/api/handler.js:1:15 error arch.api-db api must not import db";
+        assert!(matches!(safe(text), Cow::Borrowed(_)));
+        assert_eq!(safe(text), text);
+        // Non-ASCII is not control text and must survive intact.
+        assert_eq!(
+            safe("src/\u{e9}t\u{e9}/caf\u{e9}.rs"),
+            "src/\u{e9}t\u{e9}/caf\u{e9}.rs"
+        );
+    }
+
+    #[test]
+    fn every_control_class_is_rendered_visibly() {
+        // The line-erasing sequence, the two vectors it arrives by.
+        assert_eq!(safe("evil\u{1b}[2K\rok.js"), "evil\\x1b[2K\\x0dok.js");
+        // NUL, tab and newline: tab included on purpose, it moves the cursor
+        // between columns of a report line.
+        assert_eq!(safe("a\u{0}b\tc\nd"), "a\\x00b\\x09c\\x0ad");
+        // DEL and the C1 block, which carry their own CSI.
+        assert_eq!(safe("a\u{7f}b\u{9b}2Kc\u{80}"), "a\\x7fb\\x9b2Kc\\x80");
+    }
+
+    #[test]
+    fn no_control_byte_survives_any_scanned_text() {
+        let text: String = (0u32..=0x9f)
+            .filter_map(char::from_u32)
+            .chain("plain text".chars())
+            .collect();
+
+        let rendered = safe(&text);
+
+        // The predicate is restated rather than imported: this is the CLI's own
+        // guarantee about what it prints, and it should fail here if core ever
+        // narrows what it escapes.
+        assert!(
+            !rendered
+                .chars()
+                .any(|ch| matches!(ch, '\u{00}'..='\u{1f}' | '\u{7f}'..='\u{9f}')),
+            "{rendered:?}"
+        );
+        assert!(rendered.contains("plain text"));
     }
 
     #[test]

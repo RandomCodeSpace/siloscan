@@ -31,6 +31,14 @@ pub struct SarifRun {
 /// that was read and came back clean. A parse cap or an unreadable file would
 /// otherwise be reported as a pass. It is omitted when nothing was skipped, so
 /// a clean run's document is unchanged.
+///
+/// The list is capped at [`MAX_SARIF_SKIPPED`] entries. An asset-heavy
+/// repository skips one file per binary - 50k of them is several megabytes of
+/// SARIF, past what code-scanning ingests - and the point of the record is to
+/// say that files went unread, which a bounded sample plus a count says just as
+/// well. The kept entries are the first `MAX_SARIF_SKIPPED` of
+/// `ScanReport::skipped`, which the scanner already sorted by path, so the
+/// sample is the same on every run of the same tree.
 #[derive(Debug, Serialize)]
 pub struct SarifRunProperties {
     #[serde(rename = "siloscan/metrics")]
@@ -39,7 +47,17 @@ pub struct SarifRunProperties {
     pub anchor: Anchor,
     #[serde(rename = "siloscan/skipped", skip_serializing_if = "Vec::is_empty")]
     pub skipped: Vec<crate::scan::SkippedFile>,
+    /// Entries the cap dropped, absent when it dropped none. Present so a
+    /// consumer can tell a 200-file sample from a 200-file scan.
+    #[serde(
+        rename = "siloscan/skippedTruncated",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub skipped_truncated: Option<usize>,
 }
+
+/// Skipped entries SARIF carries in full before it starts counting instead.
+pub const MAX_SARIF_SKIPPED: usize = 100;
 
 #[derive(Debug, Serialize)]
 pub struct SarifTool {
@@ -212,7 +230,16 @@ pub fn to_sarif(report: &ScanReport, rules: &RuleSet, anchor: Anchor) -> String 
                 // Totals only, never the per-file map.
                 metrics: serde_json::to_value(&report.metrics.totals).unwrap(), // serialization cannot fail
                 anchor,
-                skipped: report.skipped.clone(),
+                skipped: report
+                    .skipped
+                    .iter()
+                    .take(MAX_SARIF_SKIPPED)
+                    .cloned()
+                    .collect(),
+                skipped_truncated: match report.skipped.len() > MAX_SARIF_SKIPPED {
+                    true => Some(report.skipped.len() - MAX_SARIF_SKIPPED),
+                    false => None,
+                },
             },
         }],
     };
@@ -402,6 +429,48 @@ mod tests {
             ]),
             "skipped must carry path and reason in report order: {sarif}"
         );
+        assert!(
+            properties.get("siloscan/skippedTruncated").is_none(),
+            "an untruncated list must not announce a remainder: {sarif}"
+        );
+    }
+
+    /// An asset-heavy repository can skip tens of thousands of files. The
+    /// record stays, bounded: a fixed sample plus the count of what it stands
+    /// for. The sample is the head of a list the scanner sorted by path, so two
+    /// runs of the same tree produce the same document.
+    #[test]
+    fn a_large_skipped_list_is_capped_and_the_remainder_counted() {
+        use crate::scan::SkippedFile;
+
+        let mut report = report(vec![], Metrics::default());
+        report.skipped = (0..MAX_SARIF_SKIPPED + 37)
+            .map(|index| SkippedFile {
+                path: format!("assets/{index:05}.png"),
+                reason: "binary".to_string(),
+            })
+            .collect();
+        report.skipped.sort_by(|a, b| a.path.cmp(&b.path));
+
+        let sarif = to_sarif(&report, &no_rules(), Anchor::ScanRoot);
+        let parsed: serde_json::Value = serde_json::from_str(&sarif).expect("sarif is valid json");
+        let properties = &parsed["runs"][0]["properties"];
+
+        let kept = properties["siloscan/skipped"]
+            .as_array()
+            .expect("skipped is an array");
+        assert_eq!(kept.len(), MAX_SARIF_SKIPPED);
+        assert_eq!(
+            properties["siloscan/skippedTruncated"],
+            serde_json::json!(37)
+        );
+        // The cap keeps the head of the sorted list, so the sample is stable.
+        assert_eq!(kept[0]["path"], "assets/00000.png");
+        assert_eq!(
+            kept[MAX_SARIF_SKIPPED - 1]["path"],
+            format!("assets/{:05}.png", MAX_SARIF_SKIPPED - 1)
+        );
+        assert_eq!(to_sarif(&report, &no_rules(), Anchor::ScanRoot), sarif);
     }
 
     #[test]
