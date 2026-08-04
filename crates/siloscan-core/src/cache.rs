@@ -34,6 +34,13 @@
 //! costs a real scan and nothing else. Rejecting an entry cannot change a
 //! report: a miss is a rescan, and a rescan is what a cold run does.
 //!
+//! A salt's bytes come from the operating system's random source and from
+//! nothing else ([`generate_salt`]). Where that source cannot be reached there
+//! is no salt at all: none is written, every entry is a miss, and every scan
+//! runs cold. A cold scan is a correct scan, and it is the only safe direction
+//! to fail in - a salt made from anything an attacker could reproduce is a tag
+//! they can forge, which is the whole of what is being defended against.
+//!
 //! The salt is bound to the absolute path of the cache directory as well as to
 //! its own random bytes (see [`resolve_salt`]), because an attacker who commits
 //! the entries can commit the salt beside them. Their clone and the victim's do
@@ -43,9 +50,8 @@
 //! also has to prove it was written by this build rather than checked out with
 //! the tree ([`salt_file`]): an owner-only mode on unix, an alternate data
 //! stream on Windows, and on any platform that offers neither, no salt is
-//! trusted at all and the cache stays cold. Both are anti-tampering measures,
-//! not key management - the honest statement of the residual risk is in
-//! [`resolve_salt`].
+//! trusted at all. Both are anti-tampering measures, not key management - the
+//! honest statement of the residual risk is in [`resolve_salt`].
 //!
 //! The crate version inside an entry makes it a miss after an upgrade, but a
 //! miss is not a removal: without one, every release left the whole of the
@@ -62,7 +68,6 @@ use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -674,6 +679,8 @@ fn entry_version(path: &Path) -> Option<String> {
 /// The salt this cache directory's entries are authenticated with, or `None`
 /// when there is none to be had. With `create`, a directory that exists and has
 /// no salt gets one; without it, nothing is written and nothing is created.
+/// Either way a platform with no OS random source has no salt at all
+/// ([`generate_salt`]), and the cache that would have used it stays cold.
 ///
 /// The value returned is not the file's bytes but those bytes bound to the
 /// directory's absolute location, so an entry authenticates for one checkout at
@@ -722,7 +729,10 @@ fn resolve_salt(root: &Path, create: bool) -> Option<[u8; SALT_LEN]> {
 ///   this build reads are ones it wrote. A committed `.salt` is simply never
 ///   read: only the stream is. On a volume with no stream support - FAT32,
 ///   exFAT, some network shares - creating it fails and the cache stays cold,
-///   which is a correct cache.
+///   which is a correct cache. Provenance is all this settles: Windows has no
+///   OS random source this build can reach without a dependency, so
+///   [`generate_salt`] produces nothing there, no salt is ever written, and
+///   the cache is cold on every scan until one exists.
 /// - anything else: `None`. A gate that cannot be evaluated does not get to
 ///   pass, so a platform where provenance cannot be established trusts no salt,
 ///   writes none, and scans cold every time.
@@ -766,6 +776,12 @@ fn read_salt(root: &Path) -> Option<[u8; SALT_LEN]> {
 
 /// Write a fresh salt into an existing cache directory and return it.
 ///
+/// `None` when this platform has no OS random source ([`generate_salt`]), when
+/// it offers no way to tell a salt this build wrote from one that arrived with
+/// the tree ([`salt_file`]), or when the directory does not exist. In every one
+/// of those the cache simply has no salt, which makes it cold rather than
+/// weakly keyed.
+///
 /// The file is created exclusively, so a concurrent writer cannot be
 /// overwritten - losing that race means reading the winner's salt instead. A
 /// directory that does not exist is not created here; only [`Cache::put`]
@@ -797,7 +813,7 @@ fn create_salt(root: &Path) -> Option<[u8; SALT_LEN]> {
         return None;
     }
     let path = salt_file(root)?;
-    let salt = generate_salt(root);
+    let salt = generate_salt()?;
 
     if let Some(written) = write_salt(&path, &salt) {
         return Some(written);
@@ -863,77 +879,48 @@ fn foreign_salt(_path: &Path) -> bool {
     false
 }
 
-/// Unpredictable bytes for a new salt.
+/// [`SALT_LEN`] bytes straight from the operating system's random source, or
+/// `None` on a platform where this build cannot reach one.
 ///
-/// Every platform contributes randomness the operating system produced, and it
-/// has to: a salt an attacker can guess is a tag they can forge, and the whole
-/// of the committed-cache defense rests on not being able to. Where a salt was
-/// derived from the process id, the wall clock and the directory path alone -
-/// which is what a platform without `/dev/urandom` used to get - anyone who
-/// knew roughly when and where the cache was created could produce it.
+/// The kernel's bytes are the salt. Nothing is folded in beside them and
+/// nothing is derived from them, because a salt an attacker can guess is a tag
+/// they can forge and the whole of the committed-cache defense rests on not
+/// being able to. The process id, the wall clock and the directory path are all
+/// reproducible by anyone who knows roughly when and where a cache was created,
+/// so none of them is entropy and none of them belongs here - not even as
+/// padding, which a salt that is already random end to end does not need.
 ///
-/// Two sources, folded together:
+/// `/dev/urandom` is the only OS random source reachable from `std` without a
+/// dependency, so it is the only one used. On a target that does not have it -
+/// Windows included - the answer is `None`, and `None` means no salt exists
+/// rather than a weaker one being invented: [`create_salt`] writes nothing,
+/// [`resolve_salt`] yields nothing, every entry is a miss and every scan runs
+/// cold. That is the safe direction to fail in. A cold scan is what the first
+/// run of any build does, it produces the same report a warm one would, and it
+/// costs time and only time.
 ///
-/// - `/dev/urandom`, where the platform has it.
-/// - [`RandomState`](std::collections::hash_map::RandomState), which the
-///   standard library seeds from the operating system's randomness. It is the
-///   only OS randomness `std` exposes on every target, and on Windows it is the
-///   only one available here without a dependency. Its key is 128 bits, so a
-///   salt made from it alone has 128 bits behind it rather than 256; four
-///   keyed hashes of distinct inputs spread that key across the digest.
-///
-/// The process id, the clock, a per-process counter and the directory path are
-/// still folded in. They are not entropy and are not counted as any: they only
-/// keep two salts made in the same process from colliding if a random source
-/// ever repeats itself.
-fn generate_salt(root: &Path) -> [u8; SALT_LEN] {
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-
-    let mut hasher = Sha256::new();
-    if let Ok(mut urandom) = fs::File::open("/dev/urandom") {
-        let mut bytes = [0u8; SALT_LEN];
-        if urandom.read_exact(&mut bytes).is_ok() {
-            hasher.update(bytes);
-        }
-    }
-    hasher.update([0]);
-    hasher.update(os_random_bytes());
-    hasher.update([0]);
-    hasher.update(std::process::id().to_le_bytes());
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|since| since.as_nanos())
-        .unwrap_or_default();
-    hasher.update(nanos.to_le_bytes());
-    hasher.update(COUNTER.fetch_add(1, Ordering::Relaxed).to_le_bytes());
-    hasher.update(root.as_os_str().as_encoded_bytes());
-    hasher.finalize().into()
-}
-
-/// [`SALT_LEN`] bytes derived from a freshly constructed
-/// [`RandomState`](std::collections::hash_map::RandomState), whose keys the
-/// standard library takes from the operating system.
-///
-/// The state is not readable, so it is spent through the one thing a
-/// [`BuildHasher`](std::hash::BuildHasher) does: four hashes of four distinct
-/// inputs under the same key, which is eight bytes of output each. The result
-/// is not more than the 128 bits of key behind it and is not claimed to be; it
-/// is unpredictable to anyone who cannot read this process's memory, which is
-/// what a salt needs and what a clock never was.
-fn os_random_bytes() -> [u8; SALT_LEN] {
-    use std::hash::{BuildHasher as _, RandomState};
-
-    let state = RandomState::new();
-    let mut bytes = [0u8; SALT_LEN];
-    for (index, chunk) in bytes.chunks_mut(8).enumerate() {
-        let word = state.hash_one((index as u64, u64::MAX - index as u64));
-        chunk.copy_from_slice(&word.to_le_bytes()[..chunk.len()]);
-    }
-    bytes
+/// The bytes are collected rather than read into a buffer this function
+/// declares, so every byte of a salt arrives from the device and none of it
+/// originates in this source file. A read that ends short of [`SALT_LEN`] is
+/// `None` for the same reason a missing device is: a partial salt is not a
+/// salt.
+fn generate_salt() -> Option<[u8; SALT_LEN]> {
+    let urandom = fs::File::open("/dev/urandom").ok()?;
+    let mut salt = Vec::with_capacity(SALT_LEN);
+    urandom
+        .take(SALT_LEN as u64)
+        .read_to_end(&mut salt)
+        .ok()
+        .filter(|read| *read == SALT_LEN)?;
+    salt.try_into().ok()
 }
 
 /// The [`SALT_LEN`]-byte value `text` spells in lowercase or uppercase hex, or
 /// `None` if it does not spell exactly one.
+///
+/// Like [`generate_salt`], the result is accumulated from what was parsed
+/// rather than written over a buffer of zeros: a salt is made of the bytes it
+/// was given and of nothing this file spells out.
 fn unhex(text: &str) -> Option<[u8; SALT_LEN]> {
     let bytes = text.as_bytes();
     if bytes.len() != SALT_LEN * 2 {
@@ -942,12 +929,12 @@ fn unhex(text: &str) -> Option<[u8; SALT_LEN]> {
     if !bytes.iter().all(u8::is_ascii_hexdigit) {
         return None;
     }
-    let mut out = [0u8; SALT_LEN];
-    for (byte, pair) in out.iter_mut().zip(bytes.chunks_exact(2)) {
+    let mut out = Vec::with_capacity(SALT_LEN);
+    for pair in bytes.chunks_exact(2) {
         let text = std::str::from_utf8(pair).ok()?;
-        *byte = u8::from_str_radix(text, 16).ok()?;
+        out.push(u8::from_str_radix(text, 16).ok()?);
     }
-    Some(out)
+    out.try_into().ok()
 }
 
 /// Hex SHA-256 binding an entry's body to its key and this directory's salt,
@@ -2006,9 +1993,11 @@ mod tests {
             entry_tag(&salt, &cache.entry_key(&content_hash(b"other")), &body),
             "the tag must not travel between keys"
         );
+        let mut other = salt;
+        other[0] ^= 0xff;
         assert_ne!(
             tag,
-            entry_tag(&[0u8; SALT_LEN], &cache.entry_key(&hash()), &body),
+            entry_tag(&other, &cache.entry_key(&hash()), &body),
             "the tag must not survive a different salt"
         );
     }
@@ -2016,19 +2005,48 @@ mod tests {
     /// A salt is only as good as the randomness behind it: one derived from the
     /// process id, the clock and the directory path is reproducible by anyone
     /// who knows roughly when and where the cache was created, and reproducing
-    /// the salt is forging the entries.
+    /// the salt is forging the entries. The OS source is the only input, so a
+    /// salt is a function of nothing this process, this machine or this
+    /// directory can be asked about.
+    #[cfg(unix)]
     #[test]
-    fn salt_bytes_come_from_a_live_random_source() {
-        let first = os_random_bytes();
-        let second = os_random_bytes();
+    fn salt_bytes_come_from_the_os_random_source() {
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..16 {
+            let salt = generate_salt().expect("unix has /dev/urandom");
+            assert!(
+                salt.iter().any(|byte| *byte != 0),
+                "the random source produced nothing"
+            );
+            assert!(seen.insert(salt), "the random source repeated itself");
+        }
+    }
 
-        assert_ne!(first, second, "the random source repeated itself");
-        assert_ne!(first, [0u8; SALT_LEN], "the random source produced nothing");
+    /// Fail closed: where the OS random source cannot be reached there is no
+    /// salt, and no salt is a cold cache - never a guessable one stitched
+    /// together out of the clock and the path.
+    #[cfg(not(unix))]
+    #[test]
+    fn no_os_random_source_means_no_salt() {
+        assert!(generate_salt().is_none());
+    }
 
-        // And the salt for one fixed directory is not a function of that
-        // directory.
-        let root = Path::new("/fixed/cache/directory");
-        assert_ne!(generate_salt(root), generate_salt(root));
+    /// The failure direction the whole design turns on, from the outside: a
+    /// cache directory that cannot produce a salt writes no entries and serves
+    /// none, so the scan is cold and correct rather than warm and forged.
+    #[test]
+    fn a_cache_with_no_salt_writes_nothing_and_serves_nothing() {
+        let dir = tempdir();
+        let hash = hash();
+        let cache = Cache::open(dir.path(), &ruleset("a"), &PathScope::ScanRoot);
+        cache.put(&hash, &entry());
+        fs::remove_file(salt_path(&cache)).unwrap();
+
+        // A read never invents a salt, so the entries stay unreadable.
+        let cold = Cache::open(dir.path(), &ruleset("a"), &PathScope::ScanRoot);
+        assert!(cold.get(&hash, &content()).is_none());
+        assert!(!salt_path(&cold).exists(), "a read created a salt");
+        assert!(resolve_salt(cache.root(), false).is_none());
     }
 
     #[test]
