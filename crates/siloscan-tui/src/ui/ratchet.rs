@@ -13,14 +13,14 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Gauge, Paragraph, Wrap};
+use ratatui::widgets::{Gauge, Paragraph, Wrap};
 
 use siloscan_core::findings::Finding;
-use siloscan_core::rules::Severity;
 
 use crate::actions;
 use crate::state::{AppState, Pane, Status};
 use crate::ui::LayoutMap;
+use crate::ui::theme;
 
 /// Below this width the code context and the finding details stack instead of
 /// sitting side by side.
@@ -51,10 +51,20 @@ impl Verdict {
     pub fn label(self) -> &'static str {
         match self {
             Verdict::Baseline => "[b]aseline",
-            Verdict::Ignore => "[i]gnore-inline",
-            Verdict::Next => "[n]ext/skip",
+            Verdict::Ignore => "[i]gnore",
+            Verdict::Next => "[n]ext",
             Verdict::Prev => "[p]rev",
-            Verdict::Back => "[esc] back",
+            Verdict::Back => "[esc]",
+        }
+    }
+
+    /// The label split into its bracketed key and the rest of the word, so the
+    /// key can be drawn like a keycap and the word plainly.
+    pub fn parts(self) -> (&'static str, &'static str) {
+        let label = self.label();
+        match label.find(']') {
+            Some(index) => label.split_at(index + 1),
+            None => (label, ""),
         }
     }
 }
@@ -100,17 +110,21 @@ pub fn draw_ratchet(frame: &mut Frame, state: &AppState, area: Rect) -> LayoutMa
             draw_details(frame, finding, details_area);
         }
         None => {
-            let message = if state.scan_running {
-                "scanning"
+            let message: Vec<Line> = if state.scan_running {
+                vec![Line::styled("scanning", theme::dim())]
             } else {
-                "no new findings: the ratchet is clean"
+                vec![
+                    Line::styled("no new findings: the ratchet is clean", theme::dim()),
+                    Line::styled("press r to rescan, tab for the next screen", theme::dim()),
+                ]
             };
             frame.render_widget(
-                Paragraph::new(message).block(Block::bordered().title(" context ")),
+                Paragraph::new(message).block(theme::pane_block(" context ", false)),
                 code_area,
             );
             frame.render_widget(
-                Paragraph::new("").block(Block::bordered().title(" finding ")),
+                Paragraph::new(Line::styled("nothing to review", theme::dim()))
+                    .block(theme::pane_block(" finding ", false)),
                 details_area,
             );
         }
@@ -214,10 +228,13 @@ fn draw_header(frame: &mut Frame, state: &AppState, area: Rect) {
 
     frame.render_widget(
         Gauge::default()
-            .block(Block::bordered().title(title))
-            .gauge_style(Style::default().fg(Color::Cyan))
+            .block(theme::pane_block(&title, true))
+            .gauge_style(Style::default().fg(theme::WARNING).bg(theme::DIM))
             .ratio(ratio)
-            .label(label),
+            .label(Span::styled(
+                label,
+                Style::default().add_modifier(Modifier::BOLD),
+            )),
         area,
     );
 }
@@ -225,12 +242,21 @@ fn draw_header(frame: &mut Frame, state: &AppState, area: Rect) {
 fn draw_code(frame: &mut Frame, state: &AppState, finding: &Finding, area: Rect) {
     let path = state.root.join(&finding.path);
     let title = format!(" {}:{} ", finding.path, finding.line);
-    let block = Block::bordered().title(title);
+    let block = theme::pane_block(&title, true);
 
     let height = area.height.saturating_sub(2) as usize;
     let lines = match fs::read_to_string(&path) {
         Ok(content) => code_lines(&content, finding, state.scroll.code, height.max(1)),
-        Err(e) => vec![Line::from(format!("{}: {e}", path.display()))],
+        // Unreadable source is a dead end for this finding, not a crash: say so
+        // in the same dim guidance voice the other empty panes use.
+        Err(e) => vec![
+            Line::styled(format!("cannot read {}", path.display()), theme::dim()),
+            Line::styled(e.to_string(), theme::dim()),
+            Line::styled(
+                "the file moved or was deleted since the scan; press r to rescan",
+                theme::dim(),
+            ),
+        ],
     };
 
     frame.render_widget(Paragraph::new(lines).block(block), area);
@@ -265,7 +291,7 @@ pub fn code_lines(
             let number = start + index;
             let gutter = Span::styled(
                 format!("{:>width$} | ", number + 1, width = width),
-                Style::default().fg(Color::DarkGray),
+                theme::dim(),
             );
             let mut spans = vec![gutter];
             if number == target {
@@ -306,39 +332,55 @@ fn highlight(text: &str, column: u64, matched: &str) -> Vec<Span<'static>> {
 
 fn draw_details(frame: &mut Frame, finding: &Finding, area: Rect) {
     let lines = vec![
-        detail("rule", &finding.rule_id),
-        Line::from(vec![
-            Span::styled("severity  ", Style::default().fg(Color::DarkGray)),
+        detail_line(
+            "rule",
+            Span::styled(
+                finding.rule_id.clone(),
+                Style::default()
+                    .fg(theme::ACCENT)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ),
+        detail_line(
+            "severity",
             Span::styled(
                 finding.severity.as_str().to_string(),
                 Style::default()
-                    .fg(severity_color(finding.severity))
+                    .fg(theme::severity_color(finding.severity))
                     .add_modifier(Modifier::BOLD),
             ),
-        ]),
+        ),
         detail("where", &format!("{}:{}", finding.path, finding.line)),
-        detail("print", short(&finding.fingerprint)),
+        detail_line(
+            "print",
+            Span::styled(short(&finding.fingerprint).to_string(), theme::dim()),
+        ),
         Line::from(""),
         Line::from(finding.message.clone()),
         Line::from(""),
         Line::from(Span::styled(
             finding.matched.clone(),
-            Style::default().fg(Color::Yellow),
+            Style::default().fg(theme::WARNING),
         )),
     ];
 
     frame.render_widget(
         Paragraph::new(lines)
-            .block(Block::bordered().title(" finding "))
+            .block(theme::pane_block(" finding ", true))
             .wrap(Wrap { trim: false }),
         area,
     );
 }
 
 fn detail(label: &str, value: &str) -> Line<'static> {
+    detail_line(label, Span::raw(value.to_string()))
+}
+
+/// A dim label in a fixed gutter plus the value, however it is styled.
+fn detail_line(label: &str, value: Span<'static>) -> Line<'static> {
     Line::from(vec![
-        Span::styled(format!("{label:<10}"), Style::default().fg(Color::DarkGray)),
-        Span::raw(value.to_string()),
+        Span::styled(format!("{label:<10}"), theme::dim()),
+        value,
     ])
 }
 
@@ -353,29 +395,24 @@ pub fn short(fingerprint: &str) -> &str {
     &fingerprint[..end]
 }
 
-fn severity_color(severity: Severity) -> Color {
-    match severity {
-        Severity::Error => Color::Red,
-        Severity::Warning => Color::Yellow,
-        Severity::Info => Color::Blue,
-    }
-}
-
 fn draw_footer(frame: &mut Frame, state: &AppState, area: Rect, buttons: &[(Verdict, Rect)]) {
-    frame.render_widget(Block::bordered().title(" verdict "), area);
+    frame.render_widget(theme::pane_block(" verdict ", true), area);
 
     let armed = state.ratchet_finding().is_some();
     for (verdict, cell) in buttons {
+        // Disarmed verdicts recede; the rest keep the color of what they do.
         let style = match verdict {
-            Verdict::Baseline | Verdict::Ignore if !armed => Style::default().fg(Color::DarkGray),
+            Verdict::Baseline | Verdict::Ignore if !armed => theme::dim(),
             Verdict::Baseline => Style::default().fg(Color::Green),
             Verdict::Ignore => Style::default().fg(Color::Magenta),
-            _ => Style::default().fg(Color::Gray),
+            _ => theme::accent(),
         };
-        frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(verdict.label(), style))).centered(),
-            *cell,
-        );
+        let (key, word) = verdict.parts();
+        let line = Line::from(vec![
+            Span::styled(key, style.add_modifier(Modifier::REVERSED | Modifier::BOLD)),
+            Span::styled(word, style),
+        ]);
+        frame.render_widget(Paragraph::new(line).centered(), *cell);
     }
 }
 
@@ -456,7 +493,7 @@ mod tests {
     use crossterm::event::{KeyEventKind, KeyModifiers};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
-    use siloscan_core::rules::RuleSet;
+    use siloscan_core::rules::{RuleSet, Severity};
 
     use crate::state::FindingRow;
 

@@ -10,21 +10,23 @@
 //!   and is read back with `layout()`. Draw and input handling both run on the
 //!   main thread, so the thread-local is always the map the user is looking at.
 
-mod dashboard;
-
+pub mod dashboard;
 pub mod ratchet;
 pub mod silo;
+pub mod theme;
 pub mod triage;
 
 use std::cell::RefCell;
 
 use crossterm::event::{KeyCode, KeyEvent, MouseEvent, MouseEventKind};
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
+use ratatui::text::{Line, Span};
 use ratatui::widgets::{Gauge, Paragraph};
 
 use crate::state::{AppState, Pane, Screen};
+use crate::ui::dashboard::Card;
 
 /// Rows the dashboard strip keeps on non-dashboard screens. The strip is the
 /// first thing dropped when the terminal is short: charts yield space first.
@@ -35,7 +37,8 @@ const STRIP_MIN_ROWS: u16 = 40;
 const STRIP_MIN_COLS: u16 = 60;
 
 /// Pane rectangles of the last rendered frame. Panes absent from the current
-/// screen stay `None`. Screen tabs record their rects for mouse-based switching.
+/// screen stay `None`. Screen tabs record their rects for mouse-based switching,
+/// and so do the dashboard KPI cards, indexed by `Card::index`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct LayoutMap {
     pub sidebar: Option<Rect>,
@@ -47,6 +50,7 @@ pub struct LayoutMap {
     pub triage_tab: Option<Rect>,
     pub ratchet_tab: Option<Rect>,
     pub silo_tab: Option<Rect>,
+    pub cards: [Option<Rect>; Card::COUNT],
 }
 
 impl LayoutMap {
@@ -75,6 +79,13 @@ impl LayoutMap {
             .find(|(area, _)| area.is_some_and(|area| contains(area, column, row)))
             .map(|(_, screen)| screen)
     }
+
+    /// Dashboard KPI card under a mouse position, if any.
+    pub fn card_at(&self, column: u16, row: u16) -> Option<Card> {
+        Card::ALL
+            .into_iter()
+            .find(|card| self.cards[card.index()].is_some_and(|area| contains(area, column, row)))
+    }
 }
 
 fn contains(area: Rect, column: u16, row: u16) -> bool {
@@ -95,6 +106,7 @@ thread_local! {
         triage_tab: None,
         ratchet_tab: None,
         silo_tab: None,
+        cards: [None; Card::COUNT],
     }) };
 }
 
@@ -122,7 +134,7 @@ pub fn draw(frame: &mut Frame, state: &AppState) {
     let mut layout_map = LayoutMap::default();
 
     if strip_height > 0 {
-        dashboard::draw(frame, strip, state);
+        dashboard::draw(frame, strip, state, &mut layout_map);
         layout_map.dashboard = Some(strip);
     }
 
@@ -145,7 +157,7 @@ pub fn strip_height(screen: Screen, area: Rect) -> u16 {
 fn draw_content(frame: &mut Frame, area: Rect, state: &AppState, layout: &mut LayoutMap) {
     match state.screen {
         Screen::Dashboard => {
-            dashboard::draw(frame, area, state);
+            dashboard::draw(frame, area, state, layout);
             layout.dashboard = Some(area);
         }
         Screen::Triage => triage::draw_triage(frame, area, state, layout),
@@ -189,7 +201,10 @@ pub fn ticker(state: &AppState) -> String {
 }
 
 /// Status message plus the current screen's keybindings. The triage screen
-/// also advertises whether any filter is narrowing the table.
+/// also advertises whether any filter is narrowing the table. The bar renders
+/// `status_spans` instead; this is the plain-text form of the same line, kept
+/// as the contract the styled version is pinned against.
+#[cfg(test)]
 pub fn status_line(state: &AppState) -> String {
     let mut line = String::new();
     if !state.status.is_empty() {
@@ -201,6 +216,65 @@ pub fn status_line(state: &AppState) -> String {
     }
     line.push_str(keybindings(state.screen));
     line
+}
+
+/// The status line as styled spans: the message in accent, the filter marker in
+/// warning, and each binding as an accented key letter plus a dim description.
+/// The text matches `status_line` exactly.
+fn status_spans(state: &AppState) -> Line<'static> {
+    let mut spans: Vec<Span<'static>> = Vec::new();
+
+    if !state.status.is_empty() {
+        spans.push(Span::styled(state.status.clone(), theme::accent()));
+        spans.push(Span::styled(" | ", theme::dim()));
+    }
+    if state.screen == Screen::Triage && !state.filters.is_empty() {
+        spans.push(Span::styled(
+            "filtered",
+            Style::default().fg(theme::WARNING),
+        ));
+        spans.push(Span::styled(" | ", theme::dim()));
+    }
+    spans.extend(keybinding_spans(state.screen));
+
+    Line::from(spans)
+}
+
+fn keybinding_spans(screen: Screen) -> Vec<Span<'static>> {
+    let mut spans = Vec::new();
+    for (index, binding) in keybindings(screen).split(" | ").enumerate() {
+        if index > 0 {
+            spans.push(Span::styled(" | ", theme::dim()));
+        }
+        match binding.split_once(' ') {
+            Some((key, rest)) => {
+                spans.push(Span::styled(key, theme::accent()));
+                spans.push(Span::styled(format!(" {rest}"), theme::dim()));
+            }
+            None => spans.push(Span::styled(binding, theme::accent())),
+        }
+    }
+    spans
+}
+
+/// The debt counts as styled spans. Same text as the idle branch of `ticker`.
+fn counts_spans(state: &AppState) -> Line<'static> {
+    let (new, baselined, suppressed) = state.debt_counts();
+    let new_style = if new > 0 {
+        Style::default()
+            .fg(theme::ERROR)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        theme::dim()
+    };
+
+    Line::from(vec![
+        Span::styled(format!("{new} new"), new_style),
+        Span::styled(" | ", theme::dim()),
+        Span::styled(format!("{baselined} base"), theme::dim()),
+        Span::styled(" | ", theme::dim()),
+        Span::styled(format!("{suppressed} supp"), theme::dim()),
+    ])
 }
 
 fn draw_status(frame: &mut Frame, area: Rect, state: &AppState, layout: &mut LayoutMap) {
@@ -215,14 +289,25 @@ fn draw_status(frame: &mut Frame, area: Rect, state: &AppState, layout: &mut Lay
 
     draw_tabs(frame, tabs, state, layout);
 
-    frame.render_widget(Paragraph::new(status_line(state)), keys);
+    frame.render_widget(Paragraph::new(status_spans(state)), keys);
 
-    let ratio = if state.scan_running {
-        state.progress_ratio()
+    // A scan in flight gets the gauge; an idle one gets the debt counts, which
+    // carry more information per column than a full bar does.
+    if state.scan_running {
+        let gauge = Gauge::default()
+            .ratio(state.progress_ratio())
+            .gauge_style(Style::default().fg(theme::ACCENT).bg(theme::DIM))
+            .label(Span::styled(
+                ticker(state),
+                Style::default().add_modifier(Modifier::BOLD),
+            ));
+        frame.render_widget(gauge, progress);
     } else {
-        1.0
-    };
-    frame.render_widget(Gauge::default().ratio(ratio).label(ticker(state)), progress);
+        frame.render_widget(
+            Paragraph::new(counts_spans(state)).alignment(Alignment::Right),
+            progress,
+        );
+    }
 
     layout.status = Some(area);
 }
@@ -243,9 +328,11 @@ fn draw_tabs(frame: &mut Frame, area: Rect, state: &AppState, layout: &mut Layou
             format!(" {} ", screen.as_str())
         };
         let style = if selected {
-            Style::default().add_modifier(Modifier::REVERSED)
-        } else {
             Style::default()
+                .fg(theme::ACCENT)
+                .add_modifier(Modifier::REVERSED | Modifier::BOLD)
+        } else {
+            theme::dim()
         };
         frame.render_widget(Paragraph::new(text).style(style), rect);
 
@@ -277,16 +364,22 @@ fn handle_dashboard_key(state: &mut AppState, key: KeyEvent) {
     }
 }
 
-/// Clicks on a screen tab switch screens whatever the screen; everything else
-/// goes to the current screen's handler.
+/// Clicks on a screen tab switch screens whatever the screen; clicks on a KPI
+/// card open triage with that card's filter, from the dashboard screen or from
+/// the strip above another one. Everything else goes to the current screen's
+/// handler.
 pub fn handle_mouse(state: &mut AppState, event: MouseEvent) {
     let layout = layout();
 
-    if event.kind == MouseEventKind::Down(crossterm::event::MouseButton::Left)
-        && let Some(screen) = layout.screen_at(event.column, event.row)
-    {
-        state.screen = screen;
-        return;
+    if event.kind == MouseEventKind::Down(crossterm::event::MouseButton::Left) {
+        if let Some(screen) = layout.screen_at(event.column, event.row) {
+            state.screen = screen;
+            return;
+        }
+        if let Some(card) = layout.card_at(event.column, event.row) {
+            dashboard::open_card(state, card);
+            return;
+        }
     }
 
     match state.screen {
@@ -456,6 +549,62 @@ mod tests {
         layout()
     }
 
+    fn render_text(state: &AppState, width: u16, height: u16) -> String {
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
+        terminal.draw(|frame| draw(frame, state)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+
+        let mut out = String::new();
+        for y in 0..height {
+            for x in 0..width {
+                out.push_str(buffer.cell((x, y)).map_or(" ", |cell| cell.symbol()));
+            }
+            out.push('\n');
+        }
+        out
+    }
+
+    #[test]
+    fn the_dashboard_leads_with_the_quality_gate_banner() {
+        let mut state = state();
+        for (width, height) in [(80, 24), (200, 50)] {
+            let text = render_text(&state, width, height);
+            assert!(text.contains("Quality Gate"), "{width}x{height}: {text}");
+            assert!(text.contains("FAILED"), "{width}x{height}: {text}");
+            assert!(
+                text.contains("new errors above the gate"),
+                "{width}x{height}: {text}"
+            );
+        }
+
+        for row in &mut state.rows {
+            row.status = Status::Baselined;
+        }
+        let text = render_text(&state, 80, 24);
+        assert!(text.contains("PASSED"), "{text}");
+        assert!(text.contains("no new errors"), "{text}");
+    }
+
+    #[test]
+    fn clicking_a_kpi_card_opens_triage_filtered() {
+        let mut state = state();
+        let map = render(&state, 200, 50);
+
+        let card = map.cards[crate::ui::dashboard::Card::Errors.index()].unwrap();
+        handle_mouse(
+            &mut state,
+            mouse(
+                MouseEventKind::Down(MouseButton::Left),
+                card.x + 1,
+                card.y + 1,
+            ),
+        );
+
+        assert_eq!(state.screen, Screen::Triage);
+        assert!(state.filters.severities.contains(&Severity::Error));
+    }
+
     #[test]
     fn every_screen_renders_wide_and_narrow() {
         let mut state = state();
@@ -544,6 +693,167 @@ mod tests {
         );
         assert!(state.scroll.code > 0);
         assert_eq!(state.scroll.sidebar, 0);
+    }
+
+    /// Six findings spread over every severity and every status, plus a
+    /// boundary edge so the silo matrix has a violation to draw. Enough shape
+    /// for every screen to have something worth styling.
+    fn styled_state() -> AppState {
+        let mut state = AppState::new(
+            PathBuf::from("/repo"),
+            Arc::new(RuleSet {
+                rules: Vec::new(),
+                ..Default::default()
+            }),
+            None,
+        );
+
+        let specs = [
+            (
+                "secrets.aws_key",
+                Severity::Error,
+                "src/api/auth.rs",
+                Status::New,
+            ),
+            (
+                "secrets.token",
+                Severity::Error,
+                "src/api/client.rs",
+                Status::New,
+            ),
+            (
+                "style.unwrap",
+                Severity::Warning,
+                "src/core/mod.rs",
+                Status::New,
+            ),
+            (
+                "style.todo",
+                Severity::Warning,
+                "src/core/parse.rs",
+                Status::Baselined,
+            ),
+            (
+                "docs.missing",
+                Severity::Info,
+                "src/ui/view.rs",
+                Status::Baselined,
+            ),
+            (
+                "docs.stale",
+                Severity::Info,
+                "tests/smoke.rs",
+                Status::Suppressed,
+            ),
+        ];
+
+        state.rows = specs
+            .into_iter()
+            .enumerate()
+            .map(|(index, (rule, severity, path, status))| FindingRow {
+                finding: Finding {
+                    rule_id: rule.to_string(),
+                    severity,
+                    message: "hardcoded credential reaches a public boundary".to_string(),
+                    path: path.to_string(),
+                    line: index as u64 + 3,
+                    column: 5,
+                    matched: "needle".to_string(),
+                    fingerprint: format!("{index:0>64}"),
+                },
+                status,
+            })
+            .collect();
+        state.boundary_edges = vec![("api".to_string(), "core".to_string(), 0)];
+        state
+    }
+
+    /// Cells of `region` carrying a foreground color other than the terminal
+    /// default.
+    fn styled_cells(buffer: &ratatui::buffer::Buffer, region: Rect) -> usize {
+        let mut count = 0;
+        for y in region.y..region.y.saturating_add(region.height) {
+            for x in region.x..region.x.saturating_add(region.width) {
+                if buffer
+                    .cell((x, y))
+                    .is_some_and(|cell| cell.fg != ratatui::style::Color::Reset)
+                {
+                    count += 1;
+                }
+            }
+        }
+        count
+    }
+
+    /// The palette has to survive the trip through the widgets and land in the
+    /// buffer. Rendering without panicking proves nothing about color, so this
+    /// reads the cells back: charts and tables must not come out monochrome,
+    /// the dashboard must state its verdict, and a KPI card must still be a
+    /// live link into triage.
+    #[test]
+    fn styling_reaches_buffer() {
+        const WIDTH: u16 = 170;
+        const HEIGHT: u16 = 44;
+
+        let mut state = styled_state();
+
+        // (a) Every screen paints color into its main content region.
+        for screen in Screen::ALL {
+            state.screen = screen;
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(WIDTH, HEIGHT)).unwrap();
+            terminal.draw(|frame| draw(frame, &state)).unwrap();
+
+            let map = layout();
+            let region = match screen {
+                Screen::Dashboard => map.dashboard,
+                Screen::Triage | Screen::Silo => map.table,
+                Screen::Ratchet => map.code,
+            }
+            .unwrap_or_else(|| panic!("{screen:?} recorded no content region"));
+
+            // Measured inside the border: the pane frame is themed on its own,
+            // so counting it would pass this even with monochrome content.
+            let inner = Rect::new(
+                region.x.saturating_add(1),
+                region.y.saturating_add(1),
+                region.width.saturating_sub(2),
+                region.height.saturating_sub(2),
+            );
+            let styled = styled_cells(terminal.backend().buffer(), inner);
+            assert!(
+                styled > 0,
+                "{screen:?}: content of {region:?} came out monochrome"
+            );
+        }
+
+        // (b) The dashboard states the quality gate verdict in words.
+        state.screen = Screen::Dashboard;
+        let text = render_text(&state, WIDTH, HEIGHT);
+        assert!(text.contains("Quality Gate"), "{text}");
+        assert!(
+            text.contains("PASSED") || text.contains("FAILED"),
+            "no gate verdict: {text}"
+        );
+
+        // (c) A click inside the Errors card is a filtered jump to triage.
+        let map = render(&state, WIDTH, HEIGHT);
+        let card = map.cards[dashboard::Card::Errors.index()]
+            .expect("the Errors card recorded no rectangle");
+        handle_mouse(
+            &mut state,
+            mouse(
+                MouseEventKind::Down(MouseButton::Left),
+                card.x + card.width / 2,
+                card.y + card.height / 2,
+            ),
+        );
+
+        assert_eq!(state.screen, Screen::Triage);
+        assert!(
+            state.filters.severities.contains(&Severity::Error),
+            "the error filter did not follow the click"
+        );
     }
 
     #[test]
