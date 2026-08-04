@@ -7,8 +7,8 @@ use std::process;
 
 use clap::{Args, Parser, Subcommand};
 use siloscan_core::baseline::{self, Baseline};
-use siloscan_core::cache::Cache;
-use siloscan_core::config::{self, Config};
+use siloscan_core::cache::{Cache, PathScope};
+use siloscan_core::config::{self, Anchor, Config};
 use siloscan_core::coverage::{self, CoverageReport};
 use siloscan_core::harness;
 use siloscan_core::rules::{self, CompiledPayload, CompiledRule, RuleSet, Severity};
@@ -56,7 +56,8 @@ struct ScanArgs {
     #[arg(long, value_enum, default_value = "error")]
     fail_on: FailOn,
 
-    /// Baseline file (defaults to `.siloscan/baseline.json` under PATH when present)
+    /// Baseline file (defaults to `.siloscan/baseline.json` under PATH, or under the
+    /// config root when the config sets `anchor = "config"`)
     #[arg(long, value_name = "FILE")]
     baseline: Option<PathBuf>,
 
@@ -162,12 +163,23 @@ fn run_scan(args: ScanArgs) {
     }
     let coverage = load_coverage(args.coverage_report.as_deref())
         .unwrap_or_else(|e| fail(&format!("error: {e}")));
-    let baseline = match load_baseline(&args.path, args.baseline.as_deref()) {
+
+    // Resolved before the baseline is read and before the cache is opened: both
+    // are bound to a path convention, and a config asking for an anchor that
+    // cannot be honoured is a setup error rather than a scan that quietly
+    // reports the wrong paths.
+    let anchoring = scan::Anchoring::resolve(&args.path, config.as_ref())
+        .unwrap_or_else(|e| fail(&format!("error: {e}")));
+
+    let baseline = match load_baseline(
+        &baseline_root(&args.path, config.as_ref()),
+        args.baseline.as_deref(),
+    ) {
         Ok(baseline) => baseline,
         Err(e) => fail(&e),
     };
 
-    let cache = open_cache(&args.path, &rules, args.no_cache);
+    let cache = open_cache(&args.path, &rules, args.no_cache, &anchoring);
     let options = scan::ScanOptions {
         baseline: baseline.as_ref(),
         cache: cache.as_ref(),
@@ -216,10 +228,16 @@ fn run_scan(args: ScanArgs) {
                 format_args!("{}", output::human_metrics_summary(&report.metrics)),
             );
         }
-        Format::Json => emit(&mut out, format_args!("{}", output::to_json(&report))),
+        Format::Json => emit(
+            &mut out,
+            format_args!("{}", output::to_json(&report, anchoring.anchor())),
+        ),
         Format::Sarif => emit(
             &mut out,
-            format_args!("{}", output_sarif::to_sarif(&report, &rules)),
+            format_args!(
+                "{}",
+                output_sarif::to_sarif(&report, &rules, anchoring.anchor())
+            ),
         ),
     }
     let _ = out.flush();
@@ -249,7 +267,10 @@ fn run_baseline(args: BaselineArgs) {
     let coverage = load_coverage(args.coverage_report.as_deref())
         .unwrap_or_else(|e| fail(&format!("error: {e}")));
 
-    let cache = open_cache(&args.path, &rules, args.no_cache);
+    let anchoring = scan::Anchoring::resolve(&args.path, config.as_ref())
+        .unwrap_or_else(|e| fail(&format!("error: {e}")));
+
+    let cache = open_cache(&args.path, &rules, args.no_cache, &anchoring);
     let options = scan::ScanOptions {
         cache: cache.as_ref(),
         config: config.as_ref(),
@@ -265,7 +286,16 @@ fn run_baseline(args: BaselineArgs) {
         eprintln!("warning: skipped {}: {}", skipped.path, skipped.reason);
     }
 
-    match baseline::save(&args.path, &report.findings) {
+    // The findings already speak the active convention, and a baseline entry is
+    // its finding's fingerprint and path verbatim, so the entries need nothing
+    // said about them here; only the file's location follows the anchor, so that
+    // every scan measuring from the same directory reads the same baseline.
+    // Changing the anchor changes the fingerprints and so requires running this
+    // command again; that is the whole migration.
+    match baseline::save(
+        &baseline_root(&args.path, config.as_ref()),
+        &report.findings,
+    ) {
         Ok(count) => {
             let mut out = io::stdout().lock();
             emit(&mut out, format_args!("baseline written: {count} entries"));
@@ -306,32 +336,148 @@ fn run_test(args: TestArgs) {
 /// The cache lives under the scan root, so it is only available when the root
 /// is a directory. `siloscan test` never caches: a fixture run must exercise
 /// the engines.
-fn open_cache(root: &Path, rules: &RuleSet, no_cache: bool) -> Option<Cache> {
+///
+/// The anchoring is part of the cache key. A cached finding carries a path and a
+/// fingerprint derived from that path, so an entry written under one convention
+/// would be wrong under another, and the two must never share a key.
+///
+/// It stays under the scan root even under `anchor = "config"`, unlike the
+/// baseline: entries keyed by convention can never be shared across two scan
+/// roots anyway, so moving the directory would buy nothing and would make a
+/// module scan write into the repository root.
+fn open_cache(
+    root: &Path,
+    rules: &RuleSet,
+    no_cache: bool,
+    anchoring: &scan::Anchoring,
+) -> Option<Cache> {
     if no_cache || !root.is_dir() {
         return None;
     }
-    Some(Cache::open(root, rules))
+    let scope = PathScope::new(anchoring.anchor(), anchoring.prefix());
+    Some(Cache::open(root, rules, &scope))
 }
 
 /// The repository config and the extra rule directories it declares, resolved
 /// against the directory holding the config file. An explicit `--config` must
 /// exist and parse; the discovered one is simply absent when there is none.
+///
+/// A config that includes others is already merged by the time it is returned,
+/// so a rule directory contributed by an included module reaches the loader on
+/// the same footing as one the root config declared, and rule id collisions
+/// between them are caught where every other collision is.
 fn load_config(
     root: &Path,
     explicit: Option<&Path>,
 ) -> Result<(Option<Config>, Vec<PathBuf>), String> {
-    let path = match explicit {
-        Some(path) => path.to_path_buf(),
-        None => match config::discover(root) {
-            Some(path) => path,
-            None => return Ok((None, Vec::new())),
-        },
+    let config = match explicit {
+        Some(path) => Some(config::load(path)?),
+        None => discover_config(root)?,
     };
 
-    let config = config::load(&path)?;
-    let dir = path.parent().unwrap_or(Path::new(".")).to_path_buf();
-    let dirs = config.rules.iter().map(|rel| dir.join(rel)).collect();
+    let Some(config) = config else {
+        return Ok((None, Vec::new()));
+    };
+    let dirs = config.rule_dirs();
     Ok((Some(config), dirs))
+}
+
+/// The config a scan of `root` runs under when none was named on the command
+/// line: the one discovery finds, or the root config that includes it.
+///
+/// In a multimodule repository a module's `siloscan.toml` is an included file,
+/// and discovery stops at it because it sits in the scan root. Loading it as a
+/// root config would drop the repository's `anchor`, its other silos and its
+/// duplication settings without a word, so `siloscan modules/api` would report
+/// under a different convention than `siloscan .` and fingerprint every finding
+/// differently - the one thing the anchor exists to prevent. The file that
+/// declares the include owns it, so that is the config the scan runs under, and
+/// `--config` stays an override rather than a requirement.
+fn discover_config(root: &Path) -> Result<Option<Config>, String> {
+    let Some(path) = config::discover(root) else {
+        return Ok(None);
+    };
+    let config = config::load(&path)?;
+
+    // `include` is single level, so a file that includes others can never be
+    // included itself: it is already a root config and nothing above it applies.
+    if !config.include.is_empty() {
+        return Ok(Some(config));
+    }
+    Ok(Some(owning_root(&path)?.unwrap_or(config)))
+}
+
+/// The nearest config above `target` that lists `target` in its `include`.
+///
+/// The walk climbs one directory at a time and stops at the repository root,
+/// mirroring `config::discover`, so nothing outside the repository is read. Each
+/// candidate on the way is loaded, and a candidate that does not parse is an
+/// error rather than a reason to keep walking: it may be the file that owns the
+/// scan, and guessing which config a scan ran under is the failure being fixed.
+fn owning_root(target: &Path) -> Result<Option<Config>, String> {
+    let Some(mut dir) = target.parent() else {
+        return Ok(None);
+    };
+
+    while !is_repo_root(dir) {
+        let Some(parent) = dir.parent() else {
+            return Ok(None);
+        };
+        dir = parent;
+
+        let candidate = dir.join(config::CONFIG_NAME);
+        if !candidate.is_file() {
+            continue;
+        }
+        let config = config::load(&candidate)?;
+        let owns = config
+            .include
+            .iter()
+            .any(|entry| same_file(&config.config_root().join(entry), target));
+        if owns {
+            return Ok(Some(config));
+        }
+    }
+
+    Ok(None)
+}
+
+/// True when `dir` holds the marker git leaves at a repository root: a `.git`
+/// directory with a `HEAD`, or the `.git` file a worktree or submodule uses.
+/// This is the boundary `config::discover` stops at, and the ascent above must
+/// stop at the same place or a stray `siloscan.toml` in a parent directory
+/// outside the repository would be read.
+fn is_repo_root(dir: &Path) -> bool {
+    let git = dir.join(".git");
+    match git.metadata() {
+        Ok(meta) if meta.is_dir() => git.join("HEAD").exists(),
+        Ok(_) => true,
+        Err(_) => false,
+    }
+}
+
+fn same_file(a: &Path, b: &Path) -> bool {
+    let canonical = |path: &Path| path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    canonical(a) == canonical(b)
+}
+
+/// The directory the default `.siloscan/baseline.json` is read from and written
+/// to: the scan root, and under `anchor = "config"` the config root.
+///
+/// Anchoring makes a module scan and a whole-repository scan fingerprint a
+/// finding identically; a baseline they cannot both find buys nothing from that.
+/// The file therefore sits where the fingerprints are measured from, which is
+/// what makes the migration "set the key, run `siloscan baseline` once" true
+/// through the CLI instead of true only with `--baseline` pointed by hand.
+fn baseline_root(root: &Path, config: Option<&Config>) -> PathBuf {
+    match config {
+        Some(config)
+            if config.anchor == Anchor::Config && !config.config_root().as_os_str().is_empty() =>
+        {
+            config.config_root().to_path_buf()
+        }
+        _ => root.to_path_buf(),
+    }
 }
 
 /// Rule directories from the command line and from the config, in that order.
@@ -474,6 +620,10 @@ rules:
       deny: [\"db\"]
 ";
 
+    fn tempdir() -> tempfile::TempDir {
+        tempfile::tempdir().unwrap()
+    }
+
     /// Mark `dir` as a repository root the way git does, so `config::discover`
     /// may walk above it.
     fn git_root(dir: &Path) {
@@ -539,6 +689,92 @@ rules:
         let dir = tempfile::tempdir().unwrap();
         git_root(dir.path());
         assert_eq!(load_config(dir.path(), None).unwrap(), (None, Vec::new()));
+    }
+
+    /// A repository whose root config anchors on itself and includes a module
+    /// config that sits in the module directory - the shape that makes
+    /// `siloscan modules/api` and `siloscan .` interchangeable.
+    fn multimodule_repo(root: &Path) {
+        git_root(root);
+        write(
+            root,
+            "siloscan.toml",
+            "anchor = \"config\"\ninclude = [\"modules/api/siloscan.toml\"]\n\n[silos]\ncore = [\"crates/core/**\"]\n",
+        );
+        write(
+            root,
+            "modules/api/siloscan.toml",
+            "[silos]\napi = [\"src/**\"]\n",
+        );
+    }
+
+    #[test]
+    fn a_module_scan_loads_the_root_config_that_includes_the_module() {
+        let dir = tempdir();
+        multimodule_repo(dir.path());
+
+        let (config, _) = load_config(&dir.path().join("modules/api"), None).expect("should load");
+        let config = config.expect("config");
+
+        // The module's own file is an included one; adopting it as the root
+        // config would drop all three of these silently.
+        assert_eq!(config.anchor, Anchor::Config);
+        assert!(same_file(config.config_root(), dir.path()));
+        assert_eq!(config.silos.keys().collect::<Vec<_>>(), vec!["api", "core"]);
+        // The included silo is rebased onto the config root, which is what makes
+        // it match the paths a module scan reports.
+        assert_eq!(config.silos["api"], vec!["modules/api/src/**"]);
+    }
+
+    #[test]
+    fn a_module_config_nobody_includes_stays_the_root_config() {
+        let dir = tempdir();
+        git_root(dir.path());
+        write(dir.path(), "siloscan.toml", "anchor = \"config\"\n");
+        write(
+            dir.path(),
+            "modules/api/siloscan.toml",
+            "[silos]\napi = [\"src/**\"]\n",
+        );
+
+        let (config, _) = load_config(&dir.path().join("modules/api"), None).expect("should load");
+        let config = config.expect("config");
+
+        assert_eq!(config.anchor, Anchor::ScanRoot);
+        assert!(same_file(
+            config.config_root(),
+            &dir.path().join("modules/api")
+        ));
+    }
+
+    #[test]
+    fn nothing_above_the_repository_root_is_consulted() {
+        let dir = tempdir();
+        let repo = dir.path().join("repo");
+        multimodule_repo(&repo);
+        // Unreadable as a config, and outside the repository: reaching it at all
+        // would turn every module scan into an error.
+        write(dir.path(), "siloscan.toml", "nonsense = true\n");
+
+        assert!(load_config(&repo.join("modules/api"), None).is_ok());
+    }
+
+    #[test]
+    fn the_default_baseline_follows_the_anchor() {
+        let dir = tempdir();
+        multimodule_repo(dir.path());
+        let module = dir.path().join("modules/api");
+
+        let (anchored, _) = load_config(&module, None).unwrap();
+        assert!(same_file(
+            &baseline_root(&module, anchored.as_ref()),
+            dir.path()
+        ));
+
+        // Without the key the baseline is where it has always been.
+        assert_eq!(baseline_root(&module, None), module);
+        let plain = Config::default();
+        assert_eq!(baseline_root(&module, Some(&plain)), module);
     }
 
     #[test]

@@ -1,6 +1,7 @@
 use serde::Serialize;
 use std::collections::BTreeMap;
 
+use crate::config::Anchor;
 use crate::metrics::DUPLICATE_BLOCK_RULE_ID;
 use crate::rules::{RuleSet, Severity};
 use crate::scan::ScanReport;
@@ -21,11 +22,15 @@ pub struct SarifRun {
 }
 
 /// Run-level property bag. Carries the scan-wide metric totals only:
-/// per-file metrics stay out of SARIF, which is a findings transport.
+/// per-file metrics stay out of SARIF, which is a findings transport. The
+/// anchor rides along because artifact URIs are relative and mean nothing
+/// without the convention they were written in.
 #[derive(Debug, Serialize)]
 pub struct SarifRunProperties {
     #[serde(rename = "siloscan/metrics")]
     pub metrics: serde_json::Value,
+    #[serde(rename = "siloscan/anchor")]
+    pub anchor: Anchor,
 }
 
 #[derive(Debug, Serialize)]
@@ -94,6 +99,9 @@ pub struct SarifPhysicalLocation {
     pub region: SarifRegion,
 }
 
+/// A relative URI, taken verbatim from the finding. No base id is declared, so
+/// a consumer resolves it against its own checkout root; which directory that
+/// has to be is what `siloscan/anchor` states.
 #[derive(Debug, Serialize)]
 pub struct SarifArtifactLocation {
     pub uri: String,
@@ -107,7 +115,10 @@ pub struct SarifRegion {
     pub start_column: u64,
 }
 
-pub fn to_sarif(report: &ScanReport, rules: &RuleSet) -> String {
+/// Render the SARIF report. Every path in it is a finding path copied without
+/// translation, so the whole document inherits whatever convention the scan
+/// ran under; `anchor` is recorded at run level to name that convention.
+pub fn to_sarif(report: &ScanReport, rules: &RuleSet, anchor: Anchor) -> String {
     // Collect unique rule ids from report.findings
     let mut rule_ids_in_findings: std::collections::HashSet<&str> =
         std::collections::HashSet::new();
@@ -192,6 +203,7 @@ pub fn to_sarif(report: &ScanReport, rules: &RuleSet) -> String {
             properties: SarifRunProperties {
                 // Totals only, never the per-file map.
                 metrics: serde_json::to_value(&report.metrics.totals).unwrap(), // serialization cannot fail
+                anchor,
             },
         }],
     };
@@ -224,8 +236,30 @@ fn severity_to_level(severity: Severity) -> &'static str {
 mod tests {
     use super::*;
     use crate::findings::Finding;
+    use crate::metrics::Metrics;
     use crate::rules::load_str;
     use crate::scan::ScanReport;
+
+    /// Single construction point for the report, so a new `ScanReport` field
+    /// is one edit rather than one per test.
+    fn report(findings: Vec<Finding>, metrics: Metrics) -> ScanReport {
+        ScanReport {
+            findings,
+            baselined: vec![],
+            suppressed: vec![],
+            skipped: vec![],
+            graph: Default::default(),
+            boundary_edges: Vec::new(),
+            metrics,
+        }
+    }
+
+    fn no_rules() -> RuleSet {
+        RuleSet {
+            rules: vec![],
+            ..Default::default()
+        }
+    }
 
     #[test]
     fn level_mapping_is_correct() {
@@ -236,42 +270,18 @@ mod tests {
 
     #[test]
     fn to_sarif_includes_schema_version() {
-        let report = ScanReport {
-            findings: vec![],
-            baselined: vec![],
-            suppressed: vec![],
-            skipped: vec![],
-            graph: Default::default(),
-            boundary_edges: Vec::new(),
-            metrics: Default::default(),
-        };
-        let rules = RuleSet {
-            rules: vec![],
-            ..Default::default()
-        };
+        let report = report(vec![], Metrics::default());
 
-        let sarif = to_sarif(&report, &rules);
+        let sarif = to_sarif(&report, &no_rules(), Anchor::ScanRoot);
         assert!(sarif.contains("https://json.schemastore.org/sarif-2.1.0.json"));
         assert!(sarif.contains("\"version\": \"2.1.0\""));
     }
 
     #[test]
     fn to_sarif_includes_tool_metadata() {
-        let report = ScanReport {
-            findings: vec![],
-            baselined: vec![],
-            suppressed: vec![],
-            skipped: vec![],
-            graph: Default::default(),
-            boundary_edges: Vec::new(),
-            metrics: Default::default(),
-        };
-        let rules = RuleSet {
-            rules: vec![],
-            ..Default::default()
-        };
+        let report = report(vec![], Metrics::default());
 
-        let sarif = to_sarif(&report, &rules);
+        let sarif = to_sarif(&report, &no_rules(), Anchor::ScanRoot);
         assert!(sarif.contains("\"name\": \"siloscan\""));
         assert!(sarif.contains("https://github.com/RandomCodeSpace/siloscan"));
     }
@@ -288,21 +298,9 @@ mod tests {
             matched: "test".to_string(),
             fingerprint: "abc123def456".to_string(),
         };
-        let report = ScanReport {
-            findings: vec![finding],
-            baselined: vec![],
-            suppressed: vec![],
-            skipped: vec![],
-            graph: Default::default(),
-            boundary_edges: Vec::new(),
-            metrics: Default::default(),
-        };
-        let rules = RuleSet {
-            rules: vec![],
-            ..Default::default()
-        };
+        let report = report(vec![finding], Metrics::default());
 
-        let sarif = to_sarif(&report, &rules);
+        let sarif = to_sarif(&report, &no_rules(), Anchor::ScanRoot);
         assert!(sarif.contains("test.rule"));
         assert!(sarif.contains("test message"));
         assert!(sarif.contains("src/main.rs"));
@@ -312,8 +310,8 @@ mod tests {
     }
 
     #[test]
-    fn run_properties_carry_metric_totals_only() {
-        let mut metrics = crate::metrics::Metrics::default();
+    fn run_properties_carry_metric_totals_and_the_anchor() {
+        let mut metrics = Metrics::default();
         metrics.files.insert(
             "src/main.rs".to_string(),
             crate::metrics::FileMetrics {
@@ -327,21 +325,9 @@ mod tests {
         metrics.totals.duplicated_lines = 12;
         metrics.totals.duplication_density = 12.0;
 
-        let report = ScanReport {
-            findings: vec![],
-            baselined: vec![],
-            suppressed: vec![],
-            skipped: vec![],
-            graph: Default::default(),
-            boundary_edges: Vec::new(),
-            metrics,
-        };
-        let rules = RuleSet {
-            rules: vec![],
-            ..Default::default()
-        };
+        let report = report(vec![], metrics);
 
-        let sarif = to_sarif(&report, &rules);
+        let sarif = to_sarif(&report, &no_rules(), Anchor::ScanRoot);
         let parsed: serde_json::Value = serde_json::from_str(&sarif).expect("sarif is valid json");
         let properties = &parsed["runs"][0]["properties"];
         assert_eq!(
@@ -349,8 +335,12 @@ mod tests {
                 .as_object()
                 .expect("properties is an object")
                 .len(),
-            1,
-            "run properties must hold only the metrics key"
+            2,
+            "run properties must hold the metrics and anchor keys only"
+        );
+        assert_eq!(
+            properties["siloscan/anchor"],
+            serde_json::json!("scan-root")
         );
 
         let totals = &properties["siloscan/metrics"];
@@ -399,15 +389,7 @@ mod tests {
             matched: "z".to_string(),
             fingerprint: "fp3".to_string(),
         };
-        let report = ScanReport {
-            findings: vec![finding1, finding2, finding3],
-            baselined: vec![],
-            suppressed: vec![],
-            skipped: vec![],
-            graph: Default::default(),
-            boundary_edges: Vec::new(),
-            metrics: Default::default(),
-        };
+        let report = report(vec![finding1, finding2, finding3], Metrics::default());
         let rule_text = r#"
 version: 1
 rules:
@@ -425,7 +407,7 @@ rules:
             ..Default::default()
         };
 
-        let sarif = to_sarif(&report, &rules);
+        let sarif = to_sarif(&report, &rules, Anchor::ScanRoot);
         // Check that rules appear in sorted order (a.rule before z.rule)
         let a_pos = sarif.find("\"id\": \"a.rule\"").unwrap();
         let z_pos = sarif.find("\"id\": \"z.rule\"").unwrap();
@@ -474,17 +456,13 @@ rules:
             rules: load_str(rule_text, "test").expect("rules should load"),
             ..Default::default()
         };
-        let report = |findings: Vec<Finding>| ScanReport {
-            findings,
-            baselined: vec![],
-            suppressed: vec![],
-            skipped: vec![],
-            graph: Default::default(),
-            boundary_edges: Vec::new(),
-            metrics: Default::default(),
-        };
+        let with_findings = |findings: Vec<Finding>| report(findings, Metrics::default());
 
-        let sarif = to_sarif(&report(vec![block, other.clone()]), &rules);
+        let sarif = to_sarif(
+            &with_findings(vec![block, other.clone()]),
+            &rules,
+            Anchor::ScanRoot,
+        );
         let parsed: serde_json::Value = serde_json::from_str(&sarif).expect("sarif is valid json");
         let driver_rules = parsed["runs"][0]["tool"]["driver"]["rules"]
             .as_array()
@@ -505,7 +483,7 @@ rules:
         );
 
         // Without a block finding the descriptor stays out.
-        let sarif = to_sarif(&report(vec![other]), &rules);
+        let sarif = to_sarif(&with_findings(vec![other]), &rules, Anchor::ScanRoot);
         assert!(!sarif.contains(DUPLICATE_BLOCK_RULE_ID), "{sarif}");
     }
 
@@ -521,21 +499,9 @@ rules:
             matched: "text".to_string(),
             fingerprint: "fp".to_string(),
         };
-        let report = ScanReport {
-            findings: vec![finding],
-            baselined: vec![],
-            suppressed: vec![],
-            skipped: vec![],
-            graph: Default::default(),
-            boundary_edges: Vec::new(),
-            metrics: Default::default(),
-        };
-        let rules = RuleSet {
-            rules: vec![],
-            ..Default::default()
-        };
+        let report = report(vec![finding], Metrics::default());
 
-        let sarif = to_sarif(&report, &rules);
+        let sarif = to_sarif(&report, &no_rules(), Anchor::ScanRoot);
         // Verify that we have exactly one result
         let results_count = sarif.matches("\"ruleId\"").count();
         assert_eq!(results_count, 1, "should have exactly one result");
@@ -553,23 +519,36 @@ rules:
             matched: "matched".to_string(),
             fingerprint: "fingerprint".to_string(),
         };
-        let report = ScanReport {
-            findings: vec![finding],
-            baselined: vec![],
-            suppressed: vec![],
-            skipped: vec![],
-            graph: Default::default(),
-            boundary_edges: Vec::new(),
-            metrics: Default::default(),
-        };
-        let rules = RuleSet {
-            rules: vec![],
-            ..Default::default()
-        };
+        let report = report(vec![finding], Metrics::default());
 
-        let sarif1 = to_sarif(&report, &rules);
-        let sarif2 = to_sarif(&report, &rules);
+        let sarif1 = to_sarif(&report, &no_rules(), Anchor::ScanRoot);
+        let sarif2 = to_sarif(&report, &no_rules(), Anchor::ScanRoot);
         assert_eq!(sarif1, sarif2, "output should be byte-stable");
+    }
+
+    #[test]
+    fn config_anchored_run_says_so_and_leaves_paths_alone() {
+        let finding = Finding {
+            rule_id: "test.rule".to_string(),
+            severity: Severity::Warning,
+            message: "message".to_string(),
+            path: "modules/api/src/main.rs".to_string(),
+            line: 1,
+            column: 1,
+            matched: "text".to_string(),
+            fingerprint: "fp".to_string(),
+        };
+        let report = report(vec![finding], Metrics::default());
+
+        let sarif = to_sarif(&report, &no_rules(), Anchor::Config);
+        let parsed: serde_json::Value = serde_json::from_str(&sarif).expect("sarif is valid json");
+        let run = &parsed["runs"][0];
+        assert_eq!(run["properties"]["siloscan/anchor"], "config");
+        assert_eq!(
+            run["results"][0]["locations"][0]["physicalLocation"]["artifactLocation"]["uri"],
+            "modules/api/src/main.rs",
+            "the finding path must reach SARIF untranslated: {sarif}"
+        );
     }
 
     #[test]
@@ -604,15 +583,10 @@ rules:
             matched: "z".to_string(),
             fingerprint: "fp3".to_string(),
         };
-        let report = ScanReport {
-            findings: vec![finding_error, finding_warning, finding_info],
-            baselined: vec![],
-            suppressed: vec![],
-            skipped: vec![],
-            graph: Default::default(),
-            boundary_edges: Vec::new(),
-            metrics: Default::default(),
-        };
+        let report = report(
+            vec![finding_error, finding_warning, finding_info],
+            Metrics::default(),
+        );
         let rule_text = r#"
 version: 1
 rules:
@@ -634,7 +608,7 @@ rules:
             ..Default::default()
         };
 
-        let sarif = to_sarif(&report, &rules);
+        let sarif = to_sarif(&report, &rules, Anchor::ScanRoot);
         // Verify error maps to "error"
         assert!(sarif.contains("\"id\": \"test.error\""));
         let error_section = sarif.split("\"id\": \"test.error\"").nth(1).unwrap();
