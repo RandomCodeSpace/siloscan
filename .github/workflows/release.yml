@@ -4,8 +4,10 @@ on:
   push:
     tags: ["v*"]
 
+# Read-only by default, as in ci.yml. Each job that writes to the release says
+# so for itself below, so a job that only builds cannot publish one.
 permissions:
-  contents: write
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -14,8 +16,11 @@ jobs:
   create-release:
     name: Create release
     runs-on: ubuntu-latest
+    # Creates the release the other jobs attach assets to.
+    permissions:
+      contents: write
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Verify the tag matches the workspace version
         env:
           REF_NAME: ${{ github.ref_name }}
@@ -43,6 +48,9 @@ jobs:
     name: Build ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
     needs: create-release
+    # Uploads the archives and checksums to the release.
+    permissions:
+      contents: write
     strategy:
       fail-fast: false
       matrix:
@@ -54,16 +62,38 @@ jobs:
           - os: windows-latest
             target: x86_64-pc-windows-msvc
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master, 2026-07-16
         with:
+          toolchain: stable
           targets: ${{ matrix.target }}
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
       - name: Install musl tools
         if: matrix.target == 'x86_64-unknown-linux-musl'
         run: sudo apt-get update && sudo apt-get install -y musl-tools
       - name: Build
-        run: cargo build --release --target ${{ matrix.target }} -p siloscan -p siloscan-tui
+        run: cargo build --locked --release --target ${{ matrix.target }} -p siloscan -p siloscan-tui
+      # The archives redistribute the third-party crates statically linked into
+      # the binaries built above, so their license terms have to travel with
+      # them. The file is generated from the resolved dependency graph for this
+      # exact target; a linked crate that yields no license text fails the job.
+      - name: Generate THIRD-PARTY-LICENSES
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          if command -v python3 >/dev/null 2>&1; then
+            python=python3
+          else
+            python=python
+          fi
+          "$python" scripts/third-party-licenses.py \
+            --target "$TARGET" \
+            --package siloscan \
+            --package siloscan-tui \
+            --output "target/$TARGET/release/THIRD-PARTY-LICENSES"
+          test -s "target/$TARGET/release/THIRD-PARTY-LICENSES"
       - name: Package (unix)
         if: runner.os != 'Windows'
         env:
@@ -73,7 +103,7 @@ jobs:
           cp LICENSE NOTICE README.md "target/$TARGET/release/"
           cd "target/$TARGET/release"
           tar czf "siloscan-$REF_NAME-$TARGET.tar.gz" \
-            siloscan ss siloscan-tui LICENSE NOTICE README.md
+            siloscan ss siloscan-tui LICENSE NOTICE THIRD-PARTY-LICENSES README.md
       - name: Checksums (unix)
         if: runner.os != 'Windows'
         env:
@@ -97,7 +127,7 @@ jobs:
         run: |
           Copy-Item LICENSE, NOTICE, README.md -Destination "target/$env:TARGET/release/"
           cd "target/$env:TARGET/release"
-          Compress-Archive -Path siloscan.exe, ss.exe, siloscan-tui.exe, LICENSE, NOTICE, README.md -DestinationPath "siloscan-$env:REF_NAME-$env:TARGET.zip"
+          Compress-Archive -Path siloscan.exe, ss.exe, siloscan-tui.exe, LICENSE, NOTICE, THIRD-PARTY-LICENSES, README.md -DestinationPath "siloscan-$env:REF_NAME-$env:TARGET.zip"
       - name: Checksums (windows)
         if: runner.os == 'Windows'
         shell: pwsh
@@ -111,24 +141,89 @@ jobs:
           "$digest  $archive" | Out-File -FilePath "SHA256SUMS-$env:TARGET.txt" -Encoding ascii
           Get-Content "SHA256SUMS-$env:TARGET.txt"
       - name: Upload to release
-        uses: softprops/action-gh-release@v3
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
         with:
           files: |
             target/${{ matrix.target }}/release/siloscan-*.tar.gz
             target/${{ matrix.target }}/release/siloscan-*.zip
             target/${{ matrix.target }}/release/SHA256SUMS-*.txt
 
+  sbom:
+    name: SBOM
+    runs-on: ubuntu-latest
+    needs: create-release
+    # Uploads the SBOMs and their checksums to the release.
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master, 2026-07-16
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - name: Install cargo-cyclonedx
+        env:
+          CYCLONEDX_VERSION: "0.5.9"
+          CYCLONEDX_SHA256: fb8dbee9f182173e062a64a387b21a0badc6fab8b2abf9294973f012972bf6d8
+        run: |
+          set -euo pipefail
+          asset="cargo-cyclonedx-x86_64-unknown-linux-gnu.tar.xz"
+          url="https://github.com/CycloneDX/cyclonedx-rust-cargo/releases/download/cargo-cyclonedx-$CYCLONEDX_VERSION/$asset"
+          curl --proto '=https' --tlsv1.2 -sSfL "$url" -o cyclonedx.tar.xz
+          echo "$CYCLONEDX_SHA256  cyclonedx.tar.xz" | sha256sum -c -
+          mkdir -p cyclonedx
+          tar xJf cyclonedx.tar.xz -C cyclonedx --strip-components 1
+          sudo install -m 0755 cyclonedx/cargo-cyclonedx /usr/local/bin/cargo-cyclonedx
+          rm -rf cyclonedx.tar.xz cyclonedx
+          cargo cyclonedx --version
+      - name: Verify Cargo.lock is current
+        run: |
+          cargo metadata --locked --format-version 1 > /dev/null
+          git diff --exit-code -- Cargo.lock
+      - name: Generate CycloneDX SBOMs
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)"
+          export SOURCE_DATE_EPOCH
+          cargo cyclonedx --all --format json --spec-version 1.5 --target all --override-filename bom
+          mkdir -p sbom
+          for crate in siloscan siloscan-tui; do
+            src="crates/$crate/bom.json"
+            if [ ! -s "$src" ]; then
+              echo "cargo-cyclonedx produced no SBOM for $crate" >&2
+              exit 1
+            fi
+            mv "$src" "sbom/$crate-$REF_NAME.cdx.json"
+          done
+          cd sbom
+          sha256sum ./*.cdx.json > SHA256SUMS-sbom.txt
+          cat SHA256SUMS-sbom.txt
+      - name: Upload SBOMs to release
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
+        with:
+          files: |
+            sbom/*.cdx.json
+            sbom/SHA256SUMS-sbom.txt
+
   publish:
     name: Publish to crates.io
     runs-on: ubuntu-latest
-    needs: binaries
+    needs: [binaries, sbom]
+    # Publishes to crates.io with a registry token, and touches the GitHub
+    # release not at all: the inherited read scope is all it needs.
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master, 2026-07-16
+        with:
+          toolchain: stable
       - name: Publish crates in dependency order
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: |
-          cargo publish -p siloscan-core
-          cargo publish -p siloscan
-          cargo publish -p siloscan-tui
+          cargo publish --locked -p siloscan-core
+          cargo publish --locked -p siloscan
+          cargo publish --locked -p siloscan-tui

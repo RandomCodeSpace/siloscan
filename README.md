@@ -14,54 +14,34 @@ output, byte for byte.
 
 ## Features
 
-- **Six rule domains**: `regex:`, `secret:` and `duplication:` (code duplication
-  gates) rules work on any text file in any language; `ast:` (tree-sitter
-  structural queries) and `boundary:` (architecture rules) cover ten tier-1
-  languages: Rust, Python, JavaScript, TypeScript, Go, Java, C, C++, C#, Ruby.
-  `coverage:` rules gate on parsed test-coverage reports (lcov / cobertura).
+- **Five rule domains**: `regex:` and `secret:` rules work on any text file in
+  any language; `ast:` (tree-sitter structural queries) and `boundary:`
+  (architecture rules) cover ten tier-1 languages: Rust, Python, JavaScript,
+  TypeScript, Go, Java, C, C++, C#, Ruby. `coverage:` rules gate on parsed
+  test-coverage reports (lcov / cobertura).
 - **Batteries included**: a default secrets ruleset (derived from the MIT
   gitleaks rules, see NOTICE) is embedded in the binary; `--no-default-rules`
-  opts out.
+  opts out. Three high-noise gitleaks rules are intentionally omitted due to
+  regex complexity limits.
 - **Brownfield-ready**: `siloscan baseline` records existing findings as
   accepted debt; from then on only new findings fail the build. Inline
-  `siloscan-ignore` comments handle per-site exceptions. Baseline fingerprints
-  are stable across module and repository scans via the `anchor` config.
-- **Size and duplication metrics**: per-file line counts, code-line counts
-  (tier-1 languages only), and duplicated-line counts; scan-wide totals.
-  Deterministic metrics embedded in JSON reports.
-- **Duplication detection**: language-agnostic normalized-line rolling-window
-  matching; configurable minimum block size; reported as duplicate-block
-  findings with 12-hex SHA-256 block identity. Block findings respect baselines
-  and suppression like any finding.
+  `siloscan-ignore` comments handle per-site exceptions.
 - **Architecture boundaries**: declare named silos in `siloscan.toml`; boundary
   rules flag direct cross-silo imports, resolved against the scanned tree.
-- **Multi-module support**: root config can include module-level configs; each
-  module's silos, source roots and rules are merged and rebased to the root's
-  convention. Enables per-module configuration without duplicate roots.
-- **Interactive TUI**: `siloscan-tui` - dashboard with KPI cards and silo
-  severity matrix, filterable triage board with code context, ratchet console
-  for per-finding debt decisions, and silo dependency matrix. Snapshot mode
-  loads JSON reports read-only. Mouse and keyboard.
+- **Interactive TUI**: `siloscan-tui` - dashboard charts, filterable triage
+  board with code context, a ratchet console for per-finding debt decisions,
+  and a silo dependency matrix. Mouse and keyboard.
 - **Deterministic**: canonical finding order (path, line, column, rule id);
-  warm and cold cache runs produce byte-identical output. Metrics and duplication
-  blocks sort consistently.
+  warm and cold cache runs produce byte-identical output.
 - **Offline**: static binaries. Nothing is fetched, ever.
-- **Ignore-aware, not blind**: respects `.gitignore` and `.ignore`, honored
-  whether or not a `.git` directory exists. Hidden files and directories are
-  scanned - `.env`, `.npmrc`, `.github/workflows/` and `.circleci/` are where
-  secrets actually live - while version-control internals (`.git`, `.hg`,
-  `.svn`, `.jj`, `.bzr`) and siloscan's own `.siloscan` state directory are
-  excluded by name at any depth below the scan root. A dotfile listed in an
-  ignore file stays ignored. Binaries and non-UTF-8 files are skipped.
-
-> **Upgrading from 1.1.0**: hidden files are now scanned. A repository with a
-> committed `.env`, `.npmrc`, or `.github/workflows/` will gain findings that
-> earlier versions never looked for, and an existing baseline does not cover
-> them - it was written before those files were walked. If those findings are
-> accepted, run `siloscan baseline .` once and commit the result.
+- **Ignore-aware**: respects `.gitignore` and `.ignore`, skips binaries and
+  non-UTF-8 files. Hidden files are scanned - `.env`, `.npmrc`, `.github/workflows/`
+  are where secrets actually live.
+- **Untrusted input handling**: the cache lives outside the scanned tree and
+  entries are authenticated per directory. Symlinks are not followed. Paths
+  named in config are contained to the config directory.
 - **Stable finding identity**: SHA-256 fingerprints survive unrelated line
-  drift and feed baselines and SARIF `partialFingerprints`. Duplication block
-  identity is the normalized-line hash.
+  drift and feed baselines and SARIF `partialFingerprints`.
 
 ## Install
 
@@ -70,37 +50,11 @@ cargo install siloscan        # scanner (binaries: siloscan and ss)
 cargo install siloscan-tui    # interactive TUI
 ```
 
-`cargo install` works on any platform with a Rust toolchain and a C compiler;
-see [Building from source](#building-from-source).
-
-Prebuilt archives are attached to
+Prebuilt binaries are attached to
 [GitHub releases](https://github.com/RandomCodeSpace/siloscan/releases) for
-three targets only, each with a matching `SHA256SUMS` file:
-
-| Target | Archive |
-| --- | --- |
-| `x86_64-unknown-linux-musl` | `.tar.gz` |
-| `aarch64-apple-darwin` | `.tar.gz` |
-| `x86_64-pc-windows-msvc` | `.zip` |
-
-Each archive carries `siloscan`, `ss`, `siloscan-tui`, `LICENSE`, `NOTICE` and
-this README. Nothing is published for any other target - x86_64 macOS, aarch64
-Linux and aarch64 Windows are `cargo install` only.
-
-`ss` is a short alias binary for `siloscan` - note it shadows the iproute2
-socket-statistics tool if `~/.cargo/bin` precedes `/usr/bin` in your PATH.
-
-## Building from source
-
-```sh
-cargo build --release
-```
-
-- **Rust 1.96 or newer.** Declared as `rust-version` in the workspace manifest;
-  older toolchains refuse the build.
-- **A C toolchain on `PATH`.** The tree-sitter runtime and the ten bundled
-  grammars ship C sources that are compiled by build scripts, so `cc` and `ar`
-  (binutils) must be available. There is no prebuilt-grammar path.
+Linux musl, macOS arm64, and Windows x86-64. `ss` is a short alias binary for
+`siloscan` - note it shadows the iproute2 socket-statistics tool if `~/.cargo/bin`
+precedes `/usr/bin` in your PATH.
 
 ## Usage
 
@@ -110,29 +64,90 @@ ss . --rules ./rules                # add your own rules (ss = same binary)
 siloscan . --format json            # machine-readable
 siloscan . --format sarif           # GitHub code scanning
 siloscan . --fail-on warning        # tighten the gate
+siloscan . --min-severity warning   # print less, without changing the gate
+siloscan . --follow-symlinks        # read in-root symlink targets too
+siloscan . --cache-dir /tmp/sscache # cache somewhere specific
 siloscan baseline .                 # accept current findings as debt
 siloscan test ./rules/fixtures      # verify rules against annotated fixtures
+siloscan cache prune .              # drop stale entries now
 siloscan . --coverage-report cov.lcov
 siloscan-tui .                      # interactive triage
-siloscan-tui --report report.json   # load snapshot (read-only)
 ```
+
+`--fail-on` and `--min-severity` do different jobs and are deliberately
+independent. `--fail-on` decides the exit code, over everything the scan found.
+`--min-severity` decides what gets printed, in every format and across all three
+lists (`findings`, `baselined`, `suppressed`). Filtering the output can neither
+turn a failing run green nor a green run red, and it moves no fingerprint.
 
 Exit codes: `0` clean, `1` new findings at or above the `--fail-on` threshold
 (default `error`), `2` usage, config, or rule-load error. Baselined and
 suppressed findings are reported but never fail the build.
 
-A scan that *cannot be evaluated* exits `2` rather than `0`. An empty report is
-indistinguishable from a clean tree, so siloscan refuses the cases where it
-would be producing one for the wrong reason:
+A scan that cannot be evaluated exits `2` rather than `0`. An empty report is
+indistinguishable from a clean tree, so siloscan refuses cases where it would
+produce one for the wrong reason:
 
-- **No rules loaded.** `--no-default-rules` with no `--rules` directory, or
-  `--rules` pointing at a directory holding no rule files, checks nothing.
-  The message names the rule directories searched and whether the built-in
-  pack was in play. This applies to `siloscan-tui` identically.
-- **A gate with no input.** A `coverage` rule with no `--coverage-report` to
-  read reports nothing regardless of the real coverage, so the rule is named
-  and the scan is refused. Boundary and silo-scoped duplication rules are
-  refused the same way when no `siloscan.toml` defines `[silos]`.
+- **No rules loaded**: `--no-default-rules` with no `--rules`, or `--rules`
+  pointing at a directory holding no rule files. The error message names the
+  rule directories searched and whether the built-in pack was in play.
+- **A gate with no input**: A `coverage` rule with no `--coverage-report`,
+  or a boundary rule with no `siloscan.toml` defining `[silos]`. The error
+  names the rule and the missing input rather than silently passing.
+
+## Upgrading from 1.3.0
+
+**`metrics.duplicate-block` findings are off by default.** Duplication is still
+measured and still reported - `metrics.files[*].duplicated_lines`, the totals
+and the density are unchanged - but the per-copy locations are no longer emitted
+as findings. They were emitted per copy of every duplicated block, so on a real
+tree they outnumbered everything else by two or three orders of magnitude: 46,891
+of 47,102 findings on one Rust codebase, a SARIF file too large for GitHub code
+scanning to ingest, and every secret in the run buried under them.
+
+Turn them back on either way:
+
+```toml
+# siloscan.toml
+[duplication]
+report_blocks = true
+```
+
+or by loading a `duplication:` rule, since gating on duplication is asking where
+the duplication is:
+
+```yaml
+- id: quality.max-duplication
+  severity: warning
+  message: "duplication above threshold"
+  duplication:
+    max_percent: 5
+```
+
+Either way you get exactly the findings 1.3.0 produced, with the same
+fingerprints, so an existing baseline still covers them.
+
+**New generic secret rules.** The pack gained three; see
+[Default secrets pack](#default-secrets-pack) for what they match. Two ship at
+`error` and can fail a build that was green on 1.3.0, on findings no existing
+baseline covers. Re-run `siloscan baseline .` to accept them as debt, or scan
+once with `--min-severity` to read them before deciding.
+
+**New `--min-severity` flag.** It decides what gets printed and never what gets
+found, so it cannot turn a failing run green. When it is in play the threshold is
+recorded in the report - `min_severity` in JSON, `siloscan/minSeverity` in the
+SARIF run properties - so a consumer can tell a report that withheld findings
+from one that had none to withhold. An unfiltered run carries neither key.
+
+**Scan warnings reach the machine-readable formats.** What the scan narrowed and
+why - a coverage report that landed on none of the files a subdirectory scan
+walked, for instance - was previously only on stderr. It is now also the
+`warnings` array in JSON and `invocations[].toolExecutionNotifications` in SARIF.
+A run that narrowed nothing emits an empty `warnings` array and no `invocations`
+at all.
+
+**The cache moved out of the scanned tree.** See
+[Cache location and authentication](#cache-location-and-authentication).
 
 ## Rule schema
 
@@ -177,49 +192,15 @@ rules:
     message: "coverage below threshold"
     coverage:
       min: 80
-
-  - id: quality.too-much-duplication
-    severity: warning
-    message: "duplication density exceeds threshold"
-    duplication:
-      max_percent: 20           # 0 < max_percent <= 100
-      scope: scan               # scan | file | silo
 ```
 
 ```toml
 # siloscan.toml - discovered at the scan root or walking up to the nearest
-# repository root (.git), from there up to the filesystem root, then stopping
+# repository root (.git), from there up to filesystem root, then stopping
 [silos]
 core = ["crates/core/**"]
 web  = ["crates/web/**"]
-
-# Optional: metrics configuration
-[duplication]
-min_lines = 10                # min_lines >= 2 (default 10)
-
-# Optional: path anchoring
-anchor = "config"             # "scan-root" (default) or "config"
-
-# Optional: resource limits
-[limits]
-max_parse_bytes = 2097152     # default 2 MiB
-
-# Optional: multi-module config (root-only)
-include = ["modules/api/siloscan.toml"]
 ```
-
-`[limits] max_parse_bytes` caps the size of any single file the scanner will
-hand to a parser. A file larger than the cap is still read, still matched by the
-regex and secret engines, and still measured; only its parse tree is skipped, so
-it contributes no ast findings. Every such file is recorded in the report's
-`skipped` array with a reason naming the limit, so the findings it could not
-produce are never read as a clean file. The default is 2 MiB (2097152 bytes).
-
-When a boundary rule is loaded, a file larger than the cap is not parsed but is
-entered in the import graph as a node with no outbound imports: imports *of* it
-still resolve, so other files' violations are still reported, while the imports
-it makes are not analysed. The skip is recorded in the report's `skipped` array
-with a reason naming the file's size and the cap.
 
 Unknown keys, duplicate ids, invalid patterns, and unknown silo names are load
 errors - rules fail loudly, never silently.
@@ -234,142 +215,119 @@ print(diagnostics)
 
 `siloscan baseline .` writes `.siloscan/baseline.json` (check it in). Only an
 explicit re-baseline updates it; the ratchet only tightens. The TUI's ratchet
-console makes these decisions per finding. Fingerprints remain stable across
-module and repository scans when `anchor = "config"` is set.
+console makes these decisions per finding.
 
-## JSON report format
+## Cache location and authentication
 
-The `--format json` output includes a machine-readable findings array and
-schema metadata:
+The cache lives outside the scanned tree to prevent a committed cache from
+suppressing findings. Cache entries are stored under the invoking user's cache
+directory:
 
-```json
-{
-  "version": "1.1.2",
-  "findings": [
-    {
-      "rule_id": "secrets.stripe-access-token",
-      "severity": "error",
-      "message": "Found a Stripe Access Token, posing a risk to payment processing services and sensitive financial data.",
-      "path": "src/config.rs",
-      "line": 42,
-      "column": 12,
-      "matched": "<redacted>",
-      "fingerprint": "00f13c99a1d5c00060ab482949f6206276bf13a3410527de9dae109d6913d53d"
-    }
-  ],
-  "baselined": [],
-  "suppressed": [],
-  "skipped": [
-    {
-      "path": "vendor/large-crate.rs",
-      "reason": "file size exceeds [limits] max_parse_bytes (5242880 > 2097152)"
-    }
-  ],
-  "schema_version": "1.2",
-  "metrics": {
-    "files": {
-      "src/config.rs": {
-        "lines": 150,
-        "code_lines": 120,
-        "duplicated_lines": 10
-      }
-    },
-    "totals": {
-      "lines": 500,
-      "code_lines": 400,
-      "duplicated_lines": 30,
-      "duplication_density": 6.0
-    }
-  },
-  "anchor": "scan-root",
-  "ignored": {
-    "files": 3,
-    "directories": 1
-  }
-}
-```
+- **Unix**: `$XDG_CACHE_HOME/siloscan` (or `$HOME/.cache/siloscan` if
+  `XDG_CACHE_HOME` is unset)
+- **Windows**: `%LOCALAPPDATA%\siloscan`
 
-The `schema_version` field declares the report contract version. It is
-additive-only: a consumer unknown to version X but supporting version Y >= X
-can read the report. The `version` field is the scanner's semantic version (for
-diagnostic purposes only; the schema version is authoritative). Absent
-`code_lines` indicates a non-tier-1 language. Duplicate-block findings carry the
-12-hex normalized-block hash in the matched text. The `anchor` key names the
-path convention all findings, skipped files, and metrics keys use.
+Within that directory, each scan root gets a subdirectory named by a hash of
+its canonical absolute path. An in-tree `.siloscan/cache` is never read or
+written.
 
-The `skipped` array contains every file that was not scanned, including reasons:
-binary files, invalid UTF-8, and any file exceeding size limits. Findings are
-never silently omitted.
+Versions up to and including 1.3.0 kept the cache in the scanned tree at
+`.siloscan/cache`. Since 1.4.0 that directory is ignored entirely; if an older
+release left one behind, it is dead weight and can be deleted. `.siloscan/`
+still holds the baseline, which is live and should be kept.
 
-The `ignored` object counts what an ignore file kept out of the walk entirely,
-which is a different thing from `skipped`: a skipped file was looked at and
-could not be read, an ignored one was never opened. A report with no findings
-and a non-zero `ignored` is **not** a clean tree - it is a tree the scan did
-not fully look at, and a gate reading this report can now tell the two apart.
-The same statement appears as one line in human output, printed above the
-metrics summary.
+Use `--cache-dir DIR` to store entries in a specific directory instead. The
+per-scan-root subdirectory still applies inside it, providing correctness
+guarantees for scans of different roots that might share a cache directory.
 
-The count is deliberately coarse, and the caveat matters: **an ignored
-directory counts as one, and its contents are not walked and so are counted
-nowhere.** `"directories": 1` may stand for one empty folder or for a
-`node_modules` with forty thousand files beneath it. The field answers "was
-anything held back", not "how much". Use `--no-ignore` to scan the excluded
-files.
+Entries carry authentication tags computed with a per-directory salt. The salt
+is derived solely from the operating system's random source (`/dev/urandom` on
+unix, `getrandom` on other platforms). A tag that is absent, malformed, or
+does not recompute is a cache miss - never an error, never a warning. A
+committed cache or a moved cache costs a rescan rather than a wrong answer.
 
-A finding from a secret rule reports `matched` as `<redacted>`: the credential
-itself never reaches the report, in any of the three finding arrays. Its
-`fingerprint` is unchanged - it is computed over the real matched text - so
-baselines, suppressions and SARIF `partialFingerprints` written before the
-redaction still identify the same occurrence.
+Where the OS random source cannot be reached, there is no salt at all: every
+entry is a miss and every scan runs cold. A cold scan is a correct scan and is
+the only safe direction to fail.
 
-`fingerprint` is a bare lowercase-hex SHA-256 digest - 64 hex characters, no
-`sha256-` prefix or any other decoration - over the rule id, the path, the
-whitespace-normalized matched text, and the occurrence index within the file.
-Line and column are deliberately excluded, so edits above a finding leave its
-fingerprint untouched.
+Entries are removed when they were written by a different build, and when
+nothing has written them for 30 days. The second is what bounds the directory:
+an entry is keyed by content, so every edit to a file abandons the entry for its
+previous contents. The sweep runs after an upgrade and otherwise at most once a
+month; `siloscan cache prune PATH` runs it on demand. Removing an entry that was
+still wanted costs one file re-scanned once.
 
-## Known trade-offs
+Use `--no-cache` to bypass the cache entirely.
 
-- **Memory cost of duplication detection**: file contents are held in memory
-  during the cross-file normalized-line pass, so a very large tree still costs
-  memory proportional to the text it contains. `[limits] max_parse_bytes` does
-  not bound this - it gates parsing, not reading, and an oversized file still
-  reaches the duplication pass.
-- **Duplication block filtering**: findings respect ignore files (`gitignore`,
-  `.ignore`) and inline suppression like any rule, but have no dedicated
-  path-filter configuration separate from rule paths. A duplication rule with
-  `paths.exclude` filters its blocks before they are reported, not per-block
-  location.
-- **Duplication scope and silos**: `scope: silo` requires silos to be declared
-  in the config. Without a config, or with a config defining no silos, the scan
-  refuses to run with an error naming the rule rather than reporting a passing
-  gate.
+## Symlinks
 
-## Architecture
+Symlinks are not followed by default, and **a link whose target is outside the
+scan root is never followed, with or without a flag**. A scan that reads files
+above its own root is a scan of the machine it ran on, and its result stops
+being a statement about the tree under review.
 
-Cargo workspace: `siloscan-core` (library: walker, loader, six engines,
-semantic graph, cache, baseline, metrics, outputs), `siloscan` (CLI, also
-built as `ss`), `siloscan-tui` (ratatui interface). Grammars sit behind
-per-language cargo features (`lang-all` by default). The incremental cache
-(`.siloscan/cache/`, content-hash keyed) keeps rescans fast; `--no-cache`
-bypasses it, and `siloscan cache prune PATH` drops entries left behind by an
-older build when no scan is coming to do it.
+Every link the walk meets is accounted for. The ones whose target the scan did
+not read appear in the `skipped` array, each with the reason it was not read:
 
-The full design record - every decision with its alternatives - lives in the
-[planning map](https://github.com/RandomCodeSpace/siloscan/issues/1).
+| Link | Target read? | In `skipped`? |
+| --- | --- | --- |
+| Target outside the scan root | no, refused | yes |
+| Broken (target does not exist) | no | yes |
+| Target could not be resolved | no | yes |
+| Target inside the scan root | yes, on its own path | no |
+| Directory containing the link | yes, on its own path | no |
 
-## Default pack coverage
+The last two are the reason `skipped` stays worth reading. A link to a file
+inside the scan root costs no coverage, because the walk reaches that file on
+its own path anyway; listing it as skipped would claim the scan missed
+something it read, and would bury the links that do cost coverage.
 
-The embedded secrets ruleset is derived from [gitleaks](https://github.com/gitleaks/gitleaks)
-v8.30.1 (MIT); see [NOTICE](NOTICE) for full attribution.
+`--follow-symlinks` additionally reads an in-root target *through* the link, so
+a file behind one is scanned twice and reported under both paths. That double
+report is what following means, and it is why the flag is opt-in. Its use is
+reaching a file the walk would not otherwise open - a link naming an ignored
+path, say. It does not widen the scan past the scan root.
 
-Three high-noise gitleaks rules are intentionally omitted:
-- `generic-api-key`: pattern's compiled regex exceeds the Rust regex crate's 10 MiB size limit
-- `pypi-upload-token`: same regex size limit
-- `vault-batch-token`: same regex size limit
+## Config path containment
 
-If you need a generic high-entropy secret rule, write a `secret:` rule with a pattern
-narrower than the gitleaks version, a minimal keyword requirement, or both. Example:
+Every path declared in `siloscan.toml` - including `rules`, `source_roots`,
+and `include` - must resolve inside the config directory when all symlinks are
+followed. Absolute paths are refused with an error at load time, and a path
+that climbs out of the config root via `..` or lands outside via a symlink is
+refused. An included config file inherits the same containment boundary from
+its location.
+
+This closes the path by which a repository could point the scan at rule
+directories outside itself. Shared rule packs are passed on the command line
+with `--rules`, which takes any path because the operator chose it.
+
+## Default secrets pack
+
+The embedded ruleset is derived from gitleaks v8.30.1 (MIT). Three rules are
+intentionally omitted because their patterns exceed the Rust regex crate's
+10 MiB size limit: `generic-api-key`, `pypi-upload-token`, and
+`vault-batch-token`.
+
+Since 1.4.0 the pack also carries three hand-written generic rules, which cover
+the ground `generic-api-key` did with narrower patterns:
+
+| Rule | Severity | Matches |
+| --- | --- | --- |
+| `secrets.generic-credentialed-url` | `error` | a password inside a `scheme://user:pass@host` URL |
+| `secrets.aws-secret-access-key` | `error` | a 40-character AWS secret beside an AWS-secret identifier |
+| `secrets.generic-secret-assignment` | `warning` | a high-entropy value assigned to a secret-like name |
+
+The first two match a specific shape and ship at `error`. The third is a
+heuristic - it matches on the shape of the assignment, not on the credential -
+and ships at `warning` so it stays out of the default `--fail-on error` gate.
+It does not fire on a value another rule already names: one credential is one
+finding, so a `ghp_` literal is `secrets.github-pat` and nothing else.
+
+There is no per-rule off switch. To silence one of these, use a
+`siloscan-ignore` comment per site, `siloscan baseline .` for existing debt, or
+`--no-default-rules` with a `--rules` directory of your own.
+
+A narrower rule of your own looks like this:
 
 ```yaml
 - id: secrets.high-entropy-token
@@ -381,212 +339,33 @@ narrower than the gitleaks version, a minimal keyword requirement, or both. Exam
     keywords: [token, key, secret]
 ```
 
-## Scanner scope and ignore semantics
+## Architecture
 
-### Config discovery
+Cargo workspace: `siloscan-core` (library: walker, loader, five engines,
+semantic graph, cache, baseline, outputs), `siloscan` (CLI, also built as
+`ss`), `siloscan-tui` (ratatui interface). Grammars sit behind per-language
+cargo features. The incremental cache keeps rescans fast; `--no-cache`
+bypasses it.
 
-The `siloscan.toml` file is discovered by walking upward from the scan root
-until one is found at the scan root itself, or until a repository boundary
-(a `.git` directory with a `HEAD` file or a `.git` file for a worktree) is
-reached. An ancestor's config is adopted only if found before hitting the
-repository boundary; the walk stops at that boundary. This keeps a scan
-self-contained: a config outside the repository (e.g. in `$HOME` or `/`) is
-never consulted.
+The full design record lives in the
+[planning map](https://github.com/RandomCodeSpace/siloscan/issues/1).
 
-The marker is required, not merely respected. If the walk reaches the
-filesystem root without finding a `.git` at or above the scan root, whatever
-config it passed on the way is **discarded**, not adopted. The practical
-consequence: an exported tarball, a `git archive` checkout, or any copy of a
-subtree without its `.git` scans with **no config at all** - no silos, no
-source roots, no anchor - and rules that need one are refused (exit `2`)
-rather than silently skipped. Pass `--config FILE` explicitly for those trees.
+## Known limitations
 
-### Ignore file scope
-
-A scan reads the ignore files inside the tree it was pointed at, and no others.
-`.gitignore` and `.ignore` files at or below `PATH` are honored, whether or not
-a `.git` directory exists. Ignore files in parent directories, git's global
-`core.excludesFile`, and `PATH/.git/info/exclude` are deliberately **not**
-consulted.
-
-That is a narrower rule than "files ignored in version control stay ignored in
-the scan", and the difference is the point: the three sources left out all live
-outside the tree under review. `core.excludesFile` belongs to whoever invoked
-the scan, `.git/info/exclude` is per-clone and untracked, and a parent
-directory's `.gitignore` is not part of the tree at all. Consulting them makes
-the same commit scan differently on two machines. Leaving them out makes a scan
-self-contained and reproducible.
-
-**Behavior change from 1.1.1**: those three sources used to affect the walk and
-no longer do. Each is recoverable with the matching `--respect-*` flag below.
-
-### Scanning a subdirectory
-
-The rule has a consequence worth stating plainly. A scan rooted below the
-repository root only sees ignore files at or below that root, so a repository
-whose `.gitignore` sits at the top does not prune anything for
-`siloscan services/api`. The scan will descend into build output, `node_modules`,
-`target/`, `vendor/` and anything else the root `.gitignore` would have
-excluded - slower, and noisy with findings from code nobody wrote.
-
-Three ways out, in the order worth trying:
-
-- scan from the repository root and narrow with a rule's `paths` envelope or a
-  silo config;
-- put a `.gitignore` or `.ignore` inside the directory being scanned, which
-  makes the exclusion part of the tree and therefore reproducible;
-- pass `--respect-parent-ignores`, which restores the 1.1.1 behavior for this
-  source and reintroduces its machine-dependence;
-- set `anchor = "config"` in the project's `siloscan.toml` (see below), which
-  declares the config root to be the project and brings exactly that project's
-  ignore files into scope - bounded, unlike `--respect-parent-ignores`.
-
-A config-anchored scan is the one case where a scan reads ignore files above
-its own root, and the boundary is the config root rather than the filesystem.
-Under `anchor = "config"`, `siloscan modules/api` also honors the `.gitignore`
-and `.ignore` files in the config root and in every directory between it and
-the scan root. That is what makes a module scan comparable to a root scan: a
-file the project ignores is absent from both, so a baseline written at the root
-still covers the module. Nothing above the config root is read, and under the
-default `anchor = "scan-root"` nothing above the scan root is read at all. Each
-file is still honored only through the switch that governs its kind, so
-`--no-ignore` and `--no-gitignore` apply here exactly as they do inside the
-scan root.
-
-Every ignore source is a flag, on both `siloscan` and `siloscan-tui`:
-
-| Flag | Effect |
-| --- | --- |
-| `--no-ignore` | Scan every file: no `.gitignore`, no `.ignore` |
-| `--no-gitignore` | Ignore `.ignore` files but not `.gitignore` files |
-| `--respect-parent-ignores` | Also honor ignore files above the scan root |
-| `--respect-git-exclude` | Also honor `PATH/.git/info/exclude` |
-| `--respect-global-gitignore` | Also honor git's global `core.excludesFile` |
-
-The three `--respect-*` flags restore the 1.1.1 walk, one source at a time.
-Each one makes the scan depend on something outside the tree it was pointed
-at, which is why none is on by default, and why `--no-ignore` does not turn
-them on either - "scan everything under the root" is not a reason to start
-reading files above it.
-
-When a boundary rule is loaded, a file over `[limits] max_parse_bytes`
-(default 2 MiB) is not dropped and does not halt the scan. It is entered in the
-import graph as a node with no imports of its own: imports *of* it still
-resolve, so other files' violations are still reported, while the imports it
-makes are not analysed. The skip is recorded per file in the report's `skipped`
-array, with a reason naming the file's size and the cap. The reason names no
-rule, because the decision is per file rather than per rule - the cap is a
-property of the file, and the same file is skipped whichever rule wanted its
-tree.
-
-Binary files and non-UTF-8 files are detected and skipped. Every skipped file is
-recorded in the report's `skipped` array with a reason, so findings are never
-silently omitted.
-
-### Skip reporting caps
-
-The `skipped` array in the JSON report is never capped: it is the complete
-record, and consumers that care read it there. The two human- and
-tool-facing summaries are bounded, because an asset-heavy repository can skip
-tens of thousands of files:
-
-| Channel | Cap | Behavior past the cap |
-| --- | --- | --- |
-| CLI stderr | 10 individual `warning: skipped` lines | one `warning: ... and N more files skipped` line |
-| SARIF `siloscan/skipped` | 100 entries | a `siloscan/skippedTruncated` count of the remainder |
-| JSON `skipped` | none | every skipped file, always |
-
-Both caps keep the head of a list the scanner already sorted by path, so the
-sample and the count are identical across runs of the same tree.
-
-## Trust model
-
-The scanned tree is untrusted input. Nothing inside the tree being scanned may
-weaken, disable, or silently narrow the scan. Where the scanner does not look,
-it must say so.
-
-A repository cannot:
-- disable or weaken scanning via its cache (committed cache entries are
-  authenticated per directory and not trusted across scans with different rules)
-- restrict rule paths or inject rules via `siloscan.toml` rule directories
-  (rule paths are resolved relative to the config file itself, and only
-  `siloscan.toml` files discovered inside the scan root are consulted)
-- disable sanitization or weaken reporting via control characters in matched
-  text, filenames, or file paths
-
-### Config path containment
-
-**Behavior change in 1.2.1.** Every filesystem path a discovered
-`siloscan.toml` declares - `rules`, `source_roots`, and `include` - must resolve
-inside the config root. Absolute paths are refused, `..` that climbs out of the
-config root is refused, and a path that lands outside through a **symlink** is
-refused: the check is applied to the resolved path, not to how it is spelled.
-
-**What no longer works.** Up to and including 1.2.0, an *included* config could
-name a rule directory outside the config root, and the documented use for it was
-a shared rule pack sitting next to the repository:
-
-```toml
-# modules/api/siloscan.toml - refused from 1.2.1 on
-rules = ["../../../shared-rules"]
-```
-
-That layout is gone, and the removal is the point rather than a casualty of it.
-An included config is content of the scanned tree exactly as the root config is,
-so leaving the escape open left the root's own containment one `include` line
-away from useless: any repository could point the scan at a rule directory the
-reviewer never saw and replace the rule set the scan was supposed to run.
-
-**What to do instead.** Pass the shared pack on the command line -
-`siloscan . --rules ../../shared-rules`. The restriction is on the scanned
-tree's config, not on the operator: `--rules` takes any path, inside the tree or
-out, because the person typing it chose it. Copying or symlinking the pack into
-the repository works too, as long as the resolved location is inside the config
-root.
-
-A repository can still:
-- exclude files via `.gitignore` and `.ignore` at or below the scan root
-- declare silos and source roots in `siloscan.toml` to partition findings
-- suppress individual findings via inline `siloscan-ignore` comments
-
-Each of those is visible in the report rather than silent: exclusions are
-counted in `ignored`, and suppressed findings are listed in their own array.
-
-The `--no-ignore` flag overrides file exclusion; this is the only way to ensure
-a committed `.gitignore` does not hide a file from scanning. It takes
-precedence over every exclusion the tree declares - `.gitignore`, `.ignore`,
-and any ignore file a config-anchored project boundary brings into scope - and
-the resulting report shows `ignored` as zero, because nothing could have been
-held back. It does not re-admit the out-of-root sources: "scan everything under
-the root" is not a reason to start reading files above it.
-
-### Terminal-safe output
-
-Human output - CLI stdout, CLI stderr, and every span the TUI draws - renders
-scanned text so a terminal displays it instead of obeying it. Paths, rule ids
-and rule messages are all attacker-controlled, and two classes of character are
-rewritten:
-
-- **Control characters** become a visible `\xNN`: every C0 (`0x00`-`0x1F`,
-  including tab), DEL (`0x7F`), and every C1 (`U+0080`-`U+009F`). Written raw,
-  an `ESC [ 2 K` erases the line it lands on and `ESC [ A` walks back over the
-  lines above, so a repository holding a live credential could paint
-  "scan complete: 0 findings" over its own report.
-- **Unicode bidi formatting codes** become a visible `\u{XXXX}`: `U+061C`,
-  `U+200E`, `U+200F`, `U+202A`-`U+202E` and `U+2066`-`U+2069`. These reorder
-  the text around them without emitting a glyph - the Trojan Source trick - so
-  a file named `report\u{202e}sj.eruces` displays as `reportsecures.js` while
-  the scan reads the name it really has.
-
-Letters of right-to-left scripts are **not** escaped. Arabic and Hebrew carry
-direction as a property of the script and are ordinary content; a repository
-whose paths and messages are written in either stays readable.
-
-This is a display form, not a reversible encoding, and it applies to human
-output only. JSON and SARIF are read by tools, already escape control
-characters per RFC 8259, and carry the fingerprints - rewriting their bytes
-would move output that other things compare. Fingerprints are computed over the
-real text, so escaping never moves one.
+- **Memory cost of large trees**: File contents are held in memory during
+  scanning. Peak memory is roughly 6x the scanned source bytes.
+- **Scanning below repository root**: A scan rooted below `.git` only sees
+  ignore files at or below that root. A repository whose `.gitignore` sits at
+  the top does not prune anything for `siloscan services/api`. Scan from the
+  repository root instead, or call `siloscan --no-default-rules` and add rules
+  with explicit `paths:` filters to control scope.
+- **Windows behavior**: Cache authentication and symlink handling are implemented
+  and unit-tested in CI but not manually exercised on Windows. Releases target
+  `x86_64-pc-windows-msvc` only.
+- **Config path discovery**: Config path containment stops at the declared
+  config directory. The filesystem boundary is the config root; an ancestor
+  config outside that directory is not consulted even if a `.git` marker would
+  have brought the walk there.
 
 ## License
 

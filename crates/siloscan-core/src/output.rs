@@ -17,6 +17,31 @@ use crate::rules::{CompiledPayload, RuleSet, Severity};
 /// text for secret-rule findings, and a consumer that reads that field cannot
 /// tell 1.2 from the 1.1 that preceded it without the minor bump. No field was
 /// added, renamed or dropped, so a 1.1 reader still parses a 1.2 report.
+///
+/// It stays at 1.2 in the 1.4.0 release, which is a deliberate decision and not
+/// an oversight. What that release changed, and why each is additive:
+///
+/// - `warnings` is a new top-level array, appended. A reader that does not know
+///   it parses the rest of the report byte for byte as before.
+/// - `min_severity` is a new top-level string, appended, and present only on a
+///   run that filtered. An unfiltered report does not carry it at all, so the
+///   usual document is unchanged and a reader that does not know the field
+///   parses a filtered one as before.
+/// - `ignored` was appended on the same terms one release earlier.
+/// - `skipped` gained entries for symbolic links the scan did not read through.
+///   The list gains members, not a meaning: it is documented as every path the
+///   scan did not read the way its rules asked for, and a link to a file outside
+///   the scan root is exactly that. A consumer could already meet a `skipped`
+///   entry it had never seen - one more unreadable file does it - so nothing
+///   that parsed a 1.2 report correctly breaks on one of these.
+/// - `skipped[].reason` gained new wordings. The field's type is `string` and
+///   has never been an enumeration; the schema promises a human-readable reason
+///   and no particular set of them. Code matching on the exact text was reading
+///   something the contract never offered.
+///
+/// The minor moves when a consumer that reads an existing field can be wrong
+/// about what it now means, which is what happened at 1.1 -> 1.2. Nothing here
+/// changes the meaning of a field that already existed, so nothing moves.
 pub const SCHEMA_VERSION: &str = "1.2";
 
 /// What `matched` says for a finding a secret rule produced.
@@ -79,6 +104,33 @@ pub struct JsonReport<'a> {
     /// Appended to the object, so this is an additive change: schema 1.2
     /// readers that do not know the field parse a 1.2 report exactly as before.
     pub ignored: crate::walk::Ignored,
+    /// What the scan narrowed and why, in the scanner's own words - see
+    /// [`crate::scan::ScanReport::warnings`].
+    ///
+    /// Here for the same reason `ignored` is. A coverage gate that landed on
+    /// none of the files a subdirectory scan walked produces no findings and no
+    /// failure, and without this a job reading the JSON sees an empty report and
+    /// calls the tree clean. The human listing already says it on stderr; a
+    /// machine consumer could not see it at all.
+    ///
+    /// Empty on a scan that narrowed nothing, which is the usual case. Appended,
+    /// so it is additive on the same terms as `ignored`.
+    pub warnings: &'a [String],
+    /// The `--min-severity` threshold the three finding lists were filtered at,
+    /// absent when the run reported everything it found.
+    ///
+    /// Here for the third time the same reason applies: a filtered report and a
+    /// clean one are the same document, and a consumer reading the filtered one
+    /// cannot tell that findings were withheld. The scan is unchanged - the
+    /// threshold decides what is printed and never what is found, so the exit
+    /// code, every surviving fingerprint and the metrics are what they would
+    /// have been without it.
+    ///
+    /// Absent rather than `"info"` on an unfiltered run, so a report that
+    /// withheld nothing is byte for byte the report this release wrote before
+    /// the field existed. Appended, on the same additive terms as `warnings`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub min_severity: Option<Severity>,
 }
 
 /// Render the machine-readable report. `anchor` is the path convention the
@@ -90,7 +142,16 @@ pub struct JsonReport<'a> {
 /// other payload - regex, ast, the duplication channel's synthetic text, a
 /// coverage or duplication gate's density string - serializes verbatim, because
 /// none of it is a credential and consumers parse some of it.
-pub fn to_json(report: &crate::scan::ScanReport, rules: &RuleSet, anchor: Anchor) -> String {
+///
+/// `min_severity` is the threshold the caller already filtered the report at,
+/// or `None` when it filtered nothing. It is recorded, not applied: this
+/// function drops no finding.
+pub fn to_json(
+    report: &crate::scan::ScanReport,
+    rules: &RuleSet,
+    anchor: Anchor,
+    min_severity: Option<Severity>,
+) -> String {
     let secret_rules = secret_rule_ids(rules);
     let json_report = JsonReport {
         version: env!("CARGO_PKG_VERSION"),
@@ -102,6 +163,8 @@ pub fn to_json(report: &crate::scan::ScanReport, rules: &RuleSet, anchor: Anchor
         metrics: &report.metrics,
         anchor,
         ignored: report.ignored,
+        warnings: &report.warnings,
+        min_severity,
     };
     serde_json::to_string_pretty(&json_report).unwrap() // serialization cannot fail
 }
@@ -159,13 +222,26 @@ fn report_findings<'a>(
 /// listing. The code-lines term is omitted when no scanned file reported a
 /// code-line count (that is, no tier-1 language file was scanned).
 pub fn human_metrics_summary(metrics: &crate::metrics::Metrics) -> String {
-    let mut summary = format!("metrics: {} lines", metrics.totals.lines);
+    use crate::walk::quantity;
+
+    let mut summary = format!(
+        "metrics: {}",
+        quantity(metrics.totals.lines, "line", "lines")
+    );
     if metrics.files.values().any(|file| file.code_lines.is_some()) {
-        summary.push_str(&format!(", {} code lines", metrics.totals.code_lines));
+        summary.push_str(&format!(
+            ", {}",
+            quantity(metrics.totals.code_lines, "code line", "code lines")
+        ));
     }
     summary.push_str(&format!(
-        ", {} duplicated lines, {:.1}% duplication",
-        metrics.totals.duplicated_lines, metrics.totals.duplication_density
+        ", {}, {:.1}% duplication",
+        quantity(
+            metrics.totals.duplicated_lines,
+            "duplicated line",
+            "duplicated lines"
+        ),
+        metrics.totals.duplication_density
     ));
     summary
 }
@@ -222,6 +298,7 @@ rules:
             graph: Default::default(),
             boundary_edges: Vec::new(),
             metrics,
+            warnings: Vec::new(),
         }
     }
 
@@ -231,6 +308,7 @@ rules:
             &report(findings, Metrics::default()),
             &secret_rules(),
             Anchor::ScanRoot,
+            None,
         )
     }
 
@@ -274,7 +352,7 @@ rules:
         };
         let report = report(vec![finding], Metrics::default());
 
-        let json = to_json(&report, &no_rules(), Anchor::ScanRoot);
+        let json = to_json(&report, &no_rules(), Anchor::ScanRoot, None);
         assert!(json.contains("findings"));
         assert!(json.contains("baselined"));
         assert!(json.contains("suppressed"));
@@ -303,8 +381,8 @@ rules:
         report.suppressed = vec![finding];
         report.skipped = vec![skipped];
 
-        let json1 = to_json(&report, &no_rules(), Anchor::ScanRoot);
-        let json2 = to_json(&report, &no_rules(), Anchor::ScanRoot);
+        let json1 = to_json(&report, &no_rules(), Anchor::ScanRoot, None);
+        let json2 = to_json(&report, &no_rules(), Anchor::ScanRoot, None);
         assert_eq!(json1, json2);
     }
 
@@ -360,7 +438,7 @@ rules:
         report.baselined = vec![secret_finding()];
         report.suppressed = vec![secret_finding()];
 
-        let json = to_json(&report, &secret_rules(), Anchor::ScanRoot);
+        let json = to_json(&report, &secret_rules(), Anchor::ScanRoot, None);
         assert!(
             !json.contains(SECRET),
             "credential reached the report: {json}"
@@ -389,7 +467,7 @@ rules:
 
         let report = report(vec![secret_finding()], Metrics::default());
         let parsed: serde_json::Value =
-            serde_json::from_str(&to_json(&report, &secret_rules(), Anchor::ScanRoot))
+            serde_json::from_str(&to_json(&report, &secret_rules(), Anchor::ScanRoot, None))
                 .expect("valid json");
 
         assert_eq!(parsed["findings"][0]["fingerprint"], GOLDEN);
@@ -413,7 +491,7 @@ rules:
         let report = report(vec![regex_finding(), duplicate], Metrics::default());
 
         let parsed: serde_json::Value =
-            serde_json::from_str(&to_json(&report, &secret_rules(), Anchor::ScanRoot))
+            serde_json::from_str(&to_json(&report, &secret_rules(), Anchor::ScanRoot, None))
                 .expect("valid json");
 
         assert_eq!(
@@ -433,8 +511,8 @@ rules:
         let report = report(vec![secret_finding()], Metrics::default());
         let rules = secret_rules();
 
-        let json = to_json(&report, &rules, Anchor::ScanRoot);
-        let sarif = crate::output_sarif::to_sarif(&report, &rules, Anchor::ScanRoot);
+        let json = to_json(&report, &rules, Anchor::ScanRoot, None);
+        let sarif = crate::output_sarif::to_sarif(&report, &rules, Anchor::ScanRoot, None);
 
         // Neither transport carries the credential. SARIF has no match-text
         // field at all, which is the representation JSON mirrors as closely as
@@ -461,7 +539,7 @@ rules:
         // Field set and order are the schema's contract; only the value of
         // `matched` may differ between a redacted and an untouched finding.
         let report = report(vec![secret_finding()], Metrics::default());
-        let json = to_json(&report, &secret_rules(), Anchor::ScanRoot);
+        let json = to_json(&report, &secret_rules(), Anchor::ScanRoot, None);
 
         // Serde `Value` sorts object keys, so the order is checked on the text.
         let mut at = 0;
@@ -494,7 +572,7 @@ rules:
     fn json_report_declares_schema_version() {
         let report = report(vec![], Metrics::default());
 
-        let json = to_json(&report, &no_rules(), Anchor::ScanRoot);
+        let json = to_json(&report, &no_rules(), Anchor::ScanRoot, None);
         assert!(
             json.contains("\"schema_version\": \"1.2\""),
             "report must carry the schema version: {json}"
@@ -506,13 +584,13 @@ rules:
     fn json_report_declares_the_path_anchor() {
         let report = report(vec![], Metrics::default());
 
-        let json = to_json(&report, &no_rules(), Anchor::ScanRoot);
+        let json = to_json(&report, &no_rules(), Anchor::ScanRoot, None);
         assert!(
             json.contains("\"anchor\": \"scan-root\""),
             "report must declare the path anchor: {json}"
         );
 
-        let json = to_json(&report, &no_rules(), Anchor::Config);
+        let json = to_json(&report, &no_rules(), Anchor::Config, None);
         assert!(
             json.contains("\"anchor\": \"config\""),
             "config-anchored report must say so: {json}"
@@ -523,7 +601,7 @@ rules:
     fn default_anchor_is_scan_root() {
         let report = report(vec![], Metrics::default());
 
-        let json = to_json(&report, &no_rules(), Anchor::default());
+        let json = to_json(&report, &no_rules(), Anchor::default(), None);
         assert!(
             json.contains("\"anchor\": \"scan-root\""),
             "the absent anchor key must mean scan-root: {json}"
@@ -534,7 +612,7 @@ rules:
     fn json_report_carries_metrics_in_stable_key_order() {
         let report = report(vec![], metrics_fixture());
 
-        let json = to_json(&report, &no_rules(), Anchor::ScanRoot);
+        let json = to_json(&report, &no_rules(), Anchor::ScanRoot, None);
         assert!(json.contains("\"metrics\""));
         assert!(json.contains("\"totals\""));
 
@@ -585,6 +663,90 @@ rules:
         assert_eq!(
             summary,
             "metrics: 8 lines, 0 duplicated lines, 0.0% duplication"
+        );
+    }
+
+    /// Every count in the line agrees with its noun. "1 lines" is the kind of
+    /// thing that makes a reader wonder what else the tool is not checking, and
+    /// all three terms are separate format calls, so all three are asserted.
+    #[test]
+    fn human_summary_counts_of_one_read_as_one() {
+        let mut metrics = Metrics::default();
+        metrics.files.insert(
+            "a.rs".to_string(),
+            FileMetrics {
+                lines: 1,
+                code_lines: Some(1),
+                duplicated_lines: 1,
+            },
+        );
+        metrics.totals.lines = 1;
+        metrics.totals.code_lines = 1;
+        metrics.totals.duplicated_lines = 1;
+        metrics.totals.duplication_density = 100.0;
+
+        assert_eq!(
+            human_metrics_summary(&metrics),
+            "metrics: 1 line, 1 code line, 1 duplicated line, 100.0% duplication"
+        );
+    }
+
+    /// A coverage gate that measured nothing says so in `warnings`, and a job
+    /// reading the JSON has to be able to see that. Without the field the report
+    /// is an empty finding list, which is indistinguishable from a clean tree -
+    /// the exact confusion `warnings` exists to prevent, reintroduced for every
+    /// machine consumer.
+    #[test]
+    fn json_report_carries_the_scan_warnings() {
+        let mut report = report(vec![], Metrics::default());
+        report.warnings = vec!["coverage report names no scanned file".to_string()];
+
+        let json = to_json(&report, &no_rules(), Anchor::ScanRoot, None);
+        assert!(
+            json.contains("\"warnings\": [\n    \"coverage report names no scanned file\"\n  ]"),
+            "warnings must reach the JSON report: {json}"
+        );
+    }
+
+    /// The usual case, and the one that must not grow noise: a scan that
+    /// narrowed nothing emits an empty array rather than a null or a message.
+    #[test]
+    fn json_report_warnings_are_empty_when_nothing_was_narrowed() {
+        let json = to_json(
+            &report(vec![], Metrics::default()),
+            &no_rules(),
+            Anchor::ScanRoot,
+            None,
+        );
+        assert!(json.contains("\"warnings\": []"), "{json}");
+    }
+
+    /// The same argument `warnings` and `ignored` make, for the third source of
+    /// an empty finding list: a filtered report has to say it was filtered, or a
+    /// consumer reads "no findings at or above error" as "no findings".
+    ///
+    /// Present only when a threshold was applied. A run that reported everything
+    /// has nothing to declare, and its document must not grow a key that says
+    /// so.
+    #[test]
+    fn json_report_records_the_threshold_it_was_filtered_at() {
+        let report = report(vec![], Metrics::default());
+
+        let filtered = to_json(
+            &report,
+            &no_rules(),
+            Anchor::ScanRoot,
+            Some(Severity::Warning),
+        );
+        assert!(
+            filtered.contains("\"min_severity\": \"warning\""),
+            "a filtered report must name its threshold: {filtered}"
+        );
+
+        let unfiltered = to_json(&report, &no_rules(), Anchor::ScanRoot, None);
+        assert!(
+            !unfiltered.contains("min_severity"),
+            "an unfiltered report must not carry the key: {unfiltered}"
         );
     }
 

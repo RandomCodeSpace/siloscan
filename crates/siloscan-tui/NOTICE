@@ -20,6 +20,11 @@ Rule identifiers, detection patterns, descriptions, keywords, entropy
 thresholds and allowlists are derived from that file. Rules relying on gitleaks
 features siloscan cannot express were omitted; no patterns were rewritten.
 
+The second pack file, crates/siloscan-core/rules/default/generic.yaml, is not
+derived from gitleaks. Its rules, patterns, allowlists and stopwords are
+original work by the siloscan contributors, written to cover the generic
+high-entropy ground the omitted gitleaks rules would have covered.
+
 gitleaks is distributed under the MIT License:
 
 MIT License

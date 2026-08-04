@@ -12,46 +12,81 @@
 //! fingerprints from the wrong convention, which no amount of downstream
 //! sorting could repair.
 //!
-//! Entries live inside the scanned tree and hold no match text: a finding's
-//! match is frequently the secret that was found. Only its length is stored,
-//! and the text is read back out of the scanned file itself. A `.gitignore` is
-//! written beside the cache directory so entries cannot be committed to the
-//! scanned repository.
+//! Entries hold no match text: a finding's match is frequently the secret that
+//! was found. Only its length is stored, and the text is read back out of the
+//! scanned file itself.
 //!
-//! # The cache is inside untrusted input
+//! # Where the cache lives, and why that is the defence
 //!
-//! A `.gitignore` is a courtesy, not a boundary. Nothing stops a repository
-//! from committing a `.siloscan/cache` whose entries claim a file containing a
-//! live credential has no findings, and every part of the key - content hash,
-//! rule hash, path scope - would legitimately match on a fresh clone. Before
-//! this, the scan of that clone reported nothing and exited 0.
+//! Not in the scanned tree. Entries live under the invoking user's own cache
+//! directory - `XDG_CACHE_HOME`, else `$HOME/.cache` on unix, `LOCALAPPDATA` on
+//! Windows - in a [`CACHE_NAMESPACE`] directory, and inside that a directory
+//! named by a hash of the scan root's canonical path ([`root_dir`]). Where no
+//! such directory can be determined there is no cache at all: every read is a
+//! miss, nothing is written, and the scan runs cold and correct rather than
+//! falling back into the tree.
 //!
-//! So an entry is only believed on the checkout that wrote it. Each cache
-//! directory holds a `.salt` (see [`SALT_NAME`]), and every entry carries an
-//! authentication tag over its own canonical body computed with that salt. A
-//! tag that is absent, malformed or does not recompute is a miss - never an
-//! error, never a warning - so a foreign, poisoned or simply borrowed cache
-//! costs a real scan and nothing else. Rejecting an entry cannot change a
-//! report: a miss is a rescan, and a rescan is what a cold run does.
+//! A repository can commit anything, including a cache. An entry claiming that
+//! a file holding a live credential has no findings matches on every part of
+//! the key - content hash, rule hash, path scope - on a fresh clone, and the
+//! scan of that clone reported nothing and exited 0. Up to 1.3.0 the only thing
+//! between that entry and a clean report was the authentication tag below,
+//! whose provenance rested on the salt file's mode. A tree delivered as an
+//! archive, a container layer or a vendored dependency carries a `0600` file
+//! exactly as it was packed, so that gate passed; an attacker who also knows the
+//! absolute path the tree will be scanned at - a published `WORKDIR`, a CI
+//! checkout path - defeated the rest, and the scan reported a poisoned tree as
+//! clean. Moving the cache out of the tree removes the delivery mechanism
+//! rather than one of its checks: no path leads from anything inside the scanned
+//! tree to the bytes this module reads.
+//!
+//! An in-tree `.siloscan/cache` ([`CACHE_DIR`]) is therefore never read and
+//! never written. It is also never removed - deleting files inside a repository
+//! this crate was asked to read is not this crate's business.
+//!
+//! A `--cache-dir` comes from the command line rather than from the tree, so it
+//! is used as given ([`Cache::open_in`]). The per-scan-root subdirectory still
+//! applies inside it, because keeping two scan roots apart is a correctness
+//! property - entries carry paths - and not a location policy.
+//!
+//! Out of the tree is not the same as out of the walk. A scan root can sit above
+//! the user's cache directory - `siloscan ~`, `siloscan /`, a `--cache-dir`
+//! pointed inside the root - and then the cache is walked like any other
+//! directory, which makes a warm run report the entries the cold run wrote and
+//! makes the scan read its own salt as content. [`Cache::exclusion_under`] is
+//! what the scan keeps out of the walk to prevent that, and it is the caller's
+//! job to ask.
+//!
+//! Because the location is derived from the invoking user's environment, two
+//! uids get two caches without contending for one set of files. The mixed-uid
+//! container case that lost its cache permanently in 1.3.0 resolves into two
+//! independent caches here, and only a deliberately shared `HOME` puts them back
+//! in one directory.
+//!
+//! # Entries are still authenticated
+//!
+//! Location is the boundary; the tag is what makes a cache that was copied,
+//! moved or borrowed cost a rescan instead of a wrong answer. Each cache
+//! directory holds a `.salt` (see [`SALT_NAME`]), and every entry carries a tag
+//! over its own canonical body computed with that salt. A tag that is absent,
+//! malformed or does not recompute is a miss - never an error, never a warning.
+//! Rejecting an entry cannot change a report: a miss is a rescan, and a rescan
+//! is what a cold run does.
 //!
 //! A salt's bytes come from the operating system's random source and from
 //! nothing else ([`generate_salt`]). Where that source cannot be reached there
 //! is no salt at all: none is written, every entry is a miss, and every scan
 //! runs cold. A cold scan is a correct scan, and it is the only safe direction
 //! to fail in - a salt made from anything an attacker could reproduce is a tag
-//! they can forge, which is the whole of what is being defended against.
+//! they can forge.
 //!
 //! The salt is bound to the absolute path of the cache directory as well as to
-//! its own random bytes (see [`resolve_salt`]), because an attacker who commits
-//! the entries can commit the salt beside them. Their clone and the victim's do
-//! not sit at the same absolute path, so the tags do not recompute. That alone
-//! is not enough where checkout paths are public and fixed - a GitHub Actions
-//! windows runner builds every repository at `D:\a\<repo>\<repo>` - so a salt
-//! also has to prove it was written by this build rather than checked out with
-//! the tree ([`salt_file`]): an owner-only mode on unix, an alternate data
-//! stream on Windows, and on any platform that offers neither, no salt is
-//! trusted at all. Both are anti-tampering measures, not key management - the
-//! honest statement of the residual risk is in [`resolve_salt`].
+//! its own random bytes (see [`resolve_salt`]), so entries authenticate in one
+//! directory and nowhere else. The owner-only mode on unix and the alternate
+//! data stream on Windows ([`salt_file`]) are kept as defence in depth against a
+//! salt that arrived from somewhere else; they are no longer load-bearing, and
+//! they were never sufficient on their own. What keeps the scanned tree out is
+//! that the scanned tree is not where any of this is read from.
 //!
 //! The crate version inside an entry makes it a miss after an upgrade, but a
 //! miss is not a removal: without one, every release left the whole of the
@@ -61,13 +96,25 @@
 //! bytes, which build wrote it and names another one. Anything unreadable,
 //! unrecognised or foreign is left exactly where it is, and a removal that
 //! fails is ignored: a cache that cannot be tidied is still a correct cache.
+//!
+//! That bounds the cache across upgrades, and not within one. An entry is keyed
+//! by content, so every edit to a file abandons the entry for its previous
+//! contents - an entry this build wrote, which the version test keeps forever.
+//! The same pass therefore also drops entries nothing has written for
+//! [`MAX_ENTRY_AGE`], and runs at least every [`SWEEP_INTERVAL`] rather than
+//! only after an upgrade, because a user who stays on one release is exactly the
+//! user whose cache would otherwise only grow. Removing an entry that was still
+//! wanted costs one file re-scanned once, which is why the window can be as
+//! generous as it is.
 
+use std::ffi::OsString;
 use std::fmt::Write as _;
 use std::fs;
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, SystemTime};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -77,10 +124,25 @@ use crate::findings::Finding;
 use crate::graph::FileFacts;
 use crate::rules::{RuleSet, Severity};
 
-/// Cache location, relative to the scan root.
+/// The cache location this crate used up to 1.3.0, relative to the scan root.
+///
+/// Nothing here reads it, writes it or removes it any more; it is named so that
+/// callers can say where the cache is not. See the module docs for what a cache
+/// inside the scanned tree cost.
 pub const CACHE_DIR: &str = ".siloscan/cache";
 
+/// The directory this crate claims inside the user's cache directory. Every
+/// scan root's cache is a subdirectory of it.
+pub const CACHE_NAMESPACE: &str = "siloscan";
+
 const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// How many hex characters of the scan root's path hash name its cache
+/// directory. 128 bits, which is a collision nobody is going to arrange by
+/// accident and nobody gains anything by arranging on purpose: a collision
+/// costs the two roots a shared salt, and entries still carry the path scope
+/// and their own tag.
+const ROOT_HASH_PREFIX: usize = 32;
 
 /// How much of the scope hash goes into the entry file name.
 const SCOPE_HASH_PREFIX: usize = 16;
@@ -100,13 +162,35 @@ const VERSION_PROBE_BYTES: u64 = 128;
 /// `.siloscan/cache`, which the `.gitignore` below already covers.
 const STAMP_NAME: &str = ".version";
 
-/// Written to `.siloscan/.gitignore`. Scoped to `cache/` so a committed
-/// baseline beside it stays visible to git.
-const IGNORE_MARKER: &str = "# Written by siloscan. Cache entries are local state.\ncache/\n";
+/// How long an entry may go untouched before a prune pass removes it.
+///
+/// A version mismatch bounds the cache across upgrades but not within one: a
+/// file that keeps changing writes a new content-keyed entry every time and
+/// abandons the old one, which this build still recognises as its own and so
+/// never removed. Under 1.3.0 that grew a directory inside the scanned tree,
+/// where a user could see it and delete it; it now grows in the user's home,
+/// where nobody looks.
+///
+/// Thirty days is deliberately far longer than any working rhythm. What it
+/// removes is an entry for content nothing has produced in a month, and the
+/// cost of removing one that was still wanted is a single file re-scanned once.
+const MAX_ENTRY_AGE: Duration = Duration::from_secs(30 * 24 * 60 * 60);
+
+/// How long this build waits before sweeping a directory it has already swept.
+///
+/// The version stamp alone makes the pass once-per-upgrade, which bounds nothing
+/// for a user who stays on one release: that is the case this age window exists
+/// for, so the stamp cannot be the only thing that triggers it. The stamp's own
+/// mtime is when the last pass ran, so the extra trigger costs one `stat` on the
+/// steady path and nothing else.
+///
+/// An entry therefore survives at most `MAX_ENTRY_AGE + SWEEP_INTERVAL` past its
+/// last write, which is a bound, which is the entire point.
+const SWEEP_INTERVAL: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 
 /// Per-directory secret that makes an entry believable. It lives beside the
-/// entries it authenticates, inside `.siloscan/cache`, which the walk excludes
-/// from every scan and the `.gitignore` above covers.
+/// entries it authenticates, in the user's own cache directory rather than in
+/// the scanned tree.
 const SALT_NAME: &str = ".salt";
 
 /// Salt width in bytes, matching the digest that consumes it.
@@ -114,7 +198,8 @@ const SALT_LEN: usize = 32;
 
 /// Owner-only file mode for the salt, and the mask a stored salt is checked
 /// against on read. Group or world access means the file did not come from
-/// [`create_salt`].
+/// [`create_salt`]. Defence in depth only: see the module docs for what the
+/// cache's location does and what this check does not do.
 #[cfg(unix)]
 const SALT_MODE: u32 = 0o600;
 
@@ -313,7 +398,21 @@ impl StoredFinding {
 }
 
 pub struct Cache {
-    root: PathBuf,
+    /// This scan root's cache directory, or `None` when there is nowhere to put
+    /// one - no user cache directory could be determined, or the scan root has
+    /// no canonical path. A cache with no directory is a cache that misses
+    /// every read and writes nothing, which is a cold scan and a correct one.
+    root: Option<PathBuf>,
+    /// The outermost directory this crate may create files in for this cache,
+    /// which is what a scan has to be kept out of. See [`Cache::exclusion_under`]
+    /// for why the two differ and when each is used.
+    ///
+    /// For a cache in the user's own cache directory it is the
+    /// [`CACHE_NAMESPACE`] directory: this crate owns all of it, and every scan
+    /// root's entries sit inside it. For a `--cache-dir` it is only the
+    /// per-scan-root subdirectory, because the directory the user named is the
+    /// user's and this crate does not get to declare its contents unscannable.
+    owned: Option<PathBuf>,
     rules_hash: String,
     path_scope: String,
     /// Hash of everything in the key except the content: the entry file name
@@ -342,10 +441,17 @@ pub struct Cache {
 }
 
 impl Cache {
-    /// Bind a cache to a scan root, a rule set and a path convention, and drop
-    /// whatever a different build left behind (see [`prune`]). Nothing is
-    /// created here beyond the prune stamp: an absent cache directory is nothing
-    /// to prune and nothing to write until the first [`Cache::put`].
+    /// Bind a cache to a scan root, a rule set and a path convention, in this
+    /// user's own cache directory (see [`default_cache_base`]), and drop
+    /// whatever a different build left behind (see [`prune`]).
+    ///
+    /// Nothing under the scan root is read, written or consulted: the scanned
+    /// tree is input to the scan and to nothing else. A user with no cache
+    /// directory, or a scan root with no canonical path, gets a cache with no
+    /// location, which misses everything and writes nothing.
+    ///
+    /// Nothing is created here beyond the prune stamp: an absent cache directory
+    /// is nothing to prune and nothing to write until the first [`Cache::put`].
     ///
     /// The prune is skipped when the stamp already names this build. It has to
     /// be, because it is not free: the pass opens and reads the head of every
@@ -354,12 +460,44 @@ impl Cache {
     /// one `read` on the steady path and leaves the full pass for the run after
     /// an upgrade, which is the only run that can find anything.
     pub fn open(scan_root: &Path, rules: &RuleSet, scope: &PathScope) -> Cache {
+        let base = default_cache_base();
+        let root = base.as_deref().and_then(|base| root_dir(base, scan_root));
+        Cache::bind(base, root, rules, scope)
+    }
+
+    /// Bind a cache the way [`Cache::open`] does, but under a directory the user
+    /// named rather than the one this crate would have picked.
+    ///
+    /// `cache_dir` is used as given - it is not searched for, not relocated and
+    /// not namespaced - because it came from the command line, which is the user
+    /// speaking and not the scanned tree. The per-scan-root subdirectory inside
+    /// it stays: an entry carries the path its finding was reported under, so
+    /// serving one scan root's entries to another would emit paths and
+    /// fingerprints for files the second root does not have.
+    pub fn open_in(
+        cache_dir: &Path,
+        scan_root: &Path,
+        rules: &RuleSet,
+        scope: &PathScope,
+    ) -> Cache {
+        let root = root_dir(cache_dir, scan_root);
+        Cache::bind(root.clone(), root, rules, scope)
+    }
+
+    fn bind(
+        owned: Option<PathBuf>,
+        root: Option<PathBuf>,
+        rules: &RuleSet,
+        scope: &PathScope,
+    ) -> Cache {
         let rules_hash = rules.source_hash();
         let path_scope = scope.discriminator();
-        let root = scan_root.join(CACHE_DIR);
-        prune_if_stale(&root);
+        if let Some(root) = &root {
+            prune_if_stale(root);
+        }
         Cache {
             root,
+            owned,
             scope_hash: scope_hash(&rules_hash, &path_scope),
             rules_hash,
             path_scope,
@@ -369,9 +507,56 @@ impl Cache {
         }
     }
 
-    /// The cache directory, which may not exist yet.
-    pub fn root(&self) -> &Path {
-        &self.root
+    /// The cache directory, which may not exist yet, or `None` when this cache
+    /// has no location and is therefore permanently cold.
+    pub fn root(&self) -> Option<&Path> {
+        self.root.as_deref()
+    }
+
+    /// Where this cache's own files sit inside `scan_root`, spelled as a prefix
+    /// of `scan_root` as it was given, or `None` when the cache is not under the
+    /// scan root at all.
+    ///
+    /// A scan must not read this. Moving the cache into the user's own cache
+    /// directory took it out of the scanned tree in every normal layout, but not
+    /// in every layout: `siloscan ~`, `siloscan /`, any root above
+    /// `XDG_CACHE_HOME`, and a `--cache-dir` pointed inside the root all put it
+    /// back under the walk. A scan that walks its own cache reports a cold run
+    /// and a warm run differently - the warm one finds the entries the cold one
+    /// wrote - and reads its own `.salt` as scanned content. Neither is
+    /// acceptable, and neither is fixed by anything the cache does to its
+    /// entries: the entries are not the problem, their being walked is.
+    ///
+    /// Two directories are tried, widest first. The [`owned`](Cache::owned) one
+    /// is the answer whenever it is strictly below the scan root, because
+    /// everything this crate writes for any scan root lands in it and none of it
+    /// is content under review. When it *is* the scan root - someone scanning
+    /// their cache directory itself - excluding it would empty the whole scan
+    /// silently, so the narrower per-scan-root directory answers instead: that
+    /// one is the cache this run writes, which is the part that has to be out of
+    /// the walk for a warm run to match a cold one.
+    ///
+    /// The comparison is made on canonical paths, so `.`, `..` and symlinks in
+    /// either argument do not decide it, and the result is re-spelled against
+    /// `scan_root` as given because that is the spelling the walk produces. A
+    /// directory that does not exist yet canonicalizes to itself and is simply
+    /// not under the root; it is also not in the walk, so there is nothing to
+    /// exclude until the run after it appears.
+    pub fn exclusion_under(&self, scan_root: &Path) -> Option<PathBuf> {
+        let canonical = |path: &Path| fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        let base = canonical(scan_root);
+        [self.owned.as_deref(), self.root.as_deref()]
+            .into_iter()
+            .flatten()
+            .find_map(|candidate| {
+                let rel = canonical(candidate).strip_prefix(&base).ok()?.to_path_buf();
+                // The candidate is the scan root itself. Not an exclusion, and
+                // not this candidate's turn to answer.
+                if rel.as_os_str().is_empty() {
+                    return None;
+                }
+                Some(scan_root.join(rel))
+            })
     }
 
     pub fn rules_hash(&self) -> &str {
@@ -440,7 +625,6 @@ impl Cache {
         if fs::create_dir_all(dir).is_err() {
             return;
         }
-        self.write_ignore_marker();
         // An entry this checkout cannot authenticate would be an entry it could
         // never read back, so there is no point writing one.
         let Some(salt) = self.salt_for_write() else {
@@ -476,23 +660,10 @@ impl Cache {
         }
     }
 
-    /// Keep cache entries out of the scanned repository's history. Written once
-    /// beside the cache directory and never overwritten, so a user's own
-    /// `.siloscan/.gitignore` wins.
-    fn write_ignore_marker(&self) {
-        let Some(dir) = self.root.parent() else {
-            return;
-        };
-        let marker = dir.join(".gitignore");
-        if marker.exists() {
-            return;
-        }
-        let _ = fs::write(marker, IGNORE_MARKER);
-    }
-
     /// `<cache>/<first two hex chars>/<content hash>-<scope hash prefix>.json`.
-    /// Returns `None` for a content hash that is not a usable file name, which
-    /// keeps a caller-supplied string from escaping the cache directory.
+    /// Returns `None` for a cache with no location, and for a content hash that
+    /// is not a usable file name, which keeps a caller-supplied string from
+    /// escaping the cache directory.
     fn entry_path(&self, content_hash: &str) -> Option<PathBuf> {
         if content_hash.len() < 2 || !content_hash.bytes().all(|b| b.is_ascii_hexdigit()) {
             return None;
@@ -503,6 +674,7 @@ impl Cache {
             .unwrap_or(&self.scope_hash);
         Some(
             self.root
+                .as_ref()?
                 .join(&content_hash[..2])
                 .join(format!("{content_hash}-{prefix}.json")),
         )
@@ -526,7 +698,7 @@ impl Cache {
         if self.salt_missing.load(Ordering::Relaxed) {
             return None;
         }
-        match resolve_salt(&self.root, false) {
+        match resolve_salt(self.root.as_ref()?, false) {
             Some(salt) => Some(self.salt.get_or_init(|| salt)),
             None => {
                 self.salt_missing.store(true, Ordering::Relaxed);
@@ -566,42 +738,164 @@ impl Cache {
         if let Some(salt) = self.salt.get() {
             return Some(salt);
         }
-        let salt = resolve_salt(&self.root, true)?;
+        let salt = resolve_salt(self.root.as_ref()?, true)?;
         Some(self.salt.get_or_init(|| salt))
     }
 }
 
-/// Drop every cache entry under `scan_root` that a different build wrote, and
-/// report how many went.
+/// This crate's directory inside the invoking user's cache directory, or `None`
+/// when there is no such directory to be had.
+///
+/// This is the whole of the location policy, and it deliberately reads only the
+/// environment of the process running the scan. Nothing about the scanned tree
+/// takes part, so nothing in a scanned tree can move the cache, name it, or put
+/// a file where one will be read from.
+///
+/// `None` is not a failure and not an error: it means this run has no cache, so
+/// it scans cold and reports exactly what a warm run would have. A fallback
+/// location - the scan root, the working directory, a shared temporary
+/// directory - would put the cache somewhere an attacker or another user can
+/// reach, which is the whole of what moving it out of the tree was for.
+pub fn default_cache_base() -> Option<PathBuf> {
+    Some(user_cache_dir(&|name| std::env::var_os(name))?.join(CACHE_NAMESPACE))
+}
+
+/// The user cache directory `get` describes, by this platform's convention.
+///
+/// - unix: `XDG_CACHE_HOME`, else `$HOME/.cache`. An unset, empty or relative
+///   value is no value: the specification says a relative `XDG_CACHE_HOME` is
+///   to be ignored, and resolving one against the working directory is how a
+///   cache ends up inside whatever tree the scan was launched from.
+/// - windows: `LOCALAPPDATA`, under the same absolute-path rule. Roaming is
+///   deliberately not used: a cache is machine-local state, and the entries
+///   here are bound to absolute paths on this machine.
+/// - anywhere else: `None`, and therefore no cache. A platform whose
+///   convention this build does not know does not get a guess.
+///
+/// Taking the environment through a closure keeps the policy testable without a
+/// process-wide `set_var`, which in a threaded test binary is a race and, since
+/// the 2024 edition, `unsafe`.
+fn user_cache_dir(get: &dyn Fn(&str) -> Option<OsString>) -> Option<PathBuf> {
+    #[cfg(unix)]
+    {
+        if let Some(dir) = get("XDG_CACHE_HOME").and_then(absolute_dir) {
+            return Some(dir);
+        }
+        Some(absolute_dir(get("HOME")?)?.join(".cache"))
+    }
+    #[cfg(windows)]
+    {
+        absolute_dir(get("LOCALAPPDATA")?)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = get;
+        None
+    }
+}
+
+/// An environment value that names an absolute path, or `None`. Empty and
+/// relative values are both "unset" here.
+#[cfg(any(unix, windows))]
+fn absolute_dir(value: OsString) -> Option<PathBuf> {
+    let path = PathBuf::from(value);
+    if path.as_os_str().is_empty() || !path.is_absolute() {
+        return None;
+    }
+    Some(path)
+}
+
+/// The directory under `base` that holds `scan_root`'s entries: a hash of the
+/// root's canonical path, so every scan root gets its own cache, its own salt
+/// and its own prune stamp.
+///
+/// The hash is over the canonical path rather than the path as given, so
+/// `.`, a relative path and a symlinked path all reach the same cache. A root
+/// that cannot be canonicalized has no stable identity to key on and gets no
+/// cache: it is a root that does not exist, which is a scan with nothing to
+/// cache anyway. The path as given is never a fallback, because two different
+/// spellings of one root would then quietly own two caches, and a root that
+/// vanished would own one keyed on a name.
+///
+/// The name is a hash and not the path itself: paths are longer than file names
+/// are allowed to be, and they contain separators.
+fn root_dir(base: &Path, scan_root: &Path) -> Option<PathBuf> {
+    let canonical = fs::canonicalize(scan_root).ok()?;
+    let mut hasher = Sha256::new();
+    hasher.update(canonical.as_os_str().as_encoded_bytes());
+    let digest = hex(&hasher.finalize());
+    Some(base.join(digest.get(..ROOT_HASH_PREFIX).unwrap_or(&digest)))
+}
+
+/// Drop every cache entry of `scan_root`'s cache that a different build wrote,
+/// and report how many went.
 ///
 /// This is what [`Cache::open`] does for the scan it is opening; it is exposed
 /// so the same tidy-up can be asked for on its own. It removes entries across
 /// every rule set and path convention in the directory, not just the caller's:
-/// a stale entry is stale whoever wrote it.
+/// a stale entry is stale whoever wrote it. A user with no cache directory has
+/// no entries to remove, and the answer is 0.
 ///
 /// Unlike the open path this always walks the directory, stamp or no stamp: a
 /// user who asked for a prune asked for the pass, not for this build's opinion
 /// about whether it would find anything.
 pub fn prune(scan_root: &Path) -> usize {
-    let root = scan_root.join(CACHE_DIR);
-    let removed = prune_dir(&root);
-    write_stamp(&root);
+    let Some(root) = default_cache_base().and_then(|base| root_dir(&base, scan_root)) else {
+        return 0;
+    };
+    prune_at(&root)
+}
+
+/// [`prune`] against a cache directory the user named, matching
+/// [`Cache::open_in`].
+pub fn prune_in(cache_dir: &Path, scan_root: &Path) -> usize {
+    let Some(root) = root_dir(cache_dir, scan_root) else {
+        return 0;
+    };
+    prune_at(&root)
+}
+
+fn prune_at(root: &Path) -> usize {
+    let removed = prune_dir(root, SystemTime::now());
+    write_stamp(root);
     removed
 }
 
-/// Prune unless the stamp says this build already did.
+/// Prune unless the stamp says this build already did, recently.
 ///
 /// Every failure mode leads to pruning: no stamp, an unreadable stamp, a stamp
-/// naming another version. The stamp is only ever trusted to say "this build has
-/// already swept here", never to say the opposite, so a missing or corrupt one
-/// costs a pass that was correct to run anyway. It is written after the pass, so
-/// a prune that dies halfway leaves no stamp and the next open retries.
+/// naming another version, a stamp with no readable mtime. The stamp is only
+/// ever trusted to say "this build has already swept here", never to say the
+/// opposite, so a missing or corrupt one costs a pass that was correct to run
+/// anyway. It is written after the pass, so a prune that dies halfway leaves no
+/// stamp and the next open retries.
+///
+/// "Recently" is [`SWEEP_INTERVAL`], measured from the stamp's own mtime, which
+/// is when the last pass finished. Without it the pass is once per upgrade and
+/// the age window in [`prune_dir`] would never fire for a user who stays on one
+/// release - which is exactly the user whose cache grows.
 fn prune_if_stale(root: &Path) {
-    if fs::read_to_string(root.join(STAMP_NAME)).is_ok_and(|stamp| stamp.trim() == VERSION) {
+    let stamp = root.join(STAMP_NAME);
+    if fs::read_to_string(&stamp).is_ok_and(|named| named.trim() == VERSION)
+        && swept_recently(&stamp)
+    {
         return;
     }
-    prune_dir(root);
+    prune_dir(root, SystemTime::now());
     write_stamp(root);
+}
+
+/// Whether the last pass over this directory finished within
+/// [`SWEEP_INTERVAL`].
+///
+/// Unreadable, or dated in the future by a clock that moved, both answer "no":
+/// the wrong answer here costs one pass, and the pass was always safe to run.
+fn swept_recently(stamp: &Path) -> bool {
+    fs::metadata(stamp)
+        .and_then(|meta| meta.modified())
+        .ok()
+        .and_then(|swept| SystemTime::now().duration_since(swept).ok())
+        .is_some_and(|since| since < SWEEP_INTERVAL)
 }
 
 /// Record this build as the last to sweep `root`.
@@ -617,15 +911,32 @@ fn write_stamp(root: &Path) {
 }
 
 /// One pass over `<root>/<shard>/*.json`, removing the entries that name a
-/// version other than this build's. Returns how many were removed.
+/// version other than this build's, and the entries nothing has written for
+/// [`MAX_ENTRY_AGE`]. Returns how many were removed.
+///
+/// The version test alone leaves a directory that only grows: an entry is keyed
+/// by content, so every edit to a file abandons the entry for its previous
+/// contents, and that entry names this build and is kept forever. The age test
+/// is what puts a ceiling on it.
+///
+/// Age is the entry file's mtime, which is when it was written. A cache hit does
+/// not touch it - a read that wrote would make every warm scan a write pass over
+/// the cache, and the point of a warm scan is that it does not - so an entry
+/// that is still being hit is still removed once it is a month old. That costs
+/// one file re-scanned once, which is what makes it safe to be wrong about.
 ///
 /// Every step is permissive. A directory that cannot be listed ends the pass, a
 /// shard that cannot be listed is skipped, a file that is not an entry is
-/// skipped, and a removal that fails is dropped on the floor. Nothing here is
-/// allowed to turn a cache into a scan failure, and nothing here touches a file
-/// that has not identified itself as this crate's. A removal that failed is not
-/// counted: the number is what left, not what was attempted.
-fn prune_dir(root: &Path) -> usize {
+/// skipped, a file whose age cannot be read is kept, and a removal that fails is
+/// dropped on the floor. Nothing here is allowed to turn a cache into a scan
+/// failure, and nothing here touches a file that has not identified itself as
+/// this crate's. A removal that failed is not counted: the number is what left,
+/// not what was attempted.
+///
+/// `now` is the instant every age is measured against. It is a parameter and not
+/// a call to the clock so that a test can state an age instead of arranging one
+/// on the filesystem, which the standard library cannot do.
+fn prune_dir(root: &Path, now: SystemTime) -> usize {
     let mut removed = 0;
     let Ok(shards) = fs::read_dir(root) else {
         return removed;
@@ -643,14 +954,28 @@ fn prune_dir(root: &Path) -> usize {
             if path.extension().is_none_or(|ext| ext != "json") {
                 continue;
             }
-            if entry_version(&path).is_some_and(|version| version != VERSION)
-                && fs::remove_file(&path).is_ok()
-            {
+            let foreign = entry_version(&path).is_some_and(|version| version != VERSION);
+            if (foreign || is_stale(&entry, now)) && fs::remove_file(&path).is_ok() {
                 removed += 1;
             }
         }
     }
     removed
+}
+
+/// Whether nothing has written this entry for [`MAX_ENTRY_AGE`].
+///
+/// False whenever the answer cannot be established - no metadata, no mtime, or
+/// an mtime ahead of `now` because a clock moved. Keeping an entry is the
+/// harmless direction: the cost is one file's worth of disk, against a rescan of
+/// work that was still wanted.
+fn is_stale(entry: &fs::DirEntry, now: SystemTime) -> bool {
+    entry
+        .metadata()
+        .and_then(|meta| meta.modified())
+        .ok()
+        .and_then(|written| now.duration_since(written).ok())
+        .is_some_and(|age| age > MAX_ENTRY_AGE)
 }
 
 /// The version an entry declares, read from its first [`VERSION_PROBE_BYTES`]
@@ -683,19 +1008,17 @@ fn entry_version(path: &Path) -> Option<String> {
 /// and the cache that would have used it stays cold.
 ///
 /// The value returned is not the file's bytes but those bytes bound to the
-/// directory's absolute location, so an entry authenticates for one checkout at
-/// one path. That is what defeats a committed cache: the attacker can commit
-/// the salt beside the entries they forged, and their tree and their victim's
-/// still do not sit at the same absolute path. A location that cannot be
-/// resolved yields `None` - a cache that cannot say where it is does not get
-/// believed.
+/// directory's absolute location, so entries authenticate in one directory and
+/// nowhere else: a cache that is copied, moved or restored somewhere else is
+/// cold rather than believed. A location that cannot be resolved yields `None`
+/// - a cache that cannot say where it is does not get believed.
 ///
-/// This is tamper resistance, not key management. The salt sits unencrypted in
-/// a file any process running as this user can read, and an attacker who knows
-/// the absolute path a target will scan at, can read or predict that target's
-/// salt, and can get the file there with owner-only permissions can still forge
-/// an entry. What it stops is the case that shipped: a cache committed to a
-/// repository, cloned somewhere else, and believed.
+/// This is tamper resistance, not key management, and it is not what keeps the
+/// scanned tree out - the cache's location does that (see the module docs). The
+/// salt sits unencrypted in a file any process running as this user can read,
+/// so anything already running as this user can forge an entry; so can anything
+/// that can write into this user's cache directory. Neither is a boundary this
+/// crate can defend, and neither is reachable from the tree being scanned.
 fn resolve_salt(root: &Path, create: bool) -> Option<[u8; SALT_LEN]> {
     let stored = match read_salt(root) {
         Some(salt) => salt,
@@ -711,30 +1034,31 @@ fn resolve_salt(root: &Path, create: bool) -> Option<[u8; SALT_LEN]> {
     Some(hasher.finalize().into())
 }
 
-/// Where a salt's bytes are read from and written to under `root`, or `None` on
-/// a platform where this build cannot tell a salt it wrote from one that
-/// arrived with the tree.
+/// Where a salt's bytes are read from and written to under `root`.
 ///
-/// The check has to be something a repository cannot carry, because the
-/// committed-cache attack hands the victim a `.salt` along with the forged
-/// entries and the path binding in [`resolve_salt`] is not enough on its own
-/// where checkout paths are public and fixed.
+/// Defence in depth, not the boundary. The boundary is that `root` is inside
+/// the invoking user's cache directory and no scanned tree can reach it; what
+/// is left for this to do is make a salt that arrived from somewhere else -
+/// unpacked over the cache directory, restored from a CI artifact, copied by
+/// hand - fail to be read rather than be trusted on sight.
 ///
 /// - unix: the file itself, and [`read_salt`] rejects any mode wider than
-///   [`SALT_MODE`]. Git records no file mode but the executable bit, so a
-///   checked-out `.salt` is never owner-only.
+///   [`SALT_MODE`]. This is a weak signal on its own: an archive preserves a
+///   `0600` mode exactly, and a `umask` of `077` gives a checked-out file one.
+///   It costs a `stat` this code path already needs, so it stays; it is not
+///   relied on, and 1.3.0's claim that it proved provenance was wrong.
 /// - windows: an NTFS alternate data stream on `.salt` ([`SALT_STREAM`]). Git
-///   does not record streams, and no archive format a tree arrives in carries
-///   one, so a `.salt` that came with the checkout has no stream and the bytes
-///   this build reads are ones it wrote. A committed `.salt` is simply never
+///   does not record streams and the common archive formats do not carry them,
+///   so a `.salt` that arrived from elsewhere has no stream and is simply never
 ///   read: only the stream is. On a volume with no stream support - FAT32,
 ///   exFAT, some network shares - creating it fails and the cache stays cold,
 ///   which is a correct cache. Provenance is all this settles; the bytes
 ///   themselves come from the OS random source like everywhere else
 ///   ([`generate_salt`]).
-/// - anything else: `None`. A gate that cannot be evaluated does not get to
-///   pass, so a platform where provenance cannot be established trusts no salt,
-///   writes none, and scans cold every time.
+/// - anything else: `None`, no salt, and a cache that is cold every time. A
+///   platform this build has no convention for gets no guess, and the same
+///   platform has no [`user_cache_dir`] either, so it has no cache to begin
+///   with.
 fn salt_file(root: &Path) -> Option<PathBuf> {
     #[cfg(unix)]
     {
@@ -753,10 +1077,9 @@ fn salt_file(root: &Path) -> Option<PathBuf> {
 
 /// The salt stored in `root`, if it is one this build would have written.
 ///
-/// Provenance is [`salt_file`]'s business, plus the mode check below on the one
-/// platform where the path alone does not carry it. Everything else - absent,
-/// unreadable, not hex, wrong length - lands in the same place, which is a cold
-/// cache.
+/// [`salt_file`] says where to look and what the mode check below is worth.
+/// Everything else - absent, unreadable, not hex, wrong length - lands in the
+/// same place, which is a cold cache.
 fn read_salt(root: &Path) -> Option<[u8; SALT_LEN]> {
     let path = salt_file(root)?;
     #[cfg(unix)]
@@ -776,8 +1099,8 @@ fn read_salt(root: &Path) -> Option<[u8; SALT_LEN]> {
 /// Write a fresh salt into an existing cache directory and return it.
 ///
 /// `None` when the OS random source will not answer ([`generate_salt`]), when
-/// this platform offers no way to tell a salt this build wrote from one that
-/// arrived with the tree ([`salt_file`]), or when the directory does not exist.
+/// this platform has nowhere to keep a salt ([`salt_file`]), or when the
+/// directory does not exist.
 /// In every one of those the cache simply has no salt, which makes it cold
 /// rather than weakly keyed.
 ///
@@ -1011,6 +1334,46 @@ mod tests {
         tempfile::tempdir().unwrap()
     }
 
+    /// A scan root and a stand-in for the user's cache directory, in two
+    /// separate temporary directories: the cache is never inside the tree it
+    /// caches, which is the property this module now rests on.
+    ///
+    /// Every test opens through [`Cache::open_in`] rather than [`Cache::open`].
+    /// The default location is the machine's real cache directory, and a test
+    /// suite has no business writing there or leaving entries behind; what the
+    /// default resolves to is asserted directly on the functions that resolve
+    /// it.
+    struct Fixture {
+        root: tempfile::TempDir,
+        base: tempfile::TempDir,
+    }
+
+    impl Fixture {
+        fn new() -> Fixture {
+            Fixture {
+                root: tempdir(),
+                base: tempdir(),
+            }
+        }
+
+        fn root(&self) -> &Path {
+            self.root.path()
+        }
+
+        fn base(&self) -> &Path {
+            self.base.path()
+        }
+
+        /// The cache this fixture's scan root gets under its own base.
+        fn open(&self) -> Cache {
+            self.open_with("a", &PathScope::ScanRoot)
+        }
+
+        fn open_with(&self, source: &str, scope: &PathScope) -> Cache {
+            Cache::open_in(self.base(), self.root(), &ruleset(source), scope)
+        }
+    }
+
     fn ruleset(source: &str) -> RuleSet {
         RuleSet {
             rules: Vec::new(),
@@ -1072,8 +1435,8 @@ mod tests {
 
     #[test]
     fn put_then_get_round_trips() {
-        let dir = tempdir();
-        let cache = Cache::open(dir.path(), &ruleset("a"), &PathScope::ScanRoot);
+        let fx = Fixture::new();
+        let cache = fx.open();
         let hash = hash();
 
         assert!(cache.get(&hash, &content()).is_none());
@@ -1088,8 +1451,8 @@ mod tests {
 
     #[test]
     fn stored_entry_holds_no_match_text() {
-        let dir = tempdir();
-        let cache = Cache::open(dir.path(), &ruleset("a"), &PathScope::ScanRoot);
+        let fx = Fixture::new();
+        let cache = fx.open();
         let hash = hash();
         cache.put(&hash, &entry());
 
@@ -1100,25 +1463,28 @@ mod tests {
         assert!(text.contains("matched_len"));
     }
 
+    /// A scan writes into the cache directory and nowhere else. The scanned
+    /// tree is input: no entry, no salt, no stamp, and no `.gitignore` to
+    /// apologize for any of them.
     #[test]
-    fn put_writes_a_gitignore_beside_the_cache() {
-        let dir = tempdir();
-        let cache = Cache::open(dir.path(), &ruleset("a"), &PathScope::ScanRoot);
+    fn nothing_is_written_into_the_scanned_tree() {
+        let fx = Fixture::new();
+        let cache = fx.open();
         cache.put(&hash(), &entry());
+        assert!(
+            cache.get(&hash(), &content()).is_some(),
+            "warm to begin with"
+        );
 
-        let marker = cache.root().parent().unwrap().join(".gitignore");
-        assert_eq!(fs::read_to_string(&marker).unwrap(), IGNORE_MARKER);
-
-        // An existing marker is left alone.
-        fs::write(&marker, "mine\n").unwrap();
-        cache.put(&hash(), &entry());
-        assert_eq!(fs::read_to_string(&marker).unwrap(), "mine\n");
+        assert_eq!(files_in(fx.root()), Vec::<String>::new());
+        assert!(!fx.root().join(CACHE_DIR).exists());
+        assert!(cache.root().unwrap().starts_with(fx.base()));
     }
 
     #[test]
     fn content_without_the_recorded_span_is_a_miss() {
-        let dir = tempdir();
-        let cache = Cache::open(dir.path(), &ruleset("a"), &PathScope::ScanRoot);
+        let fx = Fixture::new();
+        let cache = fx.open();
         let hash = hash();
         cache.put(&hash, &entry());
 
@@ -1128,18 +1494,18 @@ mod tests {
 
     #[test]
     fn open_does_not_create_the_directory() {
-        let dir = tempdir();
-        let cache = Cache::open(dir.path(), &ruleset("a"), &PathScope::ScanRoot);
-        assert!(!cache.root().exists());
+        let fx = Fixture::new();
+        let cache = fx.open();
+        assert!(!cache.root().unwrap().exists());
         assert!(cache.get(&content_hash(b"x"), "x").is_none());
-        assert!(!cache.root().exists());
+        assert!(!cache.root().unwrap().exists());
     }
 
     #[test]
     fn key_reports_content_rules_scope_and_version() {
-        let dir = tempdir();
+        let fx = Fixture::new();
         let rules = ruleset("a");
-        let cache = Cache::open(dir.path(), &rules, &PathScope::ScanRoot);
+        let cache = Cache::open_in(fx.base(), fx.root(), &rules, &PathScope::ScanRoot);
         let key = cache.key(b"file contents");
 
         assert_eq!(key.content_hash, content_hash(b"file contents"));
@@ -1151,14 +1517,14 @@ mod tests {
         let scope = PathScope::Config {
             prefix: "modules/api".to_string(),
         };
-        let cache = Cache::open(dir.path(), &rules, &scope);
+        let cache = Cache::open_in(fx.base(), fx.root(), &rules, &scope);
         assert_eq!(cache.key(b"file contents").path_scope, "config:modules/api");
     }
 
     #[test]
     fn version_mismatch_is_a_miss() {
-        let dir = tempdir();
-        let cache = Cache::open(dir.path(), &ruleset("a"), &PathScope::ScanRoot);
+        let fx = Fixture::new();
+        let cache = fx.open();
         let hash = hash();
         cache.put(&hash, &entry());
 
@@ -1173,8 +1539,8 @@ mod tests {
 
     #[test]
     fn corrupt_entry_is_a_miss() {
-        let dir = tempdir();
-        let cache = Cache::open(dir.path(), &ruleset("a"), &PathScope::ScanRoot);
+        let fx = Fixture::new();
+        let cache = fx.open();
         let hash = hash();
         cache.put(&hash, &entry());
 
@@ -1186,8 +1552,8 @@ mod tests {
 
     #[test]
     fn truncated_entry_is_a_miss() {
-        let dir = tempdir();
-        let cache = Cache::open(dir.path(), &ruleset("a"), &PathScope::ScanRoot);
+        let fx = Fixture::new();
+        let cache = fx.open();
         let hash = hash();
         cache.put(&hash, &entry());
 
@@ -1200,13 +1566,13 @@ mod tests {
 
     #[test]
     fn different_rules_hash_is_a_miss() {
-        let dir = tempdir();
+        let fx = Fixture::new();
         let hash = hash();
 
-        let first = Cache::open(dir.path(), &ruleset("a"), &PathScope::ScanRoot);
+        let first = fx.open();
         first.put(&hash, &entry());
 
-        let second = Cache::open(dir.path(), &ruleset("b"), &PathScope::ScanRoot);
+        let second = fx.open_with("b", &PathScope::ScanRoot);
         assert_ne!(first.rules_hash(), second.rules_hash());
         assert!(second.get(&hash, &content()).is_none());
         // The original entry is untouched, so both rule sets can coexist.
@@ -1218,15 +1584,16 @@ mod tests {
     /// because every path and fingerprint inside it belongs to the first.
     #[test]
     fn scan_root_entries_are_not_served_to_a_config_anchored_scan() {
-        let dir = tempdir();
+        let fx = Fixture::new();
         let hash = hash();
 
-        let scan_root = Cache::open(dir.path(), &ruleset("a"), &PathScope::ScanRoot);
+        let scan_root = fx.open();
         scan_root.put(&hash, &entry());
         assert!(scan_root.get(&hash, &content()).is_some());
 
-        let anchored = Cache::open(
-            dir.path(),
+        let anchored = Cache::open_in(
+            fx.base(),
+            fx.root(),
             &ruleset("a"),
             &PathScope::Config {
                 prefix: String::new(),
@@ -1248,16 +1615,16 @@ mod tests {
     /// different paths, so they cannot share an entry either.
     #[test]
     fn a_different_config_prefix_is_a_miss() {
-        let dir = tempdir();
+        let fx = Fixture::new();
         let hash = hash();
         let scope = |prefix: &str| PathScope::Config {
             prefix: prefix.to_string(),
         };
 
-        let api = Cache::open(dir.path(), &ruleset("a"), &scope("modules/api"));
+        let api = fx.open_with("a", &scope("modules/api"));
         api.put(&hash, &entry());
 
-        let web = Cache::open(dir.path(), &ruleset("a"), &scope("modules/web"));
+        let web = fx.open_with("a", &scope("modules/web"));
         assert!(web.get(&hash, &content()).is_none());
         assert!(api.get(&hash, &content()).is_some());
     }
@@ -1266,8 +1633,8 @@ mod tests {
     /// scope, so the entry states its own scope and that statement decides.
     #[test]
     fn a_rewritten_scope_inside_the_entry_is_a_miss() {
-        let dir = tempdir();
-        let cache = Cache::open(dir.path(), &ruleset("a"), &PathScope::ScanRoot);
+        let fx = Fixture::new();
+        let cache = fx.open();
         let hash = hash();
         cache.put(&hash, &entry());
 
@@ -1307,8 +1674,8 @@ mod tests {
 
     #[test]
     fn different_content_hash_is_a_miss() {
-        let dir = tempdir();
-        let cache = Cache::open(dir.path(), &ruleset("a"), &PathScope::ScanRoot);
+        let fx = Fixture::new();
+        let cache = fx.open();
         cache.put(&content_hash(b"one"), &entry());
 
         assert!(cache.get(&content_hash(b"two"), &content()).is_none());
@@ -1316,14 +1683,14 @@ mod tests {
 
     #[test]
     fn put_leaves_no_temporary_file_behind() {
-        let dir = tempdir();
-        let cache = Cache::open(dir.path(), &ruleset("a"), &PathScope::ScanRoot);
+        let fx = Fixture::new();
+        let cache = fx.open();
         let hash = hash();
 
         cache.put(&hash, &entry());
         cache.put(&hash, &entry());
 
-        let shard = cache.root().join(&hash[..2]);
+        let shard = cache.root().unwrap().join(&hash[..2]);
         let names = files_in(&shard);
         assert_eq!(names.len(), 1, "unexpected files in the shard: {names:?}");
         assert!(names[0].ends_with(".json"));
@@ -1334,12 +1701,12 @@ mod tests {
     /// has to - it is what ties the entry to the directory it lives in.
     #[test]
     fn stored_bodies_are_identical_across_puts_and_tags_are_not() {
-        let dir_a = tempdir();
-        let dir_b = tempdir();
+        let fx_a = Fixture::new();
+        let fx_b = Fixture::new();
         let hash = hash();
 
-        let a = Cache::open(dir_a.path(), &ruleset("a"), &PathScope::ScanRoot);
-        let b = Cache::open(dir_b.path(), &ruleset("a"), &PathScope::ScanRoot);
+        let a = fx_a.open();
+        let b = fx_b.open();
         a.put(&hash, &entry());
         b.put(&hash, &entry());
 
@@ -1362,11 +1729,12 @@ mod tests {
 
     #[test]
     fn entry_path_is_sharded_and_scope_scoped() {
-        let cache = Cache::open(Path::new("/root"), &ruleset("a"), &PathScope::ScanRoot);
+        let fx = Fixture::new();
+        let cache = fx.open();
         let hash = hash();
         let path = cache.entry_path(&hash).unwrap();
 
-        assert!(path.starts_with(Path::new("/root").join(CACHE_DIR)));
+        assert!(path.starts_with(cache.root().unwrap()));
         assert_eq!(
             path.parent().unwrap().file_name().unwrap().to_str(),
             Some(&hash[..2])
@@ -1377,10 +1745,9 @@ mod tests {
         );
 
         // The rules hash and the path scope both move the name.
-        let other_rules = Cache::open(Path::new("/root"), &ruleset("b"), &PathScope::ScanRoot);
-        let other_scope = Cache::open(
-            Path::new("/root"),
-            &ruleset("a"),
+        let other_rules = fx.open_with("b", &PathScope::ScanRoot);
+        let other_scope = fx.open_with(
+            "a",
             &PathScope::Config {
                 prefix: String::new(),
             },
@@ -1391,15 +1758,15 @@ mod tests {
 
     #[test]
     fn non_hex_content_hash_is_rejected() {
-        let dir = tempdir();
-        let cache = Cache::open(dir.path(), &ruleset("a"), &PathScope::ScanRoot);
+        let fx = Fixture::new();
+        let cache = fx.open();
 
         for bad in ["", "a", "../../etc/passwd", "zz", "ab/cd"] {
             assert!(cache.entry_path(bad).is_none(), "{bad} should be rejected");
             assert!(cache.get(bad, &content()).is_none());
             cache.put(bad, &entry());
         }
-        assert!(!cache.root().exists());
+        assert!(!cache.root().unwrap().exists());
     }
 
     /// Write an entry byte-for-byte as `version` would have written it, so the
@@ -1425,11 +1792,11 @@ mod tests {
     /// them.
     #[test]
     fn open_removes_entries_written_by_another_version() {
-        let dir = tempdir();
-        let cache = Cache::open(dir.path(), &ruleset("a"), &PathScope::ScanRoot);
+        let fx = Fixture::new();
+        let cache = fx.open();
         // Opened before anything is seeded: opening prunes, which is the
         // behaviour under test and would otherwise clear the fixture early.
-        let other_rules = Cache::open(dir.path(), &ruleset("b"), &PathScope::ScanRoot);
+        let other_rules = fx.open_with("b", &PathScope::ScanRoot);
 
         let mine = hash();
         cache.put(&mine, &entry());
@@ -1440,7 +1807,7 @@ mod tests {
         assert!(theirs.exists());
         assert!(other_scope.exists());
 
-        let reopened = Cache::open(dir.path(), &ruleset("a"), &PathScope::ScanRoot);
+        let reopened = fx.open();
 
         assert!(!theirs.exists(), "a foreign-version entry survived open");
         assert!(!other_scope.exists(), "only this cache's scope was pruned");
@@ -1456,10 +1823,10 @@ mod tests {
     /// either, and deleting it would be this pass guessing.
     #[test]
     fn unreadable_and_foreign_files_are_left_in_place() {
-        let dir = tempdir();
-        let cache = Cache::open(dir.path(), &ruleset("a"), &PathScope::ScanRoot);
+        let fx = Fixture::new();
+        let cache = fx.open();
         cache.put(&hash(), &entry());
-        let shard = cache.root().join(&hash()[..2]);
+        let shard = cache.root().unwrap().join(&hash()[..2]);
 
         let corrupt = shard.join("corrupt.json");
         let truncated = shard.join("truncated.json");
@@ -1473,7 +1840,7 @@ mod tests {
         // A version that runs past the probe window is unreadable, not foreign.
         fs::write(&long, format!("{{\"version\":\"{}\"}}", "9".repeat(200))).unwrap();
 
-        Cache::open(dir.path(), &ruleset("a"), &PathScope::ScanRoot);
+        fx.open();
 
         for path in [&corrupt, &truncated, &unrelated, &temp, &long] {
             assert!(path.exists(), "{} was removed", path.display());
@@ -1483,13 +1850,13 @@ mod tests {
 
     #[test]
     fn pruning_is_idempotent_and_creates_nothing() {
-        let dir = tempdir();
+        let fx = Fixture::new();
 
         // Nothing on disk yet: open must not conjure the directory.
-        let cache = Cache::open(dir.path(), &ruleset("a"), &PathScope::ScanRoot);
-        assert!(!cache.root().exists());
-        prune(dir.path());
-        assert!(!cache.root().exists());
+        let cache = fx.open();
+        assert!(!cache.root().unwrap().exists());
+        prune_in(fx.base(), fx.root());
+        assert!(!cache.root().unwrap().exists());
 
         cache.put(&hash(), &entry());
         let stale = seed_foreign_entry(&cache, &content_hash(b"older release"), "0.0.0-old");
@@ -1497,7 +1864,7 @@ mod tests {
         let bytes = fs::read(&mine).unwrap();
 
         for _ in 0..3 {
-            prune(dir.path());
+            prune_in(fx.base(), fx.root());
             assert!(!stale.exists());
             assert_eq!(
                 fs::read(&mine).unwrap(),
@@ -1513,19 +1880,23 @@ mod tests {
     /// build is proof the sweep already happened, and the sweep is skipped.
     #[test]
     fn a_current_stamp_skips_the_prune() {
-        let dir = tempdir();
-        let cache = Cache::open(dir.path(), &ruleset("a"), &PathScope::ScanRoot);
+        let fx = Fixture::new();
+        let cache = fx.open();
         cache.put(&hash(), &entry());
         let stale = seed_foreign_entry(&cache, &content_hash(b"older release"), "0.0.0-old");
 
         // Claim the sweep already happened. Nothing else does this - the point
         // is that the stamp alone is what open trusts.
-        fs::write(cache.root().join(STAMP_NAME), format!("{VERSION}\n")).unwrap();
-        Cache::open(dir.path(), &ruleset("a"), &PathScope::ScanRoot);
+        fs::write(
+            cache.root().unwrap().join(STAMP_NAME),
+            format!("{VERSION}\n"),
+        )
+        .unwrap();
+        fx.open();
         assert!(stale.exists(), "a current stamp must skip the pass");
 
         // An explicit prune ignores the stamp: the user asked for the pass.
-        assert_eq!(prune(dir.path()), 1);
+        assert_eq!(prune_in(fx.base(), fx.root()), 1);
         assert!(!stale.exists());
     }
 
@@ -1539,12 +1910,12 @@ mod tests {
             Some("0.0.0-old"),
             Some("\u{0}\u{1}not a version"),
         ] {
-            let dir = tempdir();
-            let cache = Cache::open(dir.path(), &ruleset("a"), &PathScope::ScanRoot);
+            let fx = Fixture::new();
+            let cache = fx.open();
             cache.put(&hash(), &entry());
             let stale = seed_foreign_entry(&cache, &content_hash(b"older release"), "0.0.0-old");
 
-            let path = cache.root().join(STAMP_NAME);
+            let path = cache.root().unwrap().join(STAMP_NAME);
             match stamp {
                 Some(text) => fs::write(&path, text).unwrap(),
                 None => {
@@ -1552,7 +1923,7 @@ mod tests {
                 }
             }
 
-            Cache::open(dir.path(), &ruleset("a"), &PathScope::ScanRoot);
+            fx.open();
 
             assert!(!stale.exists(), "stamp {stamp:?} must not skip the pass");
             assert_eq!(
@@ -1565,26 +1936,79 @@ mod tests {
         }
     }
 
+    /// The version test bounds the cache across upgrades and not within one:
+    /// every edit to a file abandons the entry for its previous contents, and
+    /// that entry names this build. Without an age window the directory only
+    /// ever grows, in the user's home, where nobody is going to notice.
+    #[test]
+    fn entries_nothing_has_written_for_a_month_are_swept() {
+        let fx = Fixture::new();
+        let cache = fx.open();
+        cache.put(&hash(), &entry());
+        let path = cache.entry_path(&hash()).unwrap();
+        let root = cache.root().unwrap();
+
+        // The age is stated rather than arranged on the filesystem, which the
+        // standard library cannot do: the pass is asked what it would remove a
+        // day either side of the window.
+        let a_day = Duration::from_secs(24 * 60 * 60);
+        let now = SystemTime::now();
+
+        assert_eq!(prune_dir(root, now), 0, "a fresh entry stays");
+        assert_eq!(
+            prune_dir(root, now + MAX_ENTRY_AGE - a_day),
+            0,
+            "an entry inside the window stays"
+        );
+        assert!(path.exists());
+
+        assert_eq!(
+            prune_dir(root, now + MAX_ENTRY_AGE + a_day),
+            1,
+            "an entry past the window goes"
+        );
+        assert!(!path.exists());
+    }
+
+    /// A clock that moved backwards makes an entry look as though it was written
+    /// in the future. Every unanswerable question about an entry's age has the
+    /// same answer - keep it - because the cost of keeping one is a file's worth
+    /// of disk and the cost of removing one is work redone.
+    #[test]
+    fn an_entry_dated_in_the_future_is_kept() {
+        let fx = Fixture::new();
+        let cache = fx.open();
+        cache.put(&hash(), &entry());
+        let root = cache.root().unwrap();
+
+        let long_ago = SystemTime::now() - MAX_ENTRY_AGE * 2;
+        assert_eq!(prune_dir(root, long_ago), 0);
+        assert!(cache.get(&hash(), &content()).is_some());
+    }
+
     /// A tree with no cache directory must not grow one, so there is nowhere to
     /// put a stamp and the next open sweeps an empty directory. That is the
     /// cheap case anyway.
     #[test]
     fn a_missing_cache_directory_is_not_created_by_the_stamp() {
-        let dir = tempdir();
-        let cache = Cache::open(dir.path(), &ruleset("a"), &PathScope::ScanRoot);
-        assert!(!cache.root().exists());
-        assert_eq!(prune(dir.path()), 0);
-        assert!(!cache.root().exists(), "prune created a cache directory");
+        let fx = Fixture::new();
+        let cache = fx.open();
+        assert!(!cache.root().unwrap().exists());
+        assert_eq!(prune_in(fx.base(), fx.root()), 0);
+        assert!(
+            !cache.root().unwrap().exists(),
+            "prune created a cache directory"
+        );
     }
 
     /// The count is what the CLI prints, so it has to be the number of entries
     /// that actually left.
     #[test]
     fn prune_counts_the_entries_it_removed() {
-        let dir = tempdir();
-        let cache = Cache::open(dir.path(), &ruleset("a"), &PathScope::ScanRoot);
+        let fx = Fixture::new();
+        let cache = fx.open();
         cache.put(&hash(), &entry());
-        assert_eq!(prune(dir.path()), 0, "nothing foreign yet");
+        assert_eq!(prune_in(fx.base(), fx.root()), 0, "nothing foreign yet");
 
         for (index, version) in ["0.0.1", "0.9.0", "1.0.0"].iter().enumerate() {
             seed_foreign_entry(
@@ -1593,15 +2017,19 @@ mod tests {
                 version,
             );
         }
-        assert_eq!(prune(dir.path()), 3);
-        assert_eq!(prune(dir.path()), 0, "a second pass finds nothing");
+        assert_eq!(prune_in(fx.base(), fx.root()), 3);
+        assert_eq!(
+            prune_in(fx.base(), fx.root()),
+            0,
+            "a second pass finds nothing"
+        );
         assert!(cache.get(&hash(), &content()).is_some());
     }
 
     #[test]
     fn entry_version_reads_the_declared_version_only() {
-        let dir = tempdir();
-        let cache = Cache::open(dir.path(), &ruleset("a"), &PathScope::ScanRoot);
+        let fx = Fixture::new();
+        let cache = fx.open();
         cache.put(&hash(), &entry());
 
         assert_eq!(
@@ -1609,10 +2037,10 @@ mod tests {
             Some(VERSION),
             "an entry this build wrote must name this build"
         );
-        assert_eq!(entry_version(&dir.path().join("absent.json")), None);
+        assert_eq!(entry_version(&fx.root().join("absent.json")), None);
 
         let probe = |bytes: &[u8]| {
-            let path = dir.path().join("probe.json");
+            let path = fx.root().join("probe.json");
             fs::write(&path, bytes).unwrap();
             entry_version(&path)
         };
@@ -1646,7 +2074,7 @@ mod tests {
     fn retag(cache: &Cache, content_hash: &str, edit: impl FnOnce(&mut StoredEntry)) {
         let mut stored = read_entry(cache, content_hash);
         edit(&mut stored);
-        let salt = resolve_salt(cache.root(), false).expect("a written cache has a salt");
+        let salt = resolve_salt(cache.root().unwrap(), false).expect("a written cache has a salt");
         stored.tag = entry_tag(
             &salt,
             &cache.entry_key(content_hash),
@@ -1659,7 +2087,7 @@ mod tests {
     /// Where this platform keeps a salt's bytes, which is not always the file
     /// named [`SALT_NAME`] - see [`salt_file`].
     fn salt_path(cache: &Cache) -> PathBuf {
-        salt_file(cache.root()).expect("this platform trusts no salt at all")
+        salt_file(cache.root().unwrap()).expect("this platform trusts no salt at all")
     }
 
     /// Put `text` in the salt file with the permissions this build writes, so a
@@ -1685,8 +2113,8 @@ mod tests {
     /// findings out of an entry must cost the attacker the entry.
     #[test]
     fn an_entry_whose_body_was_edited_is_a_miss() {
-        let dir = tempdir();
-        let cache = Cache::open(dir.path(), &ruleset("a"), &PathScope::ScanRoot);
+        let fx = Fixture::new();
+        let cache = fx.open();
         let hash = hash();
         cache.put(&hash, &entry());
         assert!(cache.get(&hash, &content()).is_some(), "warm to begin with");
@@ -1716,17 +2144,18 @@ mod tests {
         }
     }
 
-    /// An entry written by another checkout is not this checkout's to believe,
-    /// whether or not the salt travelled with it. The second half is the
-    /// committed-cache attack: `.siloscan` is checked in wholesale, salt
-    /// included, and cloned somewhere else.
+    /// An entry written for another cache directory is not this one's to
+    /// believe, whether or not the salt travelled with it. The location is what
+    /// keeps a scanned tree from delivering either; this is what happens when
+    /// they arrive some other way - an unpacked archive, a restored CI cache, a
+    /// copy by hand.
     #[test]
     fn an_entry_from_another_cache_directory_is_a_miss() {
         let hash = hash();
-        let theirs_dir = tempdir();
-        let mine_dir = tempdir();
-        let theirs = Cache::open(theirs_dir.path(), &ruleset("a"), &PathScope::ScanRoot);
-        let mine = Cache::open(mine_dir.path(), &ruleset("a"), &PathScope::ScanRoot);
+        let theirs_fx = Fixture::new();
+        let mine_fx = Fixture::new();
+        let theirs = theirs_fx.open();
+        let mine = mine_fx.open();
 
         theirs.put(&hash, &entry());
         let source = theirs.entry_path(&hash).unwrap();
@@ -1739,15 +2168,15 @@ mod tests {
             "a foreign entry was served"
         );
 
-        // Now with the salt as well, as a committed `.siloscan/cache` would
-        // arrive. A fresh instance is used because the first one has already
-        // resolved this directory as saltless.
+        // Now with the salt as well, as a wholesale copy of a cache directory
+        // would arrive. A fresh instance is used because the first one has
+        // already resolved this directory as saltless.
         fs::copy(salt_path(&theirs), salt_path(&mine)).unwrap();
         set_owner_only(&salt_path(&mine));
-        let mine = Cache::open(mine_dir.path(), &ruleset("a"), &PathScope::ScanRoot);
+        let mine = mine_fx.open();
         assert!(
             mine.get(&hash, &content()).is_none(),
-            "a cache committed with its salt was served to a different checkout"
+            "a copied cache was served in a directory that did not write it"
         );
 
         // The directory it was written in still reads it.
@@ -1759,9 +2188,9 @@ mod tests {
     /// seeing it back proves the value came off the disk.
     #[test]
     fn a_legitimate_entry_is_a_hit_across_cache_instances() {
-        let dir = tempdir();
+        let fx = Fixture::new();
         let hash = hash();
-        let first = Cache::open(dir.path(), &ruleset("a"), &PathScope::ScanRoot);
+        let first = fx.open();
         first.put(&hash, &entry());
 
         retag(&first, &hash, |stored| {
@@ -1770,7 +2199,7 @@ mod tests {
 
         // A second instance reads the salt back off the disk, which is what the
         // next run of the binary does.
-        let second = Cache::open(dir.path(), &ruleset("a"), &PathScope::ScanRoot);
+        let second = fx.open();
         let hit = second
             .get(&hash, &content())
             .expect("a warm entry is a hit");
@@ -1784,9 +2213,9 @@ mod tests {
     /// entry - a salt that comes back is a cache that comes back.
     #[test]
     fn a_missing_or_unusable_salt_is_a_cold_cache() {
-        let dir = tempdir();
+        let fx = Fixture::new();
         let hash = hash();
-        let cache = Cache::open(dir.path(), &ruleset("a"), &PathScope::ScanRoot);
+        let cache = fx.open();
         cache.put(&hash, &entry());
         let good = fs::read_to_string(salt_path(&cache)).unwrap();
         let entry_bytes = fs::read(cache.entry_path(&hash).unwrap()).unwrap();
@@ -1804,7 +2233,7 @@ mod tests {
                 None => fs::remove_file(salt_path(&cache)).unwrap(),
             }
 
-            let cold = Cache::open(dir.path(), &ruleset("a"), &PathScope::ScanRoot);
+            let cold = fx.open();
             assert!(cold.get(&hash, &content()).is_none(), "salt {salt:?}");
             // Repeated misses stay misses and stay quiet.
             assert!(cold.get(&hash, &content()).is_none(), "salt {salt:?}");
@@ -1816,7 +2245,7 @@ mod tests {
         }
 
         write_salt(&cache, &good);
-        let warm = Cache::open(dir.path(), &ruleset("a"), &PathScope::ScanRoot);
+        let warm = fx.open();
         assert!(warm.get(&hash, &content()).is_some());
     }
 
@@ -1824,16 +2253,16 @@ mod tests {
     /// either: an entry it could not read back is not worth the bytes.
     #[test]
     fn an_unusable_salt_is_not_replaced_and_stops_writes() {
-        let dir = tempdir();
+        let fx = Fixture::new();
         let hash = hash();
-        let cache = Cache::open(dir.path(), &ruleset("a"), &PathScope::ScanRoot);
+        let cache = fx.open();
         cache.put(&hash, &entry());
 
         let foreign = "not a salt\n";
         write_salt(&cache, foreign);
         fs::remove_file(cache.entry_path(&hash).unwrap()).unwrap();
 
-        let cache = Cache::open(dir.path(), &ruleset("a"), &PathScope::ScanRoot);
+        let cache = fx.open();
         cache.put(&hash, &entry());
         assert!(
             !cache.entry_path(&hash).unwrap().exists(),
@@ -1848,10 +2277,10 @@ mod tests {
 
     #[test]
     fn the_salt_is_written_once_and_is_random() {
-        let dir_a = tempdir();
-        let dir_b = tempdir();
-        let a = Cache::open(dir_a.path(), &ruleset("a"), &PathScope::ScanRoot);
-        let b = Cache::open(dir_b.path(), &ruleset("a"), &PathScope::ScanRoot);
+        let fx_a = Fixture::new();
+        let fx_b = Fixture::new();
+        let a = fx_a.open();
+        let b = fx_b.open();
 
         a.put(&hash(), &entry());
         let written = fs::read_to_string(salt_path(&a)).unwrap();
@@ -1873,10 +2302,10 @@ mod tests {
     /// A scan of a tree with no cache still creates nothing, salt included.
     #[test]
     fn no_salt_is_created_by_reading() {
-        let dir = tempdir();
-        let cache = Cache::open(dir.path(), &ruleset("a"), &PathScope::ScanRoot);
+        let fx = Fixture::new();
+        let cache = fx.open();
         assert!(cache.get(&hash(), &content()).is_none());
-        assert!(!cache.root().exists());
+        assert!(!cache.root().unwrap().exists());
         assert!(!salt_path(&cache).exists());
     }
 
@@ -1885,9 +2314,9 @@ mod tests {
     fn the_salt_is_owner_only_and_a_wider_one_is_ignored() {
         use std::os::unix::fs::PermissionsExt as _;
 
-        let dir = tempdir();
+        let fx = Fixture::new();
         let hash = hash();
-        let cache = Cache::open(dir.path(), &ruleset("a"), &PathScope::ScanRoot);
+        let cache = fx.open();
         cache.put(&hash, &entry());
 
         let mode = fs::metadata(salt_path(&cache))
@@ -1901,7 +2330,7 @@ mod tests {
         // here.
         for wider in [0o644, 0o640, 0o604, 0o666] {
             fs::set_permissions(salt_path(&cache), fs::Permissions::from_mode(wider)).unwrap();
-            let cache = Cache::open(dir.path(), &ruleset("a"), &PathScope::ScanRoot);
+            let cache = fx.open();
             assert!(
                 cache.get(&hash, &content()).is_none(),
                 "a {wider:o} salt was trusted"
@@ -1909,7 +2338,7 @@ mod tests {
         }
 
         fs::set_permissions(salt_path(&cache), fs::Permissions::from_mode(SALT_MODE)).unwrap();
-        let cache = Cache::open(dir.path(), &ruleset("a"), &PathScope::ScanRoot);
+        let cache = fx.open();
         assert!(cache.get(&hash, &content()).is_some());
     }
 
@@ -1922,9 +2351,9 @@ mod tests {
     fn a_foreign_salt_is_replaced_and_the_cache_warms_again() {
         use std::os::unix::fs::PermissionsExt as _;
 
-        let dir = tempdir();
+        let fx = Fixture::new();
         let hash = hash();
-        let cache = Cache::open(dir.path(), &ruleset("a"), &PathScope::ScanRoot);
+        let cache = fx.open();
         cache.put(&hash, &entry());
 
         let path = salt_path(&cache);
@@ -1933,7 +2362,7 @@ mod tests {
 
         // The entries under the old salt are misses, as they must be: nothing
         // here starts trusting a salt it rejected.
-        let reopened = Cache::open(dir.path(), &ruleset("a"), &PathScope::ScanRoot);
+        let reopened = fx.open();
         assert!(reopened.get(&hash, &content()).is_none());
 
         // The next write replaces the salt rather than giving up on it.
@@ -1945,43 +2374,45 @@ mod tests {
             SALT_MODE
         );
 
-        let warm = Cache::open(dir.path(), &ruleset("a"), &PathScope::ScanRoot);
+        let warm = fx.open();
         assert!(
             warm.get(&hash, &content()).is_some(),
             "the cache must work again once the salt is this build's"
         );
     }
 
-    /// Moving a checkout is not tampering, but the entries were authenticated
-    /// where they were written, so the move costs a cold scan and nothing else.
+    /// A scan root's cache is keyed by where the root is, so moving the root is
+    /// a cold scan and nothing else. Moving it is not tampering; it is also not
+    /// something the entries, which carry paths, can be dragged through.
     #[test]
-    fn a_relocated_cache_is_a_cold_cache() {
-        let dir = tempdir();
+    fn a_moved_scan_root_gets_its_own_cache() {
+        let fx = Fixture::new();
         let hash = hash();
-        let from = dir.path().join("before");
-        let to = dir.path().join("after");
+        let from = fx.root().join("before");
+        let to = fx.root().join("after");
         fs::create_dir_all(&from).unwrap();
 
-        let cache = Cache::open(&from, &ruleset("a"), &PathScope::ScanRoot);
+        let cache = Cache::open_in(fx.base(), &from, &ruleset("a"), &PathScope::ScanRoot);
         cache.put(&hash, &entry());
         assert!(cache.get(&hash, &content()).is_some());
 
         fs::rename(&from, &to).unwrap();
-        let moved = Cache::open(&to, &ruleset("a"), &PathScope::ScanRoot);
+        let moved = Cache::open_in(fx.base(), &to, &ruleset("a"), &PathScope::ScanRoot);
+        assert_ne!(cache.root(), moved.root());
         assert!(moved.get(&hash, &content()).is_none());
 
         // And it warms right back up where it now lives.
         moved.put(&hash, &entry());
-        let reopened = Cache::open(&to, &ruleset("a"), &PathScope::ScanRoot);
+        let reopened = Cache::open_in(fx.base(), &to, &ruleset("a"), &PathScope::ScanRoot);
         assert!(reopened.get(&hash, &content()).is_some());
     }
 
     #[test]
     fn the_tag_covers_the_key_as_well_as_the_body() {
-        let dir = tempdir();
-        let cache = Cache::open(dir.path(), &ruleset("a"), &PathScope::ScanRoot);
+        let fx = Fixture::new();
+        let cache = fx.open();
         cache.put(&hash(), &entry());
-        let salt = resolve_salt(cache.root(), false).unwrap();
+        let salt = resolve_salt(cache.root().unwrap(), false).unwrap();
         let body = read_entry(&cache, &hash()).body_bytes().unwrap();
 
         let tag = entry_tag(&salt, &cache.entry_key(&hash()), &body);
@@ -2036,8 +2467,8 @@ mod tests {
     /// same function, and everything downstream of it is what this asserts.
     #[test]
     fn a_salt_that_cannot_be_made_is_never_invented() {
-        let dir = tempdir();
-        let root = dir.path().join("gone");
+        let fx = Fixture::new();
+        let root = fx.root().join("gone");
 
         assert!(create_salt(&root).is_none());
         assert!(resolve_salt(&root, true).is_none());
@@ -2049,17 +2480,17 @@ mod tests {
     /// scan is cold and correct rather than warm and forged.
     #[test]
     fn a_cache_with_no_salt_writes_nothing_and_serves_nothing() {
-        let dir = tempdir();
+        let fx = Fixture::new();
         let hash = hash();
-        let cache = Cache::open(dir.path(), &ruleset("a"), &PathScope::ScanRoot);
+        let cache = fx.open();
         cache.put(&hash, &entry());
         fs::remove_file(salt_path(&cache)).unwrap();
 
         // A read never invents a salt, so the entries stay unreadable.
-        let cold = Cache::open(dir.path(), &ruleset("a"), &PathScope::ScanRoot);
+        let cold = fx.open();
         assert!(cold.get(&hash, &content()).is_none());
         assert!(!salt_path(&cold).exists(), "a read created a salt");
-        assert!(resolve_salt(cache.root(), false).is_none());
+        assert!(resolve_salt(cache.root().unwrap(), false).is_none());
     }
 
     #[test]
@@ -2072,6 +2503,245 @@ mod tests {
         assert_eq!(unhex(&"ab".repeat(SALT_LEN + 1)), None);
         assert_eq!(unhex(&"zz".repeat(SALT_LEN)), None);
         assert_eq!(unhex(&format!("+1{}", "ab".repeat(SALT_LEN - 1))), None);
+    }
+
+    /// A cache rooted exactly at `root`, which is what 1.3.0 built for
+    /// `<scan root>/.siloscan/cache`. Nothing in this build produces one: it is
+    /// how the attacker's in-tree cache is staged below, written the way the
+    /// release that read it would have written it.
+    fn cache_rooted_at(root: &Path) -> Cache {
+        Cache::bind(
+            Some(root.to_path_buf()),
+            Some(root.to_path_buf()),
+            &ruleset("a"),
+            &PathScope::ScanRoot,
+        )
+    }
+
+    /// The 1.3.0 blocker, at this layer.
+    ///
+    /// The attacker ships a tree with a `.siloscan/cache` in it, salted and
+    /// tagged by them, whose entry says the file holding the credential has no
+    /// findings. Every check 1.3.0 applied passes - the tag authenticates, the
+    /// mode is `0600` because an archive preserves it, and the absolute path is
+    /// the one the tree extracts to - and the scan reported clean and exited 0.
+    ///
+    /// The entry is still perfectly valid. It is simply never looked at, because
+    /// the cache is not there any more.
+    #[test]
+    fn an_in_tree_cache_is_never_consulted_even_when_it_authenticates() {
+        let fx = Fixture::new();
+        let hash = hash();
+
+        let in_tree = fx.root().join(CACHE_DIR);
+        fs::create_dir_all(&in_tree).unwrap();
+        let forged = cache_rooted_at(&in_tree);
+        forged.put(
+            &hash,
+            &CachedFile {
+                findings: Vec::new(),
+                facts: None,
+            },
+        );
+        assert!(
+            forged
+                .get(&hash, &content())
+                .expect("the forged entry must authenticate, or this proves nothing")
+                .findings
+                .is_empty()
+        );
+        let staged = files_in(&in_tree);
+
+        // What the scan actually opens. Cold, and it stays cold: the tree's
+        // entry is not a miss because it failed a check, it is a miss because
+        // nothing here reads that directory.
+        let cache = fx.open();
+        assert!(
+            cache.get(&hash, &content()).is_none(),
+            "an in-tree cache was consulted, so a poisoned tree reports clean"
+        );
+
+        // Warm, in the new location, serves what the scan itself recorded - the
+        // findings, not the attacker's empty list.
+        cache.put(&hash, &entry());
+        assert_eq!(
+            cache.get(&hash, &content()).unwrap().findings,
+            entry().findings
+        );
+        assert_eq!(
+            fx.open().get(&hash, &content()).unwrap().findings,
+            entry().findings,
+            "the next run of the binary must see the same entry"
+        );
+
+        // The repository is left as it was found. Not read is not the same as
+        // deleted, and deleting files inside a scanned tree is not our business.
+        assert_eq!(files_in(&in_tree), staged);
+        assert!(forged.get(&hash, &content()).is_some());
+    }
+
+    /// The location policy, which is the whole defence. It reads the
+    /// environment of the process running the scan and nothing else.
+    #[cfg(unix)]
+    #[test]
+    fn the_user_cache_directory_follows_xdg_then_home() {
+        let resolve = |xdg: Option<&str>, home: Option<&str>| -> Option<PathBuf> {
+            let xdg = xdg.map(OsString::from);
+            let home = home.map(OsString::from);
+            user_cache_dir(&|name| match name {
+                "XDG_CACHE_HOME" => xdg.clone(),
+                "HOME" => home.clone(),
+                _ => None,
+            })
+        };
+
+        let xdg = Some(PathBuf::from("/xdg"));
+        let home = Some(PathBuf::from("/home/u/.cache"));
+        assert_eq!(resolve(Some("/xdg"), Some("/home/u")), xdg);
+        assert_eq!(resolve(Some("/xdg"), None), xdg);
+        assert_eq!(resolve(None, Some("/home/u")), home);
+
+        // Empty and relative values are not values. Resolving a relative one
+        // against the working directory is how a cache lands back inside the
+        // tree being scanned.
+        assert_eq!(resolve(Some(""), Some("/home/u")), home);
+        assert_eq!(resolve(Some("cache"), Some("/home/u")), home);
+        assert_eq!(resolve(Some("../cache"), Some("/home/u")), home);
+        assert_eq!(resolve(None, Some("u")), None);
+
+        // Neither one set: no cache directory, therefore no cache.
+        assert_eq!(resolve(None, None), None);
+        assert_eq!(resolve(Some(""), None), None);
+    }
+
+    #[test]
+    fn the_default_base_is_this_crate_namespace_under_the_user_cache_directory() {
+        let expected =
+            user_cache_dir(&|name| std::env::var_os(name)).map(|dir| dir.join(CACHE_NAMESPACE));
+        assert_eq!(default_cache_base(), expected);
+        if let Some(base) = default_cache_base() {
+            assert_eq!(base.file_name().unwrap(), CACHE_NAMESPACE);
+            assert!(base.is_absolute());
+        }
+    }
+
+    /// The ordinary layout: the cache is somewhere else entirely, so a scan has
+    /// nothing to keep out of its walk.
+    #[test]
+    fn a_cache_outside_the_scan_root_has_no_exclusion() {
+        let fx = Fixture::new();
+        assert_eq!(fx.open().exclusion_under(fx.root()), None);
+    }
+
+    /// The layout the exclusion exists for. The answer is the directory the
+    /// cache occupies, spelled against the scan root as it was given, because
+    /// that is the spelling the walk produces - and it is that directory only,
+    /// not the directory holding it, which under `--cache-dir` belongs to the
+    /// user and may hold anything.
+    #[test]
+    fn a_cache_under_the_scan_root_is_named_for_exclusion() {
+        let root = tempdir();
+        let named = root.path().join("vendor");
+        let cache = Cache::open_in(&named, root.path(), &ruleset("a"), &PathScope::ScanRoot);
+
+        let excluded = cache.exclusion_under(root.path()).expect("under the root");
+        assert_eq!(excluded, cache.root().unwrap());
+        assert!(excluded.starts_with(&named));
+        assert_ne!(excluded, named, "the directory holding the cache is not it");
+
+        // Spelled against the scan root as given rather than as canonicalized,
+        // because that is what the walk's paths are built from: a root reached
+        // through `.` and `..` produces entries spelled the same way, and a
+        // canonical prefix would match none of them.
+        fs::create_dir(root.path().join("sub")).unwrap();
+        let indirect = root.path().join("sub").join("..");
+        assert_eq!(
+            cache.exclusion_under(&indirect).expect("under the root"),
+            indirect.join("vendor").join(excluded.file_name().unwrap())
+        );
+    }
+
+    /// Scanning the cache directory itself. Excluding the whole of it would
+    /// empty the scan without saying so, so the narrower per-scan-root
+    /// directory answers instead - which is still the part a warm run would
+    /// otherwise walk and a cold run would not.
+    #[test]
+    fn scanning_the_cache_directory_itself_excludes_only_this_run_s_cache() {
+        let base = tempdir();
+        let cache = Cache::open_in(
+            base.path(),
+            base.path(),
+            &ruleset("a"),
+            &PathScope::ScanRoot,
+        );
+
+        assert_eq!(
+            cache.exclusion_under(base.path()).as_deref(),
+            cache.root(),
+            "a scan of the cache directory must not exclude the scan root"
+        );
+    }
+
+    /// No `XDG_CACHE_HOME` and no `HOME` is no cache directory, and no cache
+    /// directory is a cold cache: reads miss, writes go nowhere, and nothing is
+    /// invented to compensate - least of all a location inside the scanned tree.
+    #[test]
+    fn a_cache_with_no_location_is_cold_and_creates_nothing() {
+        let fx = Fixture::new();
+        let cache = Cache::bind(None, None, &ruleset("a"), &PathScope::ScanRoot);
+
+        assert!(cache.root().is_none());
+        // Nowhere to put a cache is nowhere for a walk to find one.
+        assert_eq!(cache.exclusion_under(fx.root()), None);
+        assert!(cache.get(&hash(), &content()).is_none());
+        cache.put(&hash(), &entry());
+        assert!(cache.get(&hash(), &content()).is_none());
+        assert_eq!(files_in(fx.root()), Vec::<String>::new());
+        assert_eq!(prune_in(fx.base(), fx.root()), 0);
+    }
+
+    /// One cache directory, two scan roots, two caches. It has to be two: an
+    /// entry is keyed by file content, and identical bytes in two trees are
+    /// findings at two different paths with two different fingerprints.
+    #[test]
+    fn two_scan_roots_do_not_share_entries() {
+        let base = tempdir();
+        let left = tempdir();
+        let right = tempdir();
+        let hash = hash();
+
+        let scope = PathScope::ScanRoot;
+        let a = Cache::open_in(base.path(), left.path(), &ruleset("a"), &scope);
+        let b = Cache::open_in(base.path(), right.path(), &ruleset("a"), &scope);
+
+        assert!(a.root().unwrap().starts_with(base.path()));
+        assert!(b.root().unwrap().starts_with(base.path()));
+        assert_ne!(a.root(), b.root());
+
+        a.put(&hash, &entry());
+        assert!(a.get(&hash, &content()).is_some());
+        assert!(
+            b.get(&hash, &content()).is_none(),
+            "one scan root's entry was served to another"
+        );
+    }
+
+    /// The per-root directory is keyed by the canonical path, so one root
+    /// spelled two ways is one cache, and a root that does not resolve is no
+    /// cache rather than a cache keyed on a name.
+    #[test]
+    fn the_root_directory_is_keyed_by_the_canonical_path() {
+        let fx = Fixture::new();
+        fs::create_dir(fx.root().join("sub")).unwrap();
+
+        let direct = root_dir(fx.base(), fx.root()).unwrap();
+        let round_about = root_dir(fx.base(), &fx.root().join("sub").join("..")).unwrap();
+
+        assert_eq!(direct, round_about);
+        assert_eq!(direct.parent(), Some(fx.base()));
+        assert_eq!(direct.file_name().unwrap().len(), ROOT_HASH_PREFIX);
+        assert_ne!(direct, root_dir(fx.base(), &fx.root().join("sub")).unwrap());
+        assert_eq!(root_dir(fx.base(), &fx.root().join("absent")), None);
     }
 
     #[test]

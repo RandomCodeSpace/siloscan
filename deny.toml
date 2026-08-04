@@ -1,0 +1,70 @@
+# cargo-deny configuration for siloscan.
+#
+# The release archives redistribute statically linked third-party code, so the
+# license set has to stay permissive and known. Anything outside the allow list
+# below is a hard failure: an empty or missing config would let an unreviewed
+# license reach a shipped binary.
+#
+# Run locally with: cargo deny check
+
+[graph]
+# Resolve for the platforms the release workflow actually builds. A dependency
+# that only exists on a platform we do not ship is not redistributed by us.
+targets = [
+    "x86_64-unknown-linux-musl",
+    "aarch64-apple-darwin",
+    "x86_64-pc-windows-msvc",
+]
+all-features = false
+no-default-features = false
+
+[output]
+feature-depth = 1
+
+[advisories]
+db-urls = ["https://github.com/rustsec/advisory-db"]
+# Any unwithdrawn advisory against a crate in the graph fails the check.
+# Ignoring one requires an explicit, justified entry here.
+yanked = "deny"
+unmaintained = "workspace"
+ignore = []
+
+[licenses]
+# Permissive licenses only. Every entry is either present in the current
+# dependency graph or is a standard permissive license we would accept without
+# further review. Unlisted licenses are denied.
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "MIT",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "Unlicense",
+    "Zlib",
+]
+confidence-threshold = 0.9
+# Per-crate escape hatches. Each entry must be a deliberate decision, not a
+# blanket allow of the license. Empty on purpose: nothing in the shipped graph
+# currently needs one.
+exceptions = []
+# The workspace crates themselves are MIT; they still go through the allow list.
+private = { ignore = false }
+unused-allowed-license = "allow"
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+allow-wildcard-paths = true
+highlight = "all"
+deny = []
+skip = []
+skip-tree = []
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

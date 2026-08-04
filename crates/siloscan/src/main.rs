@@ -50,6 +50,12 @@ use siloscan_core::{cache, default_pack, output, output_sarif};
         --coverage-report, a boundary rule with no [silos]), is refused and \
         names what was missing. Human output escapes control characters as \
         \\xNN and Unicode bidi controls as \\u{XXXX}.\n\n\
+        Duplication is always measured and always reported in the metrics line \
+        and in the JSON and SARIF metrics, but the per-copy \
+        metrics.duplicate-block findings are off by default: on a real tree \
+        they outnumber every other finding and bury it. They are emitted when a \
+        duplication rule is loaded, or when siloscan.toml sets \
+        [duplication] report_blocks = true.\n\n\
         Subcommands take their own PATH and their own flags, and cannot be \
         combined with the scan options above them.",
     version,
@@ -84,9 +90,18 @@ enum CacheCommand {
 
 #[derive(Args)]
 struct CacheArgs {
-    /// Path whose `.siloscan/cache` is pruned
+    /// Scan root whose cache entries are pruned
+    ///
+    /// The path names the tree, not the cache: entries are keyed by scan root,
+    /// so this says whose cache to sweep, and the cache itself is found the way
+    /// a scan of that root would find it.
     #[arg(default_value = ".")]
     path: PathBuf,
+
+    /// Prune under DIR instead of this user's cache directory; use the same
+    /// value the scans being pruned were run with
+    #[arg(long, value_name = "DIR")]
+    cache_dir: Option<PathBuf>,
 }
 
 /// Which ignore sources a scan consults.
@@ -168,7 +183,18 @@ struct ScanArgs {
 
     /// Exit with code 1 if any finding meets this severity or higher
     #[arg(long, value_enum, default_value = "error")]
-    fail_on: FailOn,
+    fail_on: SeverityArg,
+
+    /// Report only findings of this severity or higher
+    ///
+    /// This narrows the report and nothing else. The exit code is decided by
+    /// --fail-on over everything the scan found, so filtering the output can
+    /// neither turn a failing run green nor turn a green one red, and it moves
+    /// no fingerprint. It applies to every format and to all three lists a
+    /// report carries - findings, baselined and suppressed - so human, JSON and
+    /// SARIF output show the same set.
+    #[arg(long, value_enum, default_value = "info")]
+    min_severity: SeverityArg,
 
     /// Baseline file (defaults to `.siloscan/baseline.json` under PATH, or under the
     /// config root when the config sets `anchor = "config"`)
@@ -187,9 +213,34 @@ struct ScanArgs {
     #[arg(long, value_name = "FILE")]
     coverage_report: Option<PathBuf>,
 
-    /// Do not read or write the scan cache under `.siloscan/cache`
+    /// Follow symlinks whose target is inside the scan root; targets outside it
+    /// are never followed
+    ///
+    /// Off, a link is reported as a path nothing was read through, and its
+    /// target is still scanned on its own path. On, an in-root target is read
+    /// through the link as well, so a file behind one is reported twice, under
+    /// both paths. A link out of the scan root is refused either way: a scan
+    /// that reads files above its own root is a scan of the machine it ran on.
+    #[arg(long)]
+    follow_symlinks: bool,
+
+    /// Do not read or write the scan cache
     #[arg(long)]
     no_cache: bool,
+
+    /// Read and write cache entries under DIR instead of this user's cache
+    /// directory
+    ///
+    /// The default is `$XDG_CACHE_HOME/siloscan` (`$HOME/.cache/siloscan` when
+    /// unset) on unix and `%LOCALAPPDATA%\siloscan` on Windows. Nothing about
+    /// the scanned tree takes part in choosing it, which is why a tree cannot
+    /// move its own cache; this flag is the user overriding that, not the tree.
+    ///
+    /// Pointing it inside the scan root works but is a poor idea: the entries
+    /// become files the walk then sees, so a cold and a warm run count
+    /// different numbers of files.
+    #[arg(long, value_name = "DIR")]
+    cache_dir: Option<PathBuf>,
 
     #[command(flatten)]
     ignore: IgnoreArgs,
@@ -222,9 +273,23 @@ struct BaselineArgs {
     #[arg(long, value_name = "FILE")]
     coverage_report: Option<PathBuf>,
 
-    /// Do not read or write the scan cache under `.siloscan/cache`
+    /// Follow symlinks whose target is inside the scan root; targets outside it
+    /// are never followed
+    ///
+    /// A baseline records what a scan found, so this has to be available here
+    /// and has to mean the same thing: a baseline taken with it off does not
+    /// cover the findings a scan with it on will report.
+    #[arg(long)]
+    follow_symlinks: bool,
+
+    /// Do not read or write the scan cache
     #[arg(long)]
     no_cache: bool,
+
+    /// Read and write cache entries under DIR instead of this user's cache
+    /// directory
+    #[arg(long, value_name = "DIR")]
+    cache_dir: Option<PathBuf>,
 
     #[command(flatten)]
     ignore: IgnoreArgs,
@@ -252,19 +317,23 @@ enum Format {
     Sarif,
 }
 
+/// A severity named on the command line. One type for `--fail-on` and
+/// `--min-severity`, so the two flags accept the same three words and cannot
+/// drift into spelling them differently; what each one does with the value is
+/// where they differ, and only there.
 #[derive(Clone, Copy, clap::ValueEnum)]
-enum FailOn {
+enum SeverityArg {
     Info,
     Warning,
     Error,
 }
 
-impl FailOn {
+impl SeverityArg {
     fn to_severity(self) -> Severity {
         match self {
-            FailOn::Info => Severity::Info,
-            FailOn::Warning => Severity::Warning,
-            FailOn::Error => Severity::Error,
+            SeverityArg::Info => Severity::Info,
+            SeverityArg::Warning => Severity::Warning,
+            SeverityArg::Error => Severity::Error,
         }
     }
 }
@@ -283,21 +352,33 @@ fn main() {
 /// Drop cache entries left behind by other siloscan builds.
 ///
 /// A scan already prunes the directory it is about to use, so this exists for
-/// the case where no scan is coming: an upgrade in CI, or a checkout whose
-/// `.siloscan/cache` outlived the build that wrote it. Pruning is best-effort
-/// by design - an entry that cannot be read or removed is left alone - so there
-/// is nothing here to fail on and the exit code is 0 unless the path itself is
-/// unusable.
+/// the case where no scan is coming: an upgrade in CI, or a scan root whose
+/// cache outlived the build that wrote it. Pruning is best-effort by design -
+/// an entry that cannot be read or removed is left alone - so there is nothing
+/// here to fail on and the exit code is 0 unless the path itself is unusable.
+///
+/// The path names the scan root, not the cache. Entries are keyed by scan root,
+/// so the root is what identifies the directory to sweep; `--cache-dir` says
+/// where to look for it, and must match what the scans being pruned used.
 ///
 /// The count is printed because 0 and 400 are both successes and the user asked
 /// which one it was; a command that says nothing is indistinguishable from one
 /// that silently did not run.
 fn run_cache_prune(args: CacheArgs) {
     require_root(&args.path);
-    let removed = cache::prune(&state_root(&args.path));
-    let plural = if removed == 1 { "entry" } else { "entries" };
+    let root = state_root(&args.path);
+    let removed = match args.cache_dir.as_deref() {
+        Some(dir) => cache::prune_in(dir, &root),
+        None => cache::prune(&root),
+    };
     let mut out = io::stdout().lock();
-    emit(&mut out, format_args!("pruned {removed} cache {plural}"));
+    emit(
+        &mut out,
+        format_args!(
+            "pruned {}",
+            quantity(removed, "cache entry", "cache entries")
+        ),
+    );
     let _ = out.flush();
 }
 
@@ -368,7 +449,13 @@ fn run_scan(args: ScanArgs) {
         Err(e) => fail(&e),
     };
 
-    let cache = open_cache(&args.path, &rules, args.no_cache, &anchoring);
+    let cache = open_cache(
+        &args.path,
+        &rules,
+        args.no_cache,
+        args.cache_dir.as_deref(),
+        &anchoring,
+    );
     // `ScanOptions` is `#[non_exhaustive]`, so it is built from its default and
     // assigned into rather than written as a literal.
     let mut options = scan::ScanOptions::default();
@@ -377,12 +464,40 @@ fn run_scan(args: ScanArgs) {
     options.config = config.as_ref();
     options.coverage = coverage.as_ref();
     options.ignore = args.ignore.to_options();
-    let report = match scan::scan_opts(&args.path, &rules, &options, &mut |_| {}) {
+    options.follow_symlinks = args.follow_symlinks;
+    let mut report = match scan::scan_opts(&args.path, &rules, &options, &mut |_| {}) {
         Ok(report) => report,
         Err(e) => fail(&format!("error: {e}")),
     };
 
     warn_skipped(&report.skipped);
+    warn_scan(&report.warnings);
+
+    // The exit code is decided over everything the scan found, before
+    // --min-severity narrows what gets printed. The two flags govern different
+    // things and must stay that way: a filter that could turn a failing run
+    // green would be a way for a repository to pass a gate by hiding from it.
+    let failing = args.fail_on.to_severity();
+    let failed = report.findings.iter().any(|f| f.severity >= failing);
+
+    // Applied to the report itself rather than at each format's call site, so
+    // the human, JSON and SARIF paths below cannot disagree about what was
+    // reported. Whole findings are dropped and none is rewritten, so every
+    // fingerprint that survives is the one the scan produced.
+    let min_severity = args.min_severity.to_severity();
+    report.findings.retain(|f| f.severity >= min_severity);
+    report.baselined.retain(|f| f.severity >= min_severity);
+    report.suppressed.retain(|f| f.severity >= min_severity);
+
+    // Recorded in the machine-readable formats so a consumer can tell a report
+    // that withheld findings from one that had none to withhold - the same
+    // distinction `skipped`, `ignored` and `warnings` exist to make. `None` on
+    // the default threshold, which drops nothing and so has nothing to declare;
+    // the report is then the document it was before this was recorded at all.
+    let filtered_at = match min_severity > Severity::Info {
+        true => Some(min_severity),
+        false => None,
+    };
 
     let mut out = io::stdout().lock();
     match args.format {
@@ -407,8 +522,8 @@ fn run_scan(args: ScanArgs) {
                 emit(
                     &mut out,
                     format_args!(
-                        "{} findings ({} baselined, {} suppressed)",
-                        report.findings.len(),
+                        "{} ({} baselined, {} suppressed)",
+                        quantity(report.findings.len(), "finding", "findings"),
                         report.baselined.len(),
                         report.suppressed.len()
                     ),
@@ -429,24 +544,22 @@ fn run_scan(args: ScanArgs) {
         }
         Format::Json => emit(
             &mut out,
-            format_args!("{}", output::to_json(&report, &rules, anchoring.anchor())),
+            format_args!(
+                "{}",
+                output::to_json(&report, &rules, anchoring.anchor(), filtered_at)
+            ),
         ),
         Format::Sarif => emit(
             &mut out,
             format_args!(
                 "{}",
-                output_sarif::to_sarif(&report, &rules, anchoring.anchor())
+                output_sarif::to_sarif(&report, &rules, anchoring.anchor(), filtered_at)
             ),
         ),
     }
     let _ = out.flush();
 
-    let fail_on_severity = args.fail_on.to_severity();
-    if report
-        .findings
-        .iter()
-        .any(|f| f.severity >= fail_on_severity)
-    {
+    if failed {
         process::exit(1);
     }
 }
@@ -469,18 +582,26 @@ fn run_baseline(args: BaselineArgs) {
     let anchoring = scan::Anchoring::resolve(&args.path, config.as_ref())
         .unwrap_or_else(|e| fail(&format!("error: {e}")));
 
-    let cache = open_cache(&args.path, &rules, args.no_cache, &anchoring);
+    let cache = open_cache(
+        &args.path,
+        &rules,
+        args.no_cache,
+        args.cache_dir.as_deref(),
+        &anchoring,
+    );
     let mut options = scan::ScanOptions::default();
     options.cache = cache.as_ref();
     options.config = config.as_ref();
     options.coverage = coverage.as_ref();
     options.ignore = args.ignore.to_options();
+    options.follow_symlinks = args.follow_symlinks;
     let report = match scan::scan_opts(&args.path, &rules, &options, &mut |_| {}) {
         Ok(report) => report,
         Err(e) => fail(&format!("error: {e}")),
     };
 
     warn_skipped(&report.skipped);
+    warn_scan(&report.warnings);
 
     // The findings already speak the active convention, and a baseline entry is
     // its finding's fingerprint and path verbatim, so the entries need nothing
@@ -494,7 +615,10 @@ fn run_baseline(args: BaselineArgs) {
     ) {
         Ok(count) => {
             let mut out = io::stdout().lock();
-            emit(&mut out, format_args!("baseline written: {count} entries"));
+            emit(
+                &mut out,
+                format_args!("baseline written: {}", quantity(count, "entry", "entries")),
+            );
             let _ = out.flush();
         }
         Err(e) => fail(&format!("error: {e}")),
@@ -533,29 +657,36 @@ fn run_test(args: TestArgs) {
     }
 }
 
-/// The cache lives under the scan root's state directory, which for a
-/// single-file scan is the directory holding the file. `siloscan test` never
-/// caches: a fixture run must exercise the engines.
+/// The cache for this run: in this user's own cache directory, or under
+/// `cache_dir` when the command line named one. `siloscan test` never caches: a
+/// fixture run must exercise the engines.
+///
+/// It is keyed on the scan root but stored nowhere near it. Nothing under the
+/// scanned tree is read or written, so a repository cannot plant an entry, move
+/// the cache, or tell a scan where to look for one - the location comes from
+/// this process's environment and this command line, and from nothing else.
+/// `state_root` still resolves a single-file root to the directory holding it,
+/// so `siloscan app.js` and a scan of the directory around it key alike.
 ///
 /// The anchoring is part of the cache key. A cached finding carries a path and a
 /// fingerprint derived from that path, so an entry written under one convention
 /// would be wrong under another, and the two must never share a key.
-///
-/// It stays under the scan root even under `anchor = "config"`, unlike the
-/// baseline: entries keyed by convention can never be shared across two scan
-/// roots anyway, so moving the directory would buy nothing and would make a
-/// module scan write into the repository root.
 fn open_cache(
     root: &Path,
     rules: &RuleSet,
     no_cache: bool,
+    cache_dir: Option<&Path>,
     anchoring: &scan::Anchoring,
 ) -> Option<Cache> {
     if no_cache {
         return None;
     }
     let scope = PathScope::new(anchoring.anchor(), anchoring.prefix());
-    Some(Cache::open(&state_root(root), rules, &scope))
+    let root = state_root(root);
+    Some(match cache_dir {
+        Some(dir) => Cache::open_in(dir, &root, rules, &scope),
+        None => Cache::open(&root, rules, &scope),
+    })
 }
 
 /// The directory a scan root keeps its `.siloscan` state in: the root itself
@@ -908,8 +1039,33 @@ fn warn_skipped(skipped: &[scan::SkippedFile]) {
         .filter(|n| *n > 0)
     {
         emit_err(format_args!(
-            "warning: ... and {rest} more files skipped (see --format json for the full list)"
+            "warning: ... and {} skipped (see --format json for the full list)",
+            quantity(rest, "more file", "more files")
         ));
+    }
+}
+
+/// `count` with the noun it agrees with. Every summary line this binary prints
+/// goes through here: "1 findings" in the line every scan ends with was the
+/// most visible thing about the tool, and a count formatted by hand grows a
+/// second one every time a line is added.
+fn quantity(count: usize, singular: &str, plural: &str) -> String {
+    match count {
+        1 => format!("1 {singular}"),
+        _ => format!("{count} {plural}"),
+    }
+}
+
+/// What the scan narrowed, said before the report rather than inside it.
+///
+/// These are not findings and not skipped files: they are the places where a
+/// gate did not evaluate and the run was allowed to continue anyway. Unbounded
+/// on purpose - the scanner only produces one per input it could not use, and a
+/// list short enough to print is the point of it being a warning instead of a
+/// refusal.
+fn warn_scan(warnings: &[String]) {
+    for warning in warnings {
+        emit_err(format_args!("warning: {}", safe(warning)));
     }
 }
 
@@ -1071,6 +1227,7 @@ rules:
         let dir = tempdir();
         run_cache_prune(CacheArgs {
             path: dir.path().to_path_buf(),
+            cache_dir: Some(tempdir().path().to_path_buf()),
         });
         assert!(!dir.path().join(".siloscan").exists());
     }
@@ -1229,20 +1386,27 @@ rules:
         write(dir.path(), "app.js", "const a = 1;\n");
         let anchoring = scan::Anchoring::default();
 
+        let cache_home = tempdir();
         let cache = open_cache(
             &dir.path().join("app.js"),
             &RuleSet::default(),
             false,
+            Some(cache_home.path()),
             &anchoring,
         )
-        .expect("a file root caches beside the file");
-        assert_eq!(cache.root(), dir.path().join(".siloscan/cache"));
+        .expect("a file root opens a cache");
+        // That it opened at all is this test's subject: joining `.siloscan`
+        // onto a file names a directory below a file, which is what made
+        // `siloscan app.js` exit 2 before it had scanned anything. Where the
+        // entries live is the cache's own contract and is asserted there.
+        let _ = cache;
 
         assert!(
             open_cache(
                 &dir.path().join("app.js"),
                 &RuleSet::default(),
                 true,
+                Some(cache_home.path()),
                 &anchoring
             )
             .is_none()
@@ -1366,6 +1530,90 @@ rules:
 
         let both = load_rules(dir.path(), &[dir.path().join("rules")], false);
         assert_eq!(both.rules.len(), pack_only.rules.len() + 1);
+    }
+
+    /// Every summary line the binary prints agrees with its own number. The
+    /// one that mattered is the scan summary, which printed "1 findings" on
+    /// every run that had a baseline or a suppression.
+    #[test]
+    fn counted_nouns_agree_with_their_number() {
+        assert_eq!(quantity(0, "finding", "findings"), "0 findings");
+        assert_eq!(quantity(1, "finding", "findings"), "1 finding");
+        assert_eq!(quantity(2, "finding", "findings"), "2 findings");
+        assert_eq!(quantity(1, "entry", "entries"), "1 entry");
+        assert_eq!(quantity(0, "entry", "entries"), "0 entries");
+        assert_eq!(quantity(1, "more file", "more files"), "1 more file");
+        assert_eq!(quantity(3, "more file", "more files"), "3 more files");
+    }
+
+    /// `--min-severity` has to survive clap, default to reporting everything,
+    /// and stay separate from `--fail-on`: they are one enum and two arguments,
+    /// and collapsing them would make hiding findings a way to pass a gate.
+    #[test]
+    fn min_severity_is_accepted_and_defaults_to_reporting_everything() {
+        let cli = Cli::try_parse_from(["siloscan", "src"]).unwrap();
+        assert_eq!(cli.scan.min_severity.to_severity(), Severity::Info);
+        assert_eq!(cli.scan.fail_on.to_severity(), Severity::Error);
+
+        let cli = Cli::try_parse_from([
+            "siloscan",
+            "src",
+            "--min-severity",
+            "error",
+            "--fail-on",
+            "warning",
+        ])
+        .unwrap();
+        assert_eq!(cli.scan.min_severity.to_severity(), Severity::Error);
+        assert_eq!(cli.scan.fail_on.to_severity(), Severity::Warning);
+
+        assert!(Cli::try_parse_from(["siloscan", "--min-severity", "critical"]).is_err());
+        // A scan-only flag, deliberately: a baseline narrowed by severity would
+        // record part of the debt and silently accept the rest.
+        assert!(Cli::try_parse_from(["siloscan", "baseline", "--min-severity", "error"]).is_err());
+    }
+
+    /// The filter as `run_scan` applies it: whole findings dropped, in every
+    /// list, with nothing rewritten. Fingerprints survive because no finding is
+    /// ever rebuilt - the ones that pass are the ones the scan produced.
+    #[test]
+    fn min_severity_drops_whole_findings_and_moves_nothing() {
+        use siloscan_core::findings::{Finding, fingerprint};
+
+        let finding = |severity, rule_id: &str| Finding {
+            rule_id: rule_id.to_string(),
+            severity,
+            message: "m".to_string(),
+            path: "src/a.rs".to_string(),
+            line: 1,
+            column: 1,
+            column_utf16: 1,
+            matched: "x".to_string(),
+            fingerprint: fingerprint(rule_id, "src/a.rs", "x", 0),
+        };
+
+        let mut findings = vec![
+            finding(Severity::Info, "a.info"),
+            finding(Severity::Warning, "b.warning"),
+            finding(Severity::Error, "c.error"),
+        ];
+        let before = findings.clone();
+
+        findings.retain(|f| f.severity >= Severity::Warning);
+        assert_eq!(
+            findings
+                .iter()
+                .map(|f| f.rule_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["b.warning", "c.error"]
+        );
+        assert_eq!(findings[0].fingerprint, before[1].fingerprint);
+        assert_eq!(findings[1].fingerprint, before[2].fingerprint);
+
+        // The default keeps everything, so today's output is unchanged.
+        let mut all = before.clone();
+        all.retain(|f| f.severity >= Severity::Info);
+        assert_eq!(all.len(), 3);
     }
 
     #[test]

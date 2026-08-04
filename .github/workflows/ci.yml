@@ -5,6 +5,9 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -13,26 +16,69 @@ jobs:
     name: Build, lint, test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master, 2026-07-16
         with:
+          toolchain: stable
           components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - name: Verify Cargo.lock is current
+        run: |
+          cargo metadata --locked --format-version 1 > /dev/null
+          git diff --exit-code -- Cargo.lock
       - name: Format check
         run: cargo fmt --all -- --check
       - name: Clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
       - name: Build
-        run: cargo build --workspace
+        run: cargo build --locked --workspace
       - name: Test
-        run: cargo test --workspace
+        run: cargo test --locked --workspace
 
   msrv:
     name: MSRV (1.96)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@1.96
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master, 2026-07-16
+        with:
+          toolchain: "1.96"
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
       - name: Check
-        run: cargo check --workspace --all-targets
+        run: cargo check --locked --workspace --all-targets
+
+  supply-chain:
+    name: Supply chain (cargo-deny, license bundle)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master, 2026-07-16
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - name: Install cargo-deny
+        env:
+          CARGO_DENY_VERSION: "0.20.2"
+          CARGO_DENY_SHA256: 9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f
+        run: |
+          set -euo pipefail
+          name="cargo-deny-$CARGO_DENY_VERSION-x86_64-unknown-linux-musl"
+          url="https://github.com/EmbarkStudios/cargo-deny/releases/download/$CARGO_DENY_VERSION/$name.tar.gz"
+          curl --proto '=https' --tlsv1.2 -sSfL "$url" -o cargo-deny.tar.gz
+          echo "$CARGO_DENY_SHA256  cargo-deny.tar.gz" | sha256sum -c -
+          tar xzf cargo-deny.tar.gz
+          sudo install -m 0755 "$name/cargo-deny" /usr/local/bin/cargo-deny
+          rm -rf cargo-deny.tar.gz "$name"
+          cargo-deny --version
+      - name: Check advisories, licenses, bans and sources
+        run: cargo deny --locked check
+      - name: Generate the third-party license file for every shipped target
+        run: |
+          set -euo pipefail
+          for target in x86_64-unknown-linux-musl aarch64-apple-darwin x86_64-pc-windows-msvc; do
+            python3 scripts/third-party-licenses.py \
+              --target "$target" \
+              --package siloscan \
+              --package siloscan-tui \
+              --output "$RUNNER_TEMP/THIRD-PARTY-LICENSES-$target"
+          done

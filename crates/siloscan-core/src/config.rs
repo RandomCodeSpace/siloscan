@@ -87,11 +87,34 @@ impl Anchor {
 pub struct DuplicationConfig {
     #[serde(default = "default_min_lines")]
     pub min_lines: usize,
+
+    /// Whether every copy of every duplicated block is reported as its own
+    /// `metrics.duplicate-block` info finding.
+    ///
+    /// Off by default, and the numbers are unaffected either way: duplication
+    /// is always measured, `metrics.files[*].duplicated_lines`, the totals and
+    /// the density are always reported. What this key controls is only whether
+    /// the per-copy locations are emitted as findings.
+    ///
+    /// The default is off because those findings are per copy of every block in
+    /// the tree, so on a real repository they outnumber every other finding by
+    /// two or three orders of magnitude - the count that made a SARIF report
+    /// too large for GitHub code scanning to ingest, and that buried the
+    /// secrets a scan exists to surface. Nothing is hidden by the default: the
+    /// duplication a reader acts on is in the metrics line, and turning this on
+    /// (or loading a duplication rule, which turns it on by itself - see
+    /// `scan::report_duplicate_blocks`) produces exactly the findings 1.3.0
+    /// produced, fingerprints included.
+    #[serde(default)]
+    pub report_blocks: bool,
 }
 
 impl Default for DuplicationConfig {
     fn default() -> Self {
-        DuplicationConfig { min_lines: 10 }
+        DuplicationConfig {
+            min_lines: 10,
+            report_blocks: false,
+        }
     }
 }
 
@@ -906,6 +929,60 @@ alpha = ["src/**"]
         let path = write(dir.path(), CONFIG_NAME, "[duplication]\nmin_lines = 5\n");
         let config = load(&path).expect("should load");
         assert_eq!(config.duplication.min_lines, 5);
+    }
+
+    /// The key that brings the per-block findings back. Off unless asked for,
+    /// on both the absent-section and the present-section paths, because those
+    /// are two different serde defaults and only one of them is the struct's.
+    #[test]
+    fn duplication_report_blocks_defaults_to_off() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write(dir.path(), CONFIG_NAME, "");
+        assert!(!load(&path).unwrap().duplication.report_blocks);
+
+        let path = write(dir.path(), "other.toml", "[duplication]\nmin_lines = 5\n");
+        assert!(!load(&path).unwrap().duplication.report_blocks);
+
+        assert!(!DuplicationConfig::default().report_blocks);
+    }
+
+    #[test]
+    fn duplication_report_blocks_parses() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write(
+            dir.path(),
+            CONFIG_NAME,
+            "[duplication]\nreport_blocks = true\n",
+        );
+        let config = load(&path).expect("should load");
+        assert!(config.duplication.report_blocks);
+        // Independent of the window: turning the findings on must not move what
+        // counts as a duplicate.
+        assert_eq!(config.duplication.min_lines, 10);
+
+        let path = write(
+            dir.path(),
+            "off.toml",
+            "[duplication]\nmin_lines = 4\nreport_blocks = false\n",
+        );
+        let config = load(&path).expect("should load");
+        assert!(!config.duplication.report_blocks);
+        assert_eq!(config.duplication.min_lines, 4);
+    }
+
+    /// An included config may not turn the findings on: `duplication` is a
+    /// root-only key, and a module quietly changing what the whole scan reports
+    /// is the thing root-only keys exist to prevent.
+    #[test]
+    fn include_cannot_set_report_blocks() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = with_include(
+            dir.path(),
+            "include = [\"modules/api/siloscan.toml\"]\n",
+            "[duplication]\nreport_blocks = true\n",
+        );
+        let err = load(&path).unwrap_err();
+        assert!(err.contains("duplication"), "{err}");
     }
 
     #[test]

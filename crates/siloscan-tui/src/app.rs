@@ -31,6 +31,23 @@ pub enum AppEvent {
     Failed(String),
 }
 
+/// Everything about a session's walk that a rescan has to reproduce, in one
+/// value.
+///
+/// One value rather than a parameter each: `run`, `on_key` and `start_scan` do
+/// nothing with these but carry them through to [`spawn_scan`], and a second
+/// loose flag threaded beside the first is how two of them end up passed in the
+/// wrong order. It is also what the `--report` check compares against, so
+/// "this session configured its walk" stays a single question.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct WalkPolicy {
+    /// Which ignore sources the walk consults.
+    pub ignore: IgnoreOptions,
+    /// Follow symlinks whose target is inside the scan root. A target outside
+    /// it is never followed, whatever this says.
+    pub follow_symlinks: bool,
+}
+
 /// Run a scan on a worker thread, streaming progress and then the report.
 /// Send failures mean the UI is gone, which is not an error worth reporting.
 pub fn spawn_scan(
@@ -38,7 +55,7 @@ pub fn spawn_scan(
     rules: Arc<RuleSet>,
     baseline: Option<Arc<Baseline>>,
     config: Option<Arc<Config>>,
-    ignore: IgnoreOptions,
+    walk: WalkPolicy,
     tx: Sender<AppEvent>,
 ) {
     thread::spawn(move || {
@@ -51,7 +68,8 @@ pub fn spawn_scan(
         let mut options = ScanOptions::default();
         options.baseline = baseline.as_deref();
         options.config = config.as_deref();
-        options.ignore = ignore;
+        options.ignore = walk.ignore;
+        options.follow_symlinks = walk.follow_symlinks;
         let event = match scan::scan_opts(&root, &rules, &options, &mut on_progress) {
             Ok(report) => AppEvent::ScanDone(Box::new(report)),
             Err(e) => AppEvent::Failed(e),
@@ -284,6 +302,7 @@ mod tests {
             graph: Default::default(),
             boundary_edges: Vec::new(),
             metrics: Default::default(),
+            warnings: Vec::new(),
         }
     }
 
@@ -366,6 +385,7 @@ mod tests {
                 graph: Default::default(),
                 boundary_edges: Vec::new(),
                 metrics: Default::default(),
+                warnings: Vec::new(),
             },
             None,
         );
@@ -783,7 +803,7 @@ mod tests {
             Arc::clone(&rules),
             None,
             None,
-            IgnoreOptions::default(),
+            WalkPolicy::default(),
             tx,
         );
 
