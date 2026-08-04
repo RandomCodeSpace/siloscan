@@ -5,12 +5,15 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "README.md"
 description = "Interactive terminal UI for siloscan: triage board, ratchet console, dashboards"
 
 [dependencies]
 crossterm = "0.29.0"
 ratatui = "0.30.2"
-siloscan-core = { path = "../siloscan-core", version = "1.1.0" }
+siloscan-core = { path = "../siloscan-core", version = "1.1.1" }
 
 [dev-dependencies]
 tempfile = "3.27.0"

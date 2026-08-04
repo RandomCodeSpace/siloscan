@@ -357,7 +357,7 @@ fn draw_detail(
                 ),
                 Span::raw("  "),
                 Span::styled(
-                    finding.matched.clone(),
+                    crate::ui::display_match(&state.rules, finding).to_string(),
                     Style::default().add_modifier(Modifier::BOLD),
                 ),
             ])

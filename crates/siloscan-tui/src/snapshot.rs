@@ -4,8 +4,16 @@
 //! appended, never renamed, moved or removed. This reader is therefore
 //! deliberately tolerant - unknown keys, at the top level and inside every
 //! nested object, are ignored, and absent optional keys take their defaults.
-//! Only two things are rejected: input that is not a readable JSON object, and
-//! a `schema_version` whose major component this build does not understand.
+//! Three things are rejected: input that is not a readable JSON object, a
+//! `schema_version` whose major component this build does not understand, and
+//! a JSON object that is not a report at all.
+//!
+//! That last check is what keeps the tolerance from failing open. Every key is
+//! optional and every section defaults to empty, so without it any JSON object
+//! at all (`{}`, a SARIF log, a `package.json`) would load as an empty report
+//! and render a passing gate. A report is recognised by declaring a
+//! `schema_version` or, for the 1.0 reports written before that key existed,
+//! by carrying a `findings` key.
 //!
 //! The report carries no timestamp and no scan root, so a snapshot is
 //! identified by the file it was read from.
@@ -50,6 +58,8 @@ pub enum SnapshotError {
         path: String,
         source: serde_json::Error,
     },
+    /// The file is a JSON object, but nothing identifies it as a report.
+    NotAReport { path: String },
     /// The report declares a major version this build does not read.
     UnsupportedVersion { path: String, found: String },
 }
@@ -61,6 +71,11 @@ impl fmt::Display for SnapshotError {
             SnapshotError::Parse { path, source } => {
                 write!(f, "{path} is not a valid siloscan report: {source}")
             }
+            SnapshotError::NotAReport { path } => write!(
+                f,
+                "{path} is not a siloscan report: it has neither a schema_version \
+                 nor a findings key"
+            ),
             SnapshotError::UnsupportedVersion { path, found } => write!(
                 f,
                 "{path}: report schema_version {found} is not supported; \
@@ -75,7 +90,7 @@ impl std::error::Error for SnapshotError {
         match self {
             SnapshotError::Read { source, .. } => Some(source),
             SnapshotError::Parse { source, .. } => Some(source),
-            SnapshotError::UnsupportedVersion { .. } => None,
+            SnapshotError::NotAReport { .. } | SnapshotError::UnsupportedVersion { .. } => None,
         }
     }
 }
@@ -138,12 +153,23 @@ fn parse(text: &str, label: &str, source: String) -> Result<SnapshotData, Snapsh
     })
 }
 
-/// A missing version means the report predates the key, which is version 1.0.
+/// A missing version means the report predates the key, which is version 1.0 -
+/// but only for a document that is a report at all. Every 1.0 report carries a
+/// `findings` key, so a document with neither key is not one, and is rejected
+/// by name rather than loaded as an empty passing report.
+///
 /// Anything that is not a `MAJOR.MINOR` string of a known major is rejected
 /// with the value that was found.
 fn version_of(map: &Map<String, Value>, label: &str) -> Result<String, SnapshotError> {
     let found = match map.get("schema_version") {
-        None | Some(Value::Null) => ASSUMED_VERSION.to_string(),
+        None | Some(Value::Null) => {
+            if !map.contains_key("findings") {
+                return Err(SnapshotError::NotAReport {
+                    path: label.to_string(),
+                });
+            }
+            ASSUMED_VERSION.to_string()
+        }
         Some(Value::String(version)) => version.clone(),
         Some(other) => other.to_string(),
     };
@@ -218,13 +244,16 @@ mod tests {
 
     #[test]
     fn loads_a_current_report() {
+        // The version this build's core writes, not a pinned string: the gate
+        // reads the major component only, so a minor bump must not touch this.
+        let current = siloscan_core::output::SCHEMA_VERSION;
         let dir = tempfile::tempdir().unwrap();
-        let path = write(&dir, "report.json", &report_json(Some("1.1")));
+        let path = write(&dir, "report.json", &report_json(Some(current)));
 
         let data = load(&path).unwrap();
 
         assert_eq!(data.source, "report.json");
-        assert_eq!(data.schema_version, "1.1");
+        assert_eq!(data.schema_version, current);
         assert_eq!(data.anchor, Anchor::Config);
         assert_eq!(data.findings.len(), 1);
         assert_eq!(data.findings[0].rule_id, "metrics.duplicate-block");
@@ -343,6 +372,50 @@ mod tests {
             load_str("{\"findings\": 3}"),
             Err(SnapshotError::Parse { .. })
         ));
+    }
+
+    /// The tolerance must not fail open: every key is optional, so an arbitrary
+    /// JSON object would otherwise load as an empty report and render a passing
+    /// gate.
+    #[test]
+    fn a_json_object_that_is_not_a_report_is_rejected() {
+        let sarif = r#"{
+  "version": "2.1.0",
+  "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
+  "runs": [{ "tool": { "driver": { "name": "other" } }, "results": [] }]
+}"#;
+        let package = r#"{ "name": "app", "version": "1.0.0", "scripts": {} }"#;
+
+        for text in ["{}", sarif, package] {
+            let err = load_str(text).unwrap_err();
+            assert!(matches!(err, SnapshotError::NotAReport { .. }), "{err:?}");
+        }
+    }
+
+    #[test]
+    fn the_not_a_report_error_names_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write(&dir, "package.json", r#"{ "name": "app" }"#);
+
+        let err = load(&path).unwrap_err();
+
+        let message = err.to_string();
+        assert!(message.contains("package.json"), "{message}");
+        assert!(message.contains("not a siloscan report"), "{message}");
+    }
+
+    /// A 1.0 report predates `schema_version` and is recognised by its
+    /// `findings` key, whatever else it does or does not carry.
+    #[test]
+    fn a_one_zero_report_without_a_schema_version_is_still_a_report() {
+        let data = load_str(r#"{ "findings": [] }"#).unwrap();
+
+        assert_eq!(data.schema_version, "1.0");
+        assert!(data.findings.is_empty());
+
+        // A declared version is enough on its own: a report may legitimately
+        // carry no findings key at all.
+        assert!(load_str(r#"{ "schema_version": "1.1" }"#).is_ok());
     }
 
     #[test]

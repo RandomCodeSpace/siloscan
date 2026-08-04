@@ -46,8 +46,19 @@ output, byte for byte.
   warm and cold cache runs produce byte-identical output. Metrics and duplication
   blocks sort consistently.
 - **Offline**: static binaries. Nothing is fetched, ever.
-- **Ignore-aware**: respects `.gitignore` and `.ignore`, skips binaries and
-  non-UTF-8 files.
+- **Ignore-aware, not blind**: respects `.gitignore` and `.ignore`, honored
+  whether or not a `.git` directory exists. Hidden files and directories are
+  scanned - `.env`, `.npmrc`, `.github/workflows/` and `.circleci/` are where
+  secrets actually live - while version-control internals (`.git`, `.hg`,
+  `.svn`, `.jj`, `.bzr`) and siloscan's own `.siloscan` state directory are
+  excluded by name at any depth below the scan root. A dotfile listed in an
+  ignore file stays ignored. Binaries and non-UTF-8 files are skipped.
+
+> **Upgrading from 1.1.0**: hidden files are now scanned. A repository with a
+> committed `.env`, `.npmrc`, or `.github/workflows/` will gain findings that
+> earlier versions never looked for, and an existing baseline does not cover
+> them - it was written before those files were walked. If those findings are
+> accepted, run `siloscan baseline .` once and commit the result.
 - **Stable finding identity**: SHA-256 fingerprints survive unrelated line
   drift and feed baselines and SARIF `partialFingerprints`. Duplication block
   identity is the normalized-line hash.
@@ -59,10 +70,37 @@ cargo install siloscan        # scanner (binaries: siloscan and ss)
 cargo install siloscan-tui    # interactive TUI
 ```
 
-Prebuilt binaries (Linux musl, macOS, Windows) are attached to
-[GitHub releases](https://github.com/RandomCodeSpace/siloscan/releases).
+`cargo install` works on any platform with a Rust toolchain and a C compiler;
+see [Building from source](#building-from-source).
+
+Prebuilt archives are attached to
+[GitHub releases](https://github.com/RandomCodeSpace/siloscan/releases) for
+three targets only, each with a matching `SHA256SUMS` file:
+
+| Target | Archive |
+| --- | --- |
+| `x86_64-unknown-linux-musl` | `.tar.gz` |
+| `aarch64-apple-darwin` | `.tar.gz` |
+| `x86_64-pc-windows-msvc` | `.zip` |
+
+Each archive carries `siloscan`, `ss`, `siloscan-tui`, `LICENSE`, `NOTICE` and
+this README. Nothing is published for any other target - x86_64 macOS, aarch64
+Linux and aarch64 Windows are `cargo install` only.
+
 `ss` is a short alias binary for `siloscan` - note it shadows the iproute2
 socket-statistics tool if `~/.cargo/bin` precedes `/usr/bin` in your PATH.
+
+## Building from source
+
+```sh
+cargo build --release
+```
+
+- **Rust 1.96 or newer.** Declared as `rust-version` in the workspace manifest;
+  older toolchains refuse the build.
+- **A C toolchain on `PATH`.** The tree-sitter runtime and the ten bundled
+  grammars ship C sources that are compiled by build scripts, so `cc` and `ar`
+  (binutils) must be available. There is no prebuilt-grammar path.
 
 ## Usage
 
@@ -148,9 +186,27 @@ min_lines = 10                # min_lines >= 2 (default 10)
 # Optional: path anchoring
 anchor = "config"             # "scan-root" (default) or "config"
 
+# Optional: resource limits
+[limits]
+max_parse_bytes = 2097152     # default 2 MiB
+
 # Optional: multi-module config (root-only)
 include = ["modules/api/siloscan.toml"]
 ```
+
+`[limits] max_parse_bytes` caps the size of any single file the scanner will
+hand to a parser. A file larger than the cap is still read, still matched by the
+regex and secret engines, and still measured; only its parse tree is skipped, so
+it contributes no ast findings. Every such file is recorded in the report's
+`skipped` array with a reason naming the limit, so the findings it could not
+produce are never read as a clean file. The default is 2 MiB (2097152 bytes).
+
+The cap has one exception: when a boundary rule is loaded, every file is parsed
+regardless of size. The boundary engine resolves imports against the whole
+graph, so a gated file is not a hole in its own results alone - an import
+pointing at it stops resolving, and the violation the importing file really
+commits goes unreported. A partial graph changes results for files nowhere near
+the cap, so the graph is built whole and boundary scans do not honour the limit.
 
 Unknown keys, duplicate ids, invalid patterns, and unknown silo names are load
 errors - rules fail loudly, never silently.
@@ -175,9 +231,7 @@ schema metadata:
 
 ```json
 {
-  "version": "1.1.0",
-  "schema_version": "1.1",
-  "anchor": "scan-root",
+  "version": "1.1.1",
   "findings": [
     {
       "rule_id": "metrics.duplicate-block",
@@ -187,12 +241,13 @@ schema metadata:
       "line": 42,
       "column": 1,
       "matched": "10 duplicated lines (block abc123456789)",
-      "fingerprint": "sha256-abc..."
+      "fingerprint": "00f13c99a1d5c00060ab482949f6206276bf13a3410527de9dae109d6913d53d"
     }
   ],
   "baselined": [],
   "suppressed": [],
   "skipped": [],
+  "schema_version": "1.2",
   "metrics": {
     "files": {
       "src/main.rs": {
@@ -207,7 +262,8 @@ schema metadata:
       "duplicated_lines": 30,
       "duplication_density": 6.0
     }
-  }
+  },
+  "anchor": "scan-root"
 }
 ```
 
@@ -218,11 +274,27 @@ Duplicate-block findings carry the 12-hex normalized-block hash in the matched
 text. The `anchor` key names the path convention all findings, skipped files,
 and metrics keys use.
 
+A finding from a secret rule reports `matched` as `<redacted>`: the credential
+itself never reaches the report, in any of the three finding arrays. Its
+`fingerprint` is unchanged - it is computed over the real matched text - so
+baselines, suppressions and SARIF `partialFingerprints` written before the
+redaction still identify the same occurrence.
+
+`fingerprint` is a bare lowercase-hex SHA-256 digest - 64 hex characters, no
+`sha256-` prefix or any other decoration - over the rule id, the path, the
+whitespace-normalized matched text, and the occurrence index within the file.
+Line and column are deliberately excluded, so edits above a finding leave its
+fingerprint untouched.
+
 ## Known trade-offs
 
 - **Memory cost of duplication detection**: file contents are held in memory
-  during the cross-file normalized-line pass. Very large trees may require
-  proportional memory.
+  during the cross-file normalized-line pass, so a very large tree still costs
+  memory proportional to the text it contains. `[limits] max_parse_bytes` does
+  not bound this - it gates parsing, not reading, and an oversized file still
+  reaches the duplication pass. It does not bound parsing either when a boundary
+  rule is loaded: the import graph has to be whole, so those scans parse past
+  the cap.
 - **Duplication block filtering**: findings respect ignore files (`gitignore`,
   `.ignore`) and inline suppression like any rule, but have no dedicated
   path-filter configuration separate from rule paths. A duplication rule with

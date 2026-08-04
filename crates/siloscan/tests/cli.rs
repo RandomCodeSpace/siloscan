@@ -644,6 +644,107 @@ fn coverage_rules_are_inert_without_a_report() {
     assert!(report_lines(&text).is_empty(), "stdout: {text}");
 }
 
+/// A repository holding one matching file and one clean one, so a scan of
+/// either file alone is the whole of the scan.
+fn single_file_src() -> TempDir {
+    src_dir(&[
+        ("app.js", "const a = needle;\n"),
+        ("clean.js", "const b = 1;\n"),
+    ])
+}
+
+/// Same arguments as [`run`], with the process started inside `cwd` so the scan
+/// path may be relative to it.
+fn run_in(cwd: &Path, rules: &Path, scan_path: &str, extra: &[&str]) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_siloscan"))
+        .current_dir(cwd)
+        .arg(scan_path)
+        .arg("--rules")
+        .arg(rules)
+        .args(extra)
+        .output()
+        .expect("siloscan binary should run")
+}
+
+#[test]
+fn a_single_file_scan_root_reports_the_file_by_name() {
+    let rules = rules_dir(MATCHING_RULE);
+    let src = single_file_src();
+
+    let absolute = run(
+        rules.path(),
+        &src.path().join("app.js"),
+        &["--no-default-rules"],
+    );
+
+    assert_eq!(absolute.status.code(), Some(1), "{}", stderr(&absolute));
+    assert_eq!(
+        report_lines(&stdout(&absolute)),
+        vec!["app.js:1:11 error test.needle needle found"]
+    );
+
+    // The same file named relative to the directory holding it: same report,
+    // same exit code, and no `.siloscan` below the file.
+    let relative = run_in(src.path(), rules.path(), "app.js", &["--no-default-rules"]);
+
+    assert_eq!(relative.status.code(), Some(1), "{}", stderr(&relative));
+    assert_eq!(stdout(&relative), stdout(&absolute));
+    assert!(src.path().join(".siloscan/cache").is_dir());
+}
+
+#[test]
+fn a_clean_single_file_scan_root_exits_zero() {
+    let rules = rules_dir(MATCHING_RULE);
+    let src = single_file_src();
+
+    let output = run(
+        rules.path(),
+        &src.path().join("clean.js"),
+        &["--no-default-rules"],
+    );
+
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let text = stdout(&output);
+    assert!(report_lines(&text).is_empty(), "stdout: {text}");
+
+    // And with the cache off, which reaches the same state directory.
+    let uncached = run(
+        rules.path(),
+        &src.path().join("clean.js"),
+        &["--no-default-rules", "--no-cache"],
+    );
+    assert_eq!(uncached.status.code(), Some(0), "{}", stderr(&uncached));
+    assert_eq!(uncached.stdout, output.stdout);
+}
+
+#[test]
+fn a_baseline_taken_on_a_file_root_lands_beside_it_and_is_honoured() {
+    let rules = rules_dir(MATCHING_RULE);
+    let src = single_file_src();
+    let file = src.path().join("app.js");
+    let file_str = file.to_str().expect("temp path should be UTF-8");
+
+    let baseline = run_args(&[
+        "baseline",
+        file_str,
+        "--rules",
+        path_str(&rules),
+        "--no-default-rules",
+    ]);
+
+    assert_eq!(baseline.status.code(), Some(0), "{}", stderr(&baseline));
+    assert_eq!(stdout(&baseline).trim(), "baseline written: 1 entries");
+    assert!(src.path().join(".siloscan/baseline.json").is_file());
+
+    let rescan = run(rules.path(), &file, &["--no-default-rules"]);
+
+    assert_eq!(rescan.status.code(), Some(0), "{}", stderr(&rescan));
+    assert_eq!(
+        report_lines(&stdout(&rescan)),
+        vec!["0 findings (1 baselined, 0 suppressed)"]
+    );
+}
+
 /// A consumer that exits early (`siloscan | head`) closes the read end of the
 /// pipe. The output must exceed the pipe buffer so the write actually hits
 /// EPIPE, which must not turn the exit code into a panic.
@@ -665,4 +766,65 @@ fn closed_stdout_keeps_the_exit_code_contract() {
 
     let status = child.wait().expect("child should exit");
     assert_eq!(status.code(), Some(1));
+}
+
+/// Hidden files are scan input - `.env` and `.github/workflows/` are where
+/// secrets live - while version-control internals are not. Asserted end to end
+/// because the exclusion is by directory name at any depth, which a unit test
+/// of the walker alone cannot show reaching a report.
+#[test]
+fn hidden_files_are_scanned_and_vcs_internals_are_not() {
+    let rules = rules_dir(MATCHING_RULE);
+    let src = src_dir(&[
+        (".env", "SECRET=needle\n"),
+        (".github/workflows/ci.yml", "run: needle\n"),
+        (".git/config", "needle\n"),
+        ("src/a.rs", "let x = 1;\n"),
+    ]);
+
+    let output = run(rules.path(), src.path(), &["--no-default-rules"]);
+
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    assert_eq!(
+        report_lines(&stdout(&output)),
+        vec![
+            ".env:1:8 error test.needle needle found",
+            ".github/workflows/ci.yml:1:6 error test.needle needle found",
+        ]
+    );
+}
+
+/// The state directory the first run creates - `.siloscan/cache` and the
+/// `.gitignore` beside it - is scan input to nobody, so a warm run reports
+/// exactly what the cold one did. Hidden files are in the tree because they are
+/// what made the state directory visible to the walker in the first place.
+#[test]
+fn a_warm_run_over_a_hidden_tree_is_byte_identical_to_the_cold_one() {
+    let rules = rules_dir(MATCHING_RULE);
+    let src = src_dir(&[(".env", "SECRET=needle\n"), ("src/a.rs", "let x = 1;\n")]);
+
+    let cold = run(
+        rules.path(),
+        src.path(),
+        &["--no-default-rules", "--format", "json"],
+    );
+    assert!(src.path().join(".siloscan/cache").is_dir());
+
+    let warm = run(
+        rules.path(),
+        src.path(),
+        &["--no-default-rules", "--format", "json"],
+    );
+
+    assert_eq!(cold.status.code(), Some(1), "{}", stderr(&cold));
+    assert_eq!(warm.status.code(), cold.status.code());
+    assert_eq!(stdout(&warm), stdout(&cold));
+
+    let report: Value = siloscan_core::serde_json::from_str(&stdout(&warm)).expect("json report");
+    let files = report["metrics"]["files"]
+        .as_object()
+        .expect("metrics files");
+    let mut keys: Vec<&str> = files.keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    assert_eq!(keys, vec![".env", "src/a.rs"]);
 }

@@ -15,6 +15,21 @@ jobs:
     name: Create release
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v7
+      - name: Verify the tag matches the workspace version
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          version="$(sed -n '/^\[workspace\.package\]/,/^\[/ s/^version = "\(.*\)"$/\1/p' Cargo.toml)"
+          if [ -z "$version" ]; then
+            echo "could not read version from [workspace.package] in Cargo.toml" >&2
+            exit 1
+          fi
+          if [ "v$version" != "$REF_NAME" ]; then
+            echo "tag $REF_NAME does not match workspace version $version (expected tag v$version)" >&2
+            exit 1
+          fi
+          echo "tag $REF_NAME matches workspace version $version"
       - name: Create release for tag if it does not exist
         env:
           GH_TOKEN: ${{ github.token }}
@@ -55,8 +70,24 @@ jobs:
           REF_NAME: ${{ github.ref_name }}
           TARGET: ${{ matrix.target }}
         run: |
+          cp LICENSE NOTICE README.md "target/$TARGET/release/"
           cd "target/$TARGET/release"
-          tar czf "siloscan-$REF_NAME-$TARGET.tar.gz" siloscan ss siloscan-tui
+          tar czf "siloscan-$REF_NAME-$TARGET.tar.gz" \
+            siloscan ss siloscan-tui LICENSE NOTICE README.md
+      - name: Checksums (unix)
+        if: runner.os != 'Windows'
+        env:
+          REF_NAME: ${{ github.ref_name }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          cd "target/$TARGET/release"
+          archive="siloscan-$REF_NAME-$TARGET.tar.gz"
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "$archive" > "SHA256SUMS-$TARGET.txt"
+          else
+            shasum -a 256 "$archive" > "SHA256SUMS-$TARGET.txt"
+          fi
+          cat "SHA256SUMS-$TARGET.txt"
       - name: Package (windows)
         if: runner.os == 'Windows'
         shell: pwsh
@@ -64,14 +95,28 @@ jobs:
           REF_NAME: ${{ github.ref_name }}
           TARGET: ${{ matrix.target }}
         run: |
+          Copy-Item LICENSE, NOTICE, README.md -Destination "target/$env:TARGET/release/"
           cd "target/$env:TARGET/release"
-          Compress-Archive -Path siloscan.exe, ss.exe, siloscan-tui.exe -DestinationPath "siloscan-$env:REF_NAME-$env:TARGET.zip"
+          Compress-Archive -Path siloscan.exe, ss.exe, siloscan-tui.exe, LICENSE, NOTICE, README.md -DestinationPath "siloscan-$env:REF_NAME-$env:TARGET.zip"
+      - name: Checksums (windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          REF_NAME: ${{ github.ref_name }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          cd "target/$env:TARGET/release"
+          $archive = "siloscan-$env:REF_NAME-$env:TARGET.zip"
+          $digest = (Get-FileHash -Algorithm SHA256 -Path $archive).Hash.ToLower()
+          "$digest  $archive" | Out-File -FilePath "SHA256SUMS-$env:TARGET.txt" -Encoding ascii
+          Get-Content "SHA256SUMS-$env:TARGET.txt"
       - name: Upload to release
         uses: softprops/action-gh-release@v3
         with:
           files: |
             target/${{ matrix.target }}/release/siloscan-*.tar.gz
             target/${{ matrix.target }}/release/siloscan-*.zip
+            target/${{ matrix.target }}/release/SHA256SUMS-*.txt
 
   publish:
     name: Publish to crates.io

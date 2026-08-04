@@ -230,7 +230,7 @@ fn run_scan(args: ScanArgs) {
         }
         Format::Json => emit(
             &mut out,
-            format_args!("{}", output::to_json(&report, anchoring.anchor())),
+            format_args!("{}", output::to_json(&report, &rules, anchoring.anchor())),
         ),
         Format::Sarif => emit(
             &mut out,
@@ -308,7 +308,10 @@ fn run_baseline(args: BaselineArgs) {
 fn run_test(args: TestArgs) {
     let rules = load_rules(&args.fixture_dir, &args.rules, args.no_default_rules);
 
-    let report = harness::run(&args.fixture_dir, &rules);
+    let report = match harness::run(&args.fixture_dir, &rules) {
+        Ok(report) => report,
+        Err(e) => fail(&format!("error: {e}")),
+    };
 
     let mut out = io::stdout().lock();
     for line in &report.missing {
@@ -333,9 +336,9 @@ fn run_test(args: TestArgs) {
     }
 }
 
-/// The cache lives under the scan root, so it is only available when the root
-/// is a directory. `siloscan test` never caches: a fixture run must exercise
-/// the engines.
+/// The cache lives under the scan root's state directory, which for a
+/// single-file scan is the directory holding the file. `siloscan test` never
+/// caches: a fixture run must exercise the engines.
 ///
 /// The anchoring is part of the cache key. A cached finding carries a path and a
 /// fingerprint derived from that path, so an entry written under one convention
@@ -351,11 +354,31 @@ fn open_cache(
     no_cache: bool,
     anchoring: &scan::Anchoring,
 ) -> Option<Cache> {
-    if no_cache || !root.is_dir() {
+    if no_cache {
         return None;
     }
     let scope = PathScope::new(anchoring.anchor(), anchoring.prefix());
-    Some(Cache::open(root, rules, &scope))
+    Some(Cache::open(&state_root(root), rules, &scope))
+}
+
+/// The directory a scan root keeps its `.siloscan` state in: the root itself
+/// when it is a directory, and the directory holding it when the root is a
+/// single file.
+///
+/// Joining `.siloscan` onto a file names a directory below a file, which every
+/// read and every write there fails on - the failure that made `siloscan
+/// app.js` exit 2 before it had scanned anything. A single-file scan reports
+/// that file by the name it has inside its own directory, so that directory is
+/// also where its baseline and its cache entries belong: the file scan and a
+/// scan of the directory around it then read the same state.
+fn state_root(root: &Path) -> PathBuf {
+    if root.is_dir() {
+        return root.to_path_buf();
+    }
+    match root.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
+        _ => PathBuf::from("."),
+    }
 }
 
 /// The repository config and the extra rule directories it declares, resolved
@@ -462,7 +485,8 @@ fn same_file(a: &Path, b: &Path) -> bool {
 }
 
 /// The directory the default `.siloscan/baseline.json` is read from and written
-/// to: the scan root, and under `anchor = "config"` the config root.
+/// to: the scan root's state directory, and under `anchor = "config"` the
+/// config root.
 ///
 /// Anchoring makes a module scan and a whole-repository scan fingerprint a
 /// finding identically; a baseline they cannot both find buys nothing from that.
@@ -476,7 +500,7 @@ fn baseline_root(root: &Path, config: Option<&Config>) -> PathBuf {
         {
             config.config_root().to_path_buf()
         }
-        _ => root.to_path_buf(),
+        _ => state_root(root),
     }
 }
 
@@ -775,6 +799,49 @@ rules:
         assert_eq!(baseline_root(&module, None), module);
         let plain = Config::default();
         assert_eq!(baseline_root(&module, Some(&plain)), module);
+    }
+
+    #[test]
+    fn a_file_scan_root_keeps_its_state_beside_the_file() {
+        let dir = tempdir();
+        write(dir.path(), "app.js", "const a = 1;\n");
+        let file = dir.path().join("app.js");
+
+        // Never below the file itself: `app.js/.siloscan/baseline.json` is not
+        // a path any file system will open.
+        assert_eq!(state_root(&file), dir.path());
+        assert_eq!(baseline_root(&file, None), dir.path());
+        assert_eq!(state_root(dir.path()), dir.path());
+
+        // A bare filename has no parent directory to name, so it is the
+        // current one rather than the empty path.
+        assert_eq!(state_root(Path::new("app.js")), PathBuf::from("."));
+    }
+
+    #[test]
+    fn a_file_scan_root_still_opens_a_cache() {
+        let dir = tempdir();
+        write(dir.path(), "app.js", "const a = 1;\n");
+        let anchoring = scan::Anchoring::default();
+
+        let cache = open_cache(
+            &dir.path().join("app.js"),
+            &RuleSet::default(),
+            false,
+            &anchoring,
+        )
+        .expect("a file root caches beside the file");
+        assert_eq!(cache.root(), dir.path().join(".siloscan/cache"));
+
+        assert!(
+            open_cache(
+                &dir.path().join("app.js"),
+                &RuleSet::default(),
+                true,
+                &anchoring
+            )
+            .is_none()
+        );
     }
 
     #[test]

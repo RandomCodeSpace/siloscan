@@ -21,10 +21,13 @@ pub struct HarnessReport {
 
 type Key = (String, u64, String);
 
-pub fn run(fixture_root: &Path, rules: &RuleSet) -> HarnessReport {
+/// Fails when the scan does: a rule set that cannot run is a rule set whose
+/// expectations mean nothing, so it is reported rather than counted as a tree
+/// full of missing findings.
+pub fn run(fixture_root: &Path, rules: &RuleSet) -> Result<HarnessReport, String> {
     let (expected, markers) = collect_expectations(fixture_root);
 
-    let report = crate::scan::scan(fixture_root, rules, None);
+    let report = crate::scan::scan(fixture_root, rules, None)?;
     let actual: BTreeSet<Key> = report
         .findings
         .into_iter()
@@ -33,11 +36,11 @@ pub fn run(fixture_root: &Path, rules: &RuleSet) -> HarnessReport {
         .map(|f| (f.path, f.line, f.rule_id))
         .collect();
 
-    HarnessReport {
+    Ok(HarnessReport {
         missing: expected.difference(&actual).map(render).collect(),
         unexpected: actual.difference(&expected).map(render).collect(),
         matched: expected.intersection(&actual).count(),
-    }
+    })
 }
 
 fn collect_expectations(fixture_root: &Path) -> (BTreeSet<Key>, BTreeSet<(String, u64)>) {
@@ -161,7 +164,7 @@ rules:
              // siloscan-expect: fixture.alpha, fixture.beta\nlet y = ALPHA + BETA;\n",
         );
 
-        let report = run(dir.path(), &ruleset(RULES));
+        let report = run(dir.path(), &ruleset(RULES)).expect("fixture rules run");
 
         assert!(report.missing.is_empty());
         assert!(report.unexpected.is_empty());
@@ -177,7 +180,7 @@ rules:
             "// siloscan-expect: fixture.alpha, fixture.beta\nlet x = ALPHA;\n",
         );
 
-        let report = run(dir.path(), &ruleset(RULES));
+        let report = run(dir.path(), &ruleset(RULES)).expect("fixture rules run");
 
         assert_eq!(report.missing, vec!["a.rs:2 fixture.beta"]);
         assert!(report.unexpected.is_empty());
@@ -189,7 +192,7 @@ rules:
         let dir = tempfile::tempdir().unwrap();
         write(dir.path(), "a.rs", "let x = BETA;\n");
 
-        let report = run(dir.path(), &ruleset(RULES));
+        let report = run(dir.path(), &ruleset(RULES)).expect("fixture rules run");
 
         assert!(report.missing.is_empty());
         assert_eq!(report.unexpected, vec!["a.rs:1 fixture.beta"]);
@@ -205,7 +208,7 @@ rules:
             "// siloscan-expect: fixture.alpha\nlet x = ALPHA;\n",
         );
 
-        let report = run(dir.path(), &ruleset(MARKER_RULES));
+        let report = run(dir.path(), &ruleset(MARKER_RULES)).expect("fixture rules run");
 
         assert!(report.missing.is_empty());
         assert!(report.unexpected.is_empty());
@@ -219,7 +222,7 @@ rules:
         write(dir.path(), "a.rs", "BETA ALPHA\n");
         write(dir.path(), "src/m.rs", "ALPHA\n");
 
-        let report = run(dir.path(), &ruleset(RULES));
+        let report = run(dir.path(), &ruleset(RULES)).expect("fixture rules run");
 
         assert!(report.missing.is_empty());
         assert_eq!(
