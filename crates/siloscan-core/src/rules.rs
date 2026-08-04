@@ -226,6 +226,79 @@ pub struct CompiledRule {
     pub payload: CompiledPayload,
 }
 
+/// A secret rule's pattern: source text plus the regex it compiles to, built on
+/// first use.
+///
+/// The built-in pack carries ~200 gitleaks-derived patterns. Compiling them all
+/// costs seconds of wall time and hundreds of megabytes of resident memory
+/// before a single file is read, and the keyword prefilter means most of them
+/// never run against a given repository. So the pattern is validated at load
+/// with `regex_syntax` - the same parser the `regex` crate uses - and the regex
+/// itself is built the first time a rule actually has to match.
+///
+/// Trade-off: syntax errors and out-of-range capture groups still fail the load
+/// with the same errors and the same messages as an eager compile. The one
+/// class that moves is `CompiledTooBig`: a syntactically valid pattern whose
+/// compiled program exceeds the regex size limit is now discovered at first
+/// use, where there is no error channel, so the rule is skipped for the rest of
+/// the run instead of failing the load. Only the compile step is deferred;
+/// nothing about the pattern's meaning changes.
+pub struct LazyRegex {
+    pattern: String,
+    /// `None` records a failed compile so it is attempted once, not per file.
+    compiled: OnceLock<Option<Regex>>,
+}
+
+impl LazyRegex {
+    /// Wraps a pattern whose syntax has already been validated. Callers that
+    /// skip validation only move the failure to first use, where it is silent.
+    pub fn new(pattern: String) -> Self {
+        LazyRegex {
+            pattern,
+            compiled: OnceLock::new(),
+        }
+    }
+
+    pub fn pattern(&self) -> &str {
+        &self.pattern
+    }
+
+    /// The compiled regex, building it on first call. `None` means the pattern
+    /// parses but cannot be compiled within the regex size limit.
+    pub fn get(&self) -> Option<&Regex> {
+        self.compiled
+            .get_or_init(|| Regex::new(&self.pattern).ok())
+            .as_ref()
+    }
+
+    /// Whether the regex has been built yet. Load must leave this `false`.
+    pub fn is_compiled(&self) -> bool {
+        self.compiled.get().is_some()
+    }
+}
+
+impl Clone for LazyRegex {
+    fn clone(&self) -> Self {
+        let compiled = OnceLock::new();
+        if let Some(regex) = self.compiled.get() {
+            let _ = compiled.set(regex.clone());
+        }
+        LazyRegex {
+            pattern: self.pattern.clone(),
+            compiled,
+        }
+    }
+}
+
+impl fmt::Debug for LazyRegex {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("LazyRegex")
+            .field("pattern", &self.pattern)
+            .field("compiled", &self.is_compiled())
+            .finish()
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum CompiledPayload {
     Regex {
@@ -233,12 +306,12 @@ pub enum CompiledPayload {
         group: Option<usize>,
     },
     Secret {
-        regex: Regex,
+        pattern: LazyRegex,
         group: Option<usize>,
         entropy: Option<f64>,
         /// Lowercased at compile time; callers compare against lowercased input.
         keywords: Vec<String>,
-        allow_patterns: Vec<Regex>,
+        allow_patterns: Vec<LazyRegex>,
         allow_paths: Option<GlobSet>,
         /// Lowercased at compile time.
         stopwords: Vec<String>,
@@ -342,11 +415,17 @@ pub fn load_str(src: &str, origin: &str) -> Result<Vec<CompiledRule>, LoadError>
         });
     }
 
-    let mut compiled = Vec::with_capacity(file.rules.len());
+    let workers = compile_workers(file.rules.len());
+    let results = compile_rules(file.rules, origin, workers);
+
+    let mut compiled = Vec::with_capacity(results.len());
     let mut seen: HashMap<String, ()> = HashMap::new();
 
-    for raw in file.rules {
-        let rule = compile_rule(raw, origin)?;
+    // Results are consumed in rule order, and a rule's own error is raised
+    // before its id is checked, so the first error reported is the one a
+    // sequential compile would have reported.
+    for result in results {
+        let rule = result?;
         if seen.insert(rule.id.clone(), ()).is_some() {
             return Err(LoadError::DuplicateId {
                 origin: origin.to_string(),
@@ -357,6 +436,64 @@ pub fn load_str(src: &str, origin: &str) -> Result<Vec<CompiledRule>, LoadError>
     }
 
     Ok(compiled)
+}
+
+/// Rules per worker below which spawning threads costs more than it saves.
+const RULES_PER_COMPILE_WORKER: usize = 16;
+
+/// Compile every rule of one document across `workers` threads. The returned
+/// results are in rule order whatever the worker count is; deciding what to do
+/// with them is the caller's job.
+fn compile_rules(
+    raws: Vec<RawRule>,
+    origin: &str,
+    workers: usize,
+) -> Vec<Result<CompiledRule, LoadError>> {
+    if workers < 2 {
+        return raws
+            .into_iter()
+            .map(|raw| compile_rule(raw, origin))
+            .collect();
+    }
+
+    // Each worker owns a disjoint slice and takes the rules out of it, so the
+    // rules move exactly once and stay in order.
+    let mut slots: Vec<Option<RawRule>> = raws.into_iter().map(Some).collect();
+    let per_worker = slots.len().div_ceil(workers);
+    let mut parts: Vec<Vec<Result<CompiledRule, LoadError>>> = Vec::with_capacity(workers);
+
+    std::thread::scope(|scope| {
+        let mut handles = Vec::with_capacity(workers);
+        for chunk in slots.chunks_mut(per_worker) {
+            handles.push(scope.spawn(move || {
+                chunk
+                    .iter_mut()
+                    .map(|slot| {
+                        let raw = slot.take().expect("every slot is taken exactly once");
+                        compile_rule(raw, origin)
+                    })
+                    .collect::<Vec<_>>()
+            }));
+        }
+        for handle in handles {
+            match handle.join() {
+                Ok(part) => parts.push(part),
+                Err(payload) => std::panic::resume_unwind(payload),
+            }
+        }
+    });
+
+    parts.into_iter().flatten().collect()
+}
+
+fn compile_workers(rules: usize) -> usize {
+    if rules < RULES_PER_COMPILE_WORKER * 2 {
+        return 1;
+    }
+    let available = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1);
+    available.min(rules.div_ceil(RULES_PER_COMPILE_WORKER))
 }
 
 fn compile_rule(raw: RawRule, origin: &str) -> Result<CompiledRule, LoadError> {
@@ -473,8 +610,7 @@ fn compile_regex(id: &str, spec: RawRegex, origin: &str) -> Result<CompiledPaylo
 }
 
 fn compile_secret(id: &str, spec: RawSecret, origin: &str) -> Result<CompiledPayload, LoadError> {
-    let regex = compile_pattern(id, &spec.pattern, origin)?;
-    check_group(id, &regex, spec.group, origin)?;
+    let pattern = lazy_pattern(id, spec.pattern, spec.group, origin, "")?;
 
     if let Some(entropy) = spec.entropy
         && (!entropy.is_finite() || entropy < 0.0)
@@ -489,16 +625,13 @@ fn compile_secret(id: &str, spec: RawSecret, origin: &str) -> Result<CompiledPay
 
     let mut allow_patterns = Vec::new();
     for pattern in allowlist.patterns.unwrap_or_default() {
-        allow_patterns.push(Regex::new(&pattern).map_err(|e| LoadError::BadPattern {
-            origin: origin.to_string(),
-            detail: format!("{id}: allowlist: {e}"),
-        })?);
+        allow_patterns.push(lazy_pattern(id, pattern, None, origin, "allowlist: ")?);
     }
 
     let allow_paths = compile_globs(allowlist.paths, origin)?;
 
     Ok(CompiledPayload::Secret {
-        regex,
+        pattern,
         group: spec.group,
         entropy: spec.entropy,
         keywords: lowercased(spec.keywords),
@@ -594,21 +727,55 @@ fn compile_pattern(id: &str, pattern: &str, origin: &str) -> Result<Regex, LoadE
     })
 }
 
+/// Validate a pattern without compiling it, and hand back the deferred regex.
+///
+/// `regex_syntax::Parser` is the parser `Regex::new` runs first, with the same
+/// default configuration, so every error it reports - and the message it
+/// reports it with - is the one an eager compile would have produced. The HIR
+/// also carries the exact capture count, so the group check is unchanged.
+/// `context` prefixes the error detail, e.g. `"allowlist: "`.
+fn lazy_pattern(
+    id: &str,
+    pattern: String,
+    group: Option<usize>,
+    origin: &str,
+    context: &str,
+) -> Result<LazyRegex, LoadError> {
+    let hir = regex_syntax::Parser::new()
+        .parse(&pattern)
+        .map_err(|e| LoadError::BadPattern {
+            origin: origin.to_string(),
+            detail: format!("{id}: {context}{e}"),
+        })?;
+
+    // `captures_len` counts the implicit whole-match group; the HIR does not.
+    let captures_len = hir.properties().explicit_captures_len() + 1;
+    check_group_count(id, captures_len, group, origin)?;
+
+    Ok(LazyRegex::new(pattern))
+}
+
 fn check_group(
     id: &str,
     regex: &Regex,
     group: Option<usize>,
     origin: &str,
 ) -> Result<(), LoadError> {
+    check_group_count(id, regex.captures_len(), group, origin)
+}
+
+fn check_group_count(
+    id: &str,
+    captures_len: usize,
+    group: Option<usize>,
+    origin: &str,
+) -> Result<(), LoadError> {
     if let Some(group) = group
-        && group >= regex.captures_len()
+        && group >= captures_len
     {
         return Err(LoadError::BadGroup {
             origin: origin.to_string(),
-            detail: format!(
-                "{id}: group {group} out of range (pattern has {} groups)",
-                regex.captures_len()
-            ),
+            detail: format!("{id}: group {group} out of range (pattern has {captures_len} groups)"),
         });
     }
     Ok(())
@@ -713,7 +880,7 @@ rules:
         assert_eq!(rules.len(), 1);
         match &rules[0].payload {
             CompiledPayload::Secret {
-                regex,
+                pattern,
                 group,
                 entropy,
                 keywords,
@@ -721,12 +888,17 @@ rules:
                 allow_paths,
                 stopwords,
             } => {
-                assert!(regex.is_match("AKIAIOSFODNN7EXAMPLE"));
+                assert!(pattern.get().unwrap().is_match("AKIAIOSFODNN7EXAMPLE"));
                 assert_eq!(*group, Some(1));
                 assert_eq!(*entropy, Some(3.5));
                 assert_eq!(keywords, &["akia".to_string(), "aws".to_string()]);
                 assert_eq!(allow_patterns.len(), 1);
-                assert!(allow_patterns[0].is_match("AKIAIOSFODNN7EXAMPLE"));
+                assert!(
+                    allow_patterns[0]
+                        .get()
+                        .unwrap()
+                        .is_match("AKIAIOSFODNN7EXAMPLE")
+                );
                 assert!(allow_paths.as_ref().unwrap().is_match("src/testdata/a.tf"));
                 assert_eq!(stopwords, &["sample".to_string(), "fake".to_string()]);
             }
@@ -763,6 +935,71 @@ rules:
                 assert!(stopwords.is_empty());
             }
             other => panic!("expected a secret payload, got {other:?}"),
+        }
+    }
+
+    /// A pattern that is valid but expensive to compile: the point of deferring
+    /// the compile is that a rule like this costs nothing until it runs.
+    const HEAVY: &str = r"needle-[A-Za-z0-9]{200,400}(?:-[A-Za-z0-9]{50,100}){0,8}";
+
+    fn secret_payload(rule: &CompiledRule) -> (&LazyRegex, &Vec<LazyRegex>) {
+        match &rule.payload {
+            CompiledPayload::Secret {
+                pattern,
+                allow_patterns,
+                ..
+            } => (pattern, allow_patterns),
+            other => panic!("expected a secret payload, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn secret_patterns_are_not_compiled_at_load() {
+        let src = format!(
+            "version: 1\nrules:\n  - id: a.b\n    severity: info\n    message: m\n    secret:\n      pattern: '{HEAVY}'\n      keywords: ['needle-']\n      allowlist:\n        patterns: ['-DEMO$']\n"
+        );
+        let rules = load_str(&src, "test").expect("should load");
+        let (pattern, allow) = secret_payload(&rules[0]);
+        assert!(!pattern.is_compiled(), "load must not compile the pattern");
+        assert_eq!(pattern.pattern(), HEAVY);
+        assert!(!allow[0].is_compiled(), "load must not compile allowlist");
+
+        // A file the keyword prefilter rejects still must not compile it.
+        assert!(crate::engines::secret::scan_file(&rules, "f.txt", None, "haystack\n").is_empty());
+        let (pattern, _) = secret_payload(&rules[0]);
+        assert!(!pattern.is_compiled(), "a filtered rule must not compile");
+
+        // Only a rule that actually has to match pays for its pattern.
+        let hit = format!("needle-{}\n", "Aa1Bb2Cc3D".repeat(25));
+        let found = crate::engines::secret::scan_file(&rules, "f.txt", None, &hit);
+        assert_eq!(found.len(), 1);
+        let (pattern, allow) = secret_payload(&rules[0]);
+        assert!(pattern.is_compiled());
+        assert!(allow[0].is_compiled(), "a match consults the allowlist");
+    }
+
+    #[test]
+    fn lazy_regex_clone_keeps_the_compiled_state() {
+        let lazy = LazyRegex::new("a+".to_string());
+        assert!(!lazy.clone().is_compiled());
+        assert!(lazy.get().unwrap().is_match("aaa"));
+        let clone = lazy.clone();
+        assert!(clone.is_compiled());
+        assert!(clone.get().unwrap().is_match("aaa"));
+    }
+
+    #[test]
+    fn secret_bad_pattern_reports_what_an_eager_compile_reports() {
+        for pattern in ["(", "[z-a]", r"\p{Nope}", "a{2,1}", "(?P<1>a)"] {
+            let src = format!(
+                "version: 1\nrules:\n  - id: a.b\n    severity: info\n    message: m\n    secret: {{ pattern: '{pattern}' }}\n"
+            );
+            let err = load_str(&src, "test").unwrap_err();
+            let eager = Regex::new(pattern).unwrap_err().to_string();
+            assert_eq!(
+                err.to_string(),
+                format!("test: invalid regex pattern: a.b: {eager}")
+            );
         }
     }
 
@@ -1317,6 +1554,76 @@ rules:
         assert!(matches!(
             load_str(src, "test"),
             Err(LoadError::BadGroup { .. })
+        ));
+    }
+
+    /// `count` regex rules, with a bad pattern at each index in `bad`.
+    fn rule_doc(count: usize, bad: &[usize]) -> String {
+        let mut src = String::from("version: 1\nrules:\n");
+        for i in 0..count {
+            let pattern = if bad.contains(&i) { "(" } else { "x" };
+            let _ = write!(
+                src,
+                "  - id: r.{i}\n    severity: info\n    message: m\n    regex: {{ pattern: '{pattern}' }}\n"
+            );
+        }
+        src
+    }
+
+    fn compile_doc(src: &str, workers: usize) -> Vec<Result<CompiledRule, LoadError>> {
+        let file: RuleFile = serde_norway::from_str(src).expect("doc parses");
+        compile_rules(file.rules, "test", workers)
+    }
+
+    fn first_error(results: &[Result<CompiledRule, LoadError>]) -> Option<String> {
+        results
+            .iter()
+            .find_map(|r| r.as_ref().err())
+            .map(|e| e.to_string())
+    }
+
+    #[test]
+    fn parallel_compile_reports_the_same_first_error_as_sequential() {
+        // Two bad rules, and the earlier one has to win no matter which worker
+        // reached it first.
+        let src = rule_doc(64, &[9, 40]);
+        let sequential = compile_doc(&src, 1);
+        let parallel = compile_doc(&src, 8);
+
+        let expected = "test: invalid regex pattern: r.9: regex parse error";
+        let seq_err = first_error(&sequential).expect("sequential fails");
+        assert!(seq_err.starts_with(expected), "got {seq_err}");
+        assert_eq!(first_error(&parallel), Some(seq_err));
+
+        // And the same holds through the public entry point.
+        let err = load_str(&src, "test").unwrap_err().to_string();
+        assert!(err.starts_with(expected), "got {err}");
+    }
+
+    #[test]
+    fn parallel_compile_keeps_rule_order() {
+        let src = rule_doc(70, &[]);
+        for workers in [1, 3, 8, 70] {
+            let ids: Vec<String> = compile_doc(&src, workers)
+                .into_iter()
+                .map(|r| r.expect("all rules are valid").id)
+                .collect();
+            let expected: Vec<String> = (0..70).map(|i| format!("r.{i}")).collect();
+            assert_eq!(ids, expected, "worker count {workers}");
+        }
+    }
+
+    #[test]
+    fn a_rule_error_beats_a_later_duplicate_id() {
+        // Sequential compile raised the bad pattern at index 9 before it ever
+        // reached the duplicate at index 63; the parallel path must too.
+        let mut src = rule_doc(64, &[9]);
+        src.push_str(
+            "  - id: r.0\n    severity: info\n    message: m\n    regex: { pattern: 'x' }\n",
+        );
+        assert!(matches!(
+            load_str(&src, "test"),
+            Err(LoadError::BadPattern { .. })
         ));
     }
 

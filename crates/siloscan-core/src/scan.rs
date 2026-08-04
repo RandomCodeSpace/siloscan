@@ -1,12 +1,19 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc;
 
 use globset::GlobSet;
 use serde::Serialize;
 
 use crate::findings::Finding;
+use crate::graph::FileFacts;
 use crate::rules::{CompiledPayload, RuleSet};
 use crate::walk::{self, FileKind};
+
+/// Upper bound on scan workers. Past this the per-file work is dominated by the
+/// file system, and every extra thread only costs memory for its parsers.
+const MAX_WORKERS: usize = 32;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct SkippedFile {
@@ -161,6 +168,29 @@ fn run(
     silo_sets: Option<Vec<(String, GlobSet)>>,
     on_progress: &mut dyn FnMut(Progress),
 ) -> ScanReport {
+    run_with_workers(root, rules, options, silo_sets, on_progress, workers())
+}
+
+/// Workers for the per-file phase: one per available core, bounded. Falls back
+/// to a single worker when the platform will not report a count.
+fn workers() -> usize {
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+        .clamp(1, MAX_WORKERS)
+}
+
+/// The scan proper, with the worker count pinned. Only the per-file phase is
+/// parallel: every file's result is tagged with its position in the walk and
+/// merged back in that order, so the report does not depend on `workers`.
+fn run_with_workers(
+    root: &Path,
+    rules: &RuleSet,
+    options: &ScanOptions,
+    silo_sets: Option<Vec<(String, GlobSet)>>,
+    on_progress: &mut dyn FnMut(Progress),
+    workers: usize,
+) -> ScanReport {
     let mut findings: Vec<Finding> = Vec::new();
     let mut suppressed: Vec<Finding> = Vec::new();
     let mut skipped: Vec<SkippedFile> = Vec::new();
@@ -170,42 +200,40 @@ fn run(
 
     let files = walk::collect_files(root);
     let files_total = files.len();
-    let mut raw_findings = 0usize;
     on_progress(Progress {
         files_total,
         files_done: 0,
         findings: 0,
     });
 
-    for (index, path) in files.into_iter().enumerate() {
-        let path_rel = relative(root, &path);
-        match walk::read_text(&path) {
+    for result in scan_files(root, rules, options, &files, on_progress, workers) {
+        let FileResult {
+            path_rel,
+            path,
+            outcome,
+            ..
+        } = result;
+        match outcome {
             // Binary files are not scannable input, not a failure to report.
-            FileKind::Binary => {}
-            FileKind::Unreadable(reason) => skipped.push(SkippedFile {
+            Outcome::Binary => {}
+            Outcome::Unreadable(reason) => skipped.push(SkippedFile {
                 path: path_rel,
                 reason,
             }),
-            FileKind::Text(content) => {
-                let entry = scan_text(rules, options, &path, &path_rel, &content);
-
-                if let Some(facts) = entry.facts {
+            Outcome::Text {
+                facts,
+                kept,
+                ignored,
+            } => {
+                if let Some(facts) = facts {
                     graph.files.insert(path_rel.clone(), facts);
                 }
-                scanned.insert(path_rel, path.clone());
+                scanned.insert(path_rel, path);
 
-                raw_findings += entry.findings.len();
-                let (kept, ignored) = crate::suppress::partition(&content, entry.findings);
                 findings.extend(kept);
                 suppressed.extend(ignored);
             }
         }
-
-        on_progress(Progress {
-            files_total,
-            files_done: index + 1,
-            findings: raw_findings,
-        });
     }
 
     // The boundary and coverage engines need the whole tree, so they run once
@@ -262,6 +290,133 @@ fn run(
         graph,
         boundary_edges,
     }
+}
+
+/// What one file contributed to the report, before any of it is merged.
+struct FileResult {
+    /// Position in the walk, which is the order the sequential scan merged in.
+    index: usize,
+    path_rel: String,
+    path: PathBuf,
+    outcome: Outcome,
+}
+
+enum Outcome {
+    Binary,
+    Unreadable(String),
+    Text {
+        facts: Option<FileFacts>,
+        kept: Vec<Finding>,
+        ignored: Vec<Finding>,
+    },
+}
+
+/// Run the per-file phase across `workers` scoped threads and return every
+/// result in walk order.
+///
+/// Files are claimed one at a time from a shared cursor, so a slow file does not
+/// strand a whole chunk, and each result carries its walk index so the merge is
+/// independent of the order they finished in. `on_progress` stays on the calling
+/// thread — the callback is `FnMut` and not required to be `Send` — and is
+/// driven by one message per completed file, which keeps `files_done` rising by
+/// exactly one per event and the event count at `files_total + 1`.
+fn scan_files(
+    root: &Path,
+    rules: &RuleSet,
+    options: &ScanOptions,
+    files: &[PathBuf],
+    on_progress: &mut dyn FnMut(Progress),
+    workers: usize,
+) -> Vec<FileResult> {
+    let files_total = files.len();
+    let cursor = AtomicUsize::new(0);
+    let (sender, receiver) = mpsc::channel::<usize>();
+
+    let mut results: Vec<FileResult> = std::thread::scope(|scope| {
+        let mut handles = Vec::with_capacity(workers);
+        for _ in 0..workers.max(1) {
+            let sender = sender.clone();
+            let cursor = &cursor;
+            handles.push(scope.spawn(move || {
+                let mut produced: Vec<FileResult> = Vec::new();
+                loop {
+                    let index = cursor.fetch_add(1, Ordering::Relaxed);
+                    let Some(path) = files.get(index) else {
+                        break;
+                    };
+                    let (result, raw) = scan_one(root, rules, options, index, path);
+                    produced.push(result);
+                    // The receiver outlives every worker, so this cannot fail.
+                    let _ = sender.send(raw);
+                }
+                produced
+            }));
+        }
+        // Every remaining sender is worker-owned, so the loop below ends when
+        // the last worker does.
+        drop(sender);
+
+        let mut raw_findings = 0usize;
+        for (done, raw) in receiver.into_iter().enumerate() {
+            raw_findings += raw;
+            on_progress(Progress {
+                files_total,
+                files_done: done + 1,
+                findings: raw_findings,
+            });
+        }
+
+        let mut results = Vec::with_capacity(files_total);
+        for handle in handles {
+            match handle.join() {
+                Ok(produced) => results.extend(produced),
+                Err(panic) => std::panic::resume_unwind(panic),
+            }
+        }
+        results
+    });
+
+    results.sort_by_key(|result| result.index);
+    results
+}
+
+/// Everything one file contributes, plus its raw match count for progress.
+/// Raw means as the engines produced it, before inline suppression.
+fn scan_one(
+    root: &Path,
+    rules: &RuleSet,
+    options: &ScanOptions,
+    index: usize,
+    path: &Path,
+) -> (FileResult, usize) {
+    let path_rel = relative(root, path);
+    let (outcome, raw) = match walk::read_text(path) {
+        FileKind::Binary => (Outcome::Binary, 0),
+        FileKind::Unreadable(reason) => (Outcome::Unreadable(reason), 0),
+        FileKind::Text(content) => {
+            let entry = scan_text(rules, options, path, &path_rel, &content);
+            let raw = entry.findings.len();
+            let (kept, ignored) = crate::suppress::partition(&content, entry.findings);
+            (
+                Outcome::Text {
+                    facts: entry.facts,
+                    kept,
+                    ignored,
+                },
+                raw,
+            )
+        }
+    };
+
+    (
+        FileResult {
+            index,
+            path_rel,
+            path: path.to_path_buf(),
+            outcome,
+        },
+        raw,
+    )
 }
 
 /// Contents of every `go.mod` in the scanned tree, keyed by repo-relative path.
@@ -700,6 +855,60 @@ rules:
             serde_json::to_string(&plain).unwrap(),
             serde_json::to_string(&tracked).unwrap()
         );
+    }
+
+    /// A tree big enough that a worker pool actually splits it, mixing every
+    /// per-file outcome: matches, no matches, inline markers, binary files.
+    fn synthetic_tree(root: &Path, files: usize) {
+        for i in 0..files {
+            let rel = format!("src/mod{:02}/f{i:03}.rs", i % 7);
+            match i % 4 {
+                0 => write(root, &rel, b"needle\nfiller\nneedle needle\n"),
+                1 => write(root, &rel, b"nothing to see\n"),
+                2 => write(
+                    root,
+                    &rel,
+                    b"// siloscan-ignore: test.needle\nlet a = needle;\nneedle\n",
+                ),
+                _ => write(root, &rel, b"needle\0binary needle\n"),
+            }
+        }
+    }
+
+    #[test]
+    fn worker_count_does_not_change_the_report() {
+        let dir = tempdir();
+        synthetic_tree(dir.path(), 200);
+
+        let rules = ruleset();
+        let options = ScanOptions::default();
+        let report = |workers| {
+            let mut events: Vec<Progress> = Vec::new();
+            let report = run_with_workers(
+                dir.path(),
+                &rules,
+                &options,
+                None,
+                &mut |p| events.push(p),
+                workers,
+            );
+            (serde_json::to_string(&report).unwrap(), events)
+        };
+
+        let (single, single_events) = report(1);
+        let (parallel, parallel_events) = report(8);
+
+        assert_eq!(single, parallel);
+        // Non-empty, so the comparison above is not vacuous.
+        assert!(single.contains("test.needle"));
+        assert_eq!(single_events.len(), parallel_events.len());
+        assert_eq!(single_events.last(), parallel_events.last());
+        for events in [&single_events, &parallel_events] {
+            for pair in events.windows(2) {
+                assert_eq!(pair[1].files_done, pair[0].files_done + 1);
+                assert!(pair[1].findings >= pair[0].findings);
+            }
+        }
     }
 
     fn cached_scan(root: &Path, rules: &RuleSet, cache: &crate::cache::Cache) -> ScanReport {
