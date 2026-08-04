@@ -1,6 +1,7 @@
 use serde::Serialize;
 use std::collections::BTreeMap;
 
+use crate::metrics::DUPLICATE_BLOCK_RULE_ID;
 use crate::rules::{RuleSet, Severity};
 use crate::scan::ScanReport;
 
@@ -16,6 +17,15 @@ pub struct SarifRoot {
 pub struct SarifRun {
     pub tool: SarifTool,
     pub results: Vec<SarifResult>,
+    pub properties: SarifRunProperties,
+}
+
+/// Run-level property bag. Carries the scan-wide metric totals only:
+/// per-file metrics stay out of SARIF, which is a findings transport.
+#[derive(Debug, Serialize)]
+pub struct SarifRunProperties {
+    #[serde(rename = "siloscan/metrics")]
+    pub metrics: serde_json::Value,
 }
 
 #[derive(Debug, Serialize)]
@@ -35,6 +45,10 @@ pub struct SarifDriver {
 #[derive(Debug, Serialize)]
 pub struct SarifRule {
     pub id: String,
+    /// Optional human-facing rule name. Only the synthesized descriptors carry
+    /// one: a rule pack id is already the name a user reads.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     #[serde(rename = "shortDescription")]
     pub short_description: SarifShortDescription,
     #[serde(rename = "defaultConfiguration")]
@@ -101,27 +115,33 @@ pub fn to_sarif(report: &ScanReport, rules: &RuleSet) -> String {
         rule_ids_in_findings.insert(&finding.rule_id);
     }
 
-    // Build a map of rule_id -> rule for quick lookup
-    let mut rule_map: BTreeMap<&str, &crate::rules::CompiledRule> = BTreeMap::new();
+    // Build a map of rule_id -> descriptor, sorted by id
+    let mut rule_map: BTreeMap<&str, SarifRule> = BTreeMap::new();
     for rule in &rules.rules {
         if rule_ids_in_findings.contains(rule.id.as_str()) {
-            rule_map.insert(&rule.id, rule);
+            rule_map.insert(
+                &rule.id,
+                SarifRule {
+                    id: rule.id.clone(),
+                    name: None,
+                    short_description: SarifShortDescription {
+                        text: rule.message.clone(),
+                    },
+                    default_configuration: SarifDefaultConfiguration {
+                        level: severity_to_level(rule.severity),
+                    },
+                },
+            );
         }
+    }
+    // The metrics channel owns this id and no rule file declares it, so its
+    // descriptor is synthesized here rather than looked up.
+    if rule_ids_in_findings.contains(DUPLICATE_BLOCK_RULE_ID) {
+        rule_map.insert(DUPLICATE_BLOCK_RULE_ID, duplicate_block_rule());
     }
 
     // Create sorted rules list
-    let sarif_rules: Vec<SarifRule> = rule_map
-        .into_values()
-        .map(|rule| SarifRule {
-            id: rule.id.clone(),
-            short_description: SarifShortDescription {
-                text: rule.message.clone(),
-            },
-            default_configuration: SarifDefaultConfiguration {
-                level: severity_to_level(rule.severity),
-            },
-        })
-        .collect();
+    let sarif_rules: Vec<SarifRule> = rule_map.into_values().collect();
 
     // Create results from findings, mapped to SARIF level
     let results: Vec<SarifResult> = report
@@ -169,10 +189,27 @@ pub fn to_sarif(report: &ScanReport, rules: &RuleSet) -> String {
                 },
             },
             results,
+            properties: SarifRunProperties {
+                // Totals only, never the per-file map.
+                metrics: serde_json::to_value(&report.metrics.totals).unwrap(), // serialization cannot fail
+            },
         }],
     };
 
     serde_json::to_string_pretty(&root).unwrap() // serialization cannot fail
+}
+
+/// Descriptor for the reserved duplicate-block id, which every duplicate-block
+/// finding references and which no rule set defines.
+fn duplicate_block_rule() -> SarifRule {
+    SarifRule {
+        id: DUPLICATE_BLOCK_RULE_ID.to_string(),
+        name: Some("DuplicateBlock".to_string()),
+        short_description: SarifShortDescription {
+            text: "Duplicated code block detected by the metrics channel.".to_string(),
+        },
+        default_configuration: SarifDefaultConfiguration { level: "note" },
+    }
 }
 
 fn severity_to_level(severity: Severity) -> &'static str {
@@ -206,6 +243,7 @@ mod tests {
             skipped: vec![],
             graph: Default::default(),
             boundary_edges: Vec::new(),
+            metrics: Default::default(),
         };
         let rules = RuleSet {
             rules: vec![],
@@ -226,6 +264,7 @@ mod tests {
             skipped: vec![],
             graph: Default::default(),
             boundary_edges: Vec::new(),
+            metrics: Default::default(),
         };
         let rules = RuleSet {
             rules: vec![],
@@ -256,6 +295,7 @@ mod tests {
             skipped: vec![],
             graph: Default::default(),
             boundary_edges: Vec::new(),
+            metrics: Default::default(),
         };
         let rules = RuleSet {
             rules: vec![],
@@ -269,6 +309,62 @@ mod tests {
         assert!(sarif.contains("\"startLine\": 5"));
         assert!(sarif.contains("\"startColumn\": 10"));
         assert!(sarif.contains("abc123def456"));
+    }
+
+    #[test]
+    fn run_properties_carry_metric_totals_only() {
+        let mut metrics = crate::metrics::Metrics::default();
+        metrics.files.insert(
+            "src/main.rs".to_string(),
+            crate::metrics::FileMetrics {
+                lines: 100,
+                code_lines: Some(80),
+                duplicated_lines: 12,
+            },
+        );
+        metrics.totals.lines = 100;
+        metrics.totals.code_lines = 80;
+        metrics.totals.duplicated_lines = 12;
+        metrics.totals.duplication_density = 12.0;
+
+        let report = ScanReport {
+            findings: vec![],
+            baselined: vec![],
+            suppressed: vec![],
+            skipped: vec![],
+            graph: Default::default(),
+            boundary_edges: Vec::new(),
+            metrics,
+        };
+        let rules = RuleSet {
+            rules: vec![],
+            ..Default::default()
+        };
+
+        let sarif = to_sarif(&report, &rules);
+        let parsed: serde_json::Value = serde_json::from_str(&sarif).expect("sarif is valid json");
+        let properties = &parsed["runs"][0]["properties"];
+        assert_eq!(
+            properties
+                .as_object()
+                .expect("properties is an object")
+                .len(),
+            1,
+            "run properties must hold only the metrics key"
+        );
+
+        let totals = &properties["siloscan/metrics"];
+        let totals = totals.as_object().expect("metrics is an object");
+        assert_eq!(totals.len(), 4, "totals must hold exactly four keys");
+        assert_eq!(totals["lines"], serde_json::json!(100));
+        assert_eq!(totals["code_lines"], serde_json::json!(80));
+        assert_eq!(totals["duplicated_lines"], serde_json::json!(12));
+        assert_eq!(totals["duplication_density"], serde_json::json!(12.0));
+
+        assert!(
+            !sarif.contains("src/main.rs"),
+            "per-file metrics must not reach SARIF: {sarif}"
+        );
     }
 
     #[test]
@@ -310,6 +406,7 @@ mod tests {
             skipped: vec![],
             graph: Default::default(),
             boundary_edges: Vec::new(),
+            metrics: Default::default(),
         };
         let rule_text = r#"
 version: 1
@@ -344,6 +441,75 @@ rules:
     }
 
     #[test]
+    fn duplicate_block_findings_get_a_synthesized_descriptor() {
+        let block = Finding {
+            rule_id: DUPLICATE_BLOCK_RULE_ID.to_string(),
+            severity: Severity::Info,
+            message: "duplicated block, also at src/b.rs:1".to_string(),
+            path: "src/a.rs".to_string(),
+            line: 1,
+            column: 1,
+            matched: "12 duplicated lines".to_string(),
+            fingerprint: "fp1".to_string(),
+        };
+        let other = Finding {
+            rule_id: "z.rule".to_string(),
+            severity: Severity::Error,
+            message: "error msg".to_string(),
+            path: "src/c.rs".to_string(),
+            line: 2,
+            column: 1,
+            matched: "x".to_string(),
+            fingerprint: "fp2".to_string(),
+        };
+        let rule_text = r#"
+version: 1
+rules:
+  - id: z.rule
+    severity: error
+    message: "error msg"
+    regex: { pattern: "x" }
+"#;
+        let rules = RuleSet {
+            rules: load_str(rule_text, "test").expect("rules should load"),
+            ..Default::default()
+        };
+        let report = |findings: Vec<Finding>| ScanReport {
+            findings,
+            baselined: vec![],
+            suppressed: vec![],
+            skipped: vec![],
+            graph: Default::default(),
+            boundary_edges: Vec::new(),
+            metrics: Default::default(),
+        };
+
+        let sarif = to_sarif(&report(vec![block, other.clone()]), &rules);
+        let parsed: serde_json::Value = serde_json::from_str(&sarif).expect("sarif is valid json");
+        let driver_rules = parsed["runs"][0]["tool"]["driver"]["rules"]
+            .as_array()
+            .expect("driver rules array");
+        assert_eq!(driver_rules.len(), 2);
+        // Sorted by id: the reserved id sorts before z.rule.
+        assert_eq!(driver_rules[0]["id"], DUPLICATE_BLOCK_RULE_ID);
+        assert_eq!(driver_rules[0]["name"], "DuplicateBlock");
+        assert_eq!(
+            driver_rules[0]["shortDescription"]["text"],
+            "Duplicated code block detected by the metrics channel."
+        );
+        assert_eq!(driver_rules[0]["defaultConfiguration"]["level"], "note");
+        assert_eq!(driver_rules[1]["id"], "z.rule");
+        assert!(
+            driver_rules[1].get("name").is_none(),
+            "rule pack descriptors carry no name: {sarif}"
+        );
+
+        // Without a block finding the descriptor stays out.
+        let sarif = to_sarif(&report(vec![other]), &rules);
+        assert!(!sarif.contains(DUPLICATE_BLOCK_RULE_ID), "{sarif}");
+    }
+
+    #[test]
     fn baselined_and_suppressed_are_excluded() {
         let finding = Finding {
             rule_id: "test.rule".to_string(),
@@ -362,6 +528,7 @@ rules:
             skipped: vec![],
             graph: Default::default(),
             boundary_edges: Vec::new(),
+            metrics: Default::default(),
         };
         let rules = RuleSet {
             rules: vec![],
@@ -393,6 +560,7 @@ rules:
             skipped: vec![],
             graph: Default::default(),
             boundary_edges: Vec::new(),
+            metrics: Default::default(),
         };
         let rules = RuleSet {
             rules: vec![],
@@ -443,6 +611,7 @@ rules:
             skipped: vec![],
             graph: Default::default(),
             boundary_edges: Vec::new(),
+            metrics: Default::default(),
         };
         let rule_text = r#"
 version: 1

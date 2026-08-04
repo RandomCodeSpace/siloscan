@@ -1,5 +1,13 @@
 use serde::Serialize;
 
+/// Version of the machine-readable JSON report contract.
+///
+/// Single source of truth: every consumer (CLI, TUI, downstream tooling)
+/// reads this constant instead of hardcoding the string. The contract is
+/// additive-only within a major version: fields are appended, never renamed,
+/// moved or removed.
+pub const SCHEMA_VERSION: &str = "1.1";
+
 #[derive(Debug, Serialize)]
 pub struct JsonReport<'a> {
     pub version: &'a str,
@@ -7,6 +15,8 @@ pub struct JsonReport<'a> {
     pub baselined: &'a [crate::findings::Finding],
     pub suppressed: &'a [crate::findings::Finding],
     pub skipped: &'a [crate::scan::SkippedFile],
+    pub schema_version: &'static str,
+    pub metrics: &'a crate::metrics::Metrics,
 }
 
 pub fn to_json(report: &crate::scan::ScanReport) -> String {
@@ -16,16 +26,59 @@ pub fn to_json(report: &crate::scan::ScanReport) -> String {
         baselined: &report.baselined,
         suppressed: &report.suppressed,
         skipped: &report.skipped,
+        schema_version: SCHEMA_VERSION,
+        metrics: &report.metrics,
     };
     serde_json::to_string_pretty(&json_report).unwrap() // serialization cannot fail
+}
+
+/// One-line metrics summary for human output, printed after the findings
+/// listing. The code-lines term is omitted when no scanned file reported a
+/// code-line count (that is, no tier-1 language file was scanned).
+pub fn human_metrics_summary(metrics: &crate::metrics::Metrics) -> String {
+    let mut summary = format!("metrics: {} lines", metrics.totals.lines);
+    if metrics.files.values().any(|file| file.code_lines.is_some()) {
+        summary.push_str(&format!(", {} code lines", metrics.totals.code_lines));
+    }
+    summary.push_str(&format!(
+        ", {} duplicated lines, {:.1}% duplication",
+        metrics.totals.duplicated_lines, metrics.totals.duplication_density
+    ));
+    summary
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::findings::Finding;
+    use crate::metrics::{FileMetrics, Metrics};
     use crate::rules::Severity;
     use crate::scan::{ScanReport, SkippedFile};
+
+    fn metrics_fixture() -> Metrics {
+        let mut metrics = Metrics::default();
+        metrics.files.insert(
+            "src/zebra.rs".to_string(),
+            FileMetrics {
+                lines: 40,
+                code_lines: Some(30),
+                duplicated_lines: 10,
+            },
+        );
+        metrics.files.insert(
+            "src/alpha.txt".to_string(),
+            FileMetrics {
+                lines: 60,
+                code_lines: None,
+                duplicated_lines: 0,
+            },
+        );
+        metrics.totals.lines = 100;
+        metrics.totals.code_lines = 30;
+        metrics.totals.duplicated_lines = 10;
+        metrics.totals.duplication_density = 10.0;
+        metrics
+    }
 
     #[test]
     fn json_report_contains_findings_and_version() {
@@ -46,6 +99,7 @@ mod tests {
             skipped: vec![],
             graph: Default::default(),
             boundary_edges: Vec::new(),
+            metrics: Default::default(),
         };
 
         let json = to_json(&report);
@@ -78,10 +132,111 @@ mod tests {
             skipped: vec![skipped],
             graph: Default::default(),
             boundary_edges: Vec::new(),
+            metrics: metrics_fixture(),
         };
 
         let json1 = to_json(&report);
         let json2 = to_json(&report);
         assert_eq!(json1, json2);
+    }
+
+    #[test]
+    fn json_report_declares_schema_version() {
+        let report = ScanReport {
+            findings: vec![],
+            baselined: vec![],
+            suppressed: vec![],
+            skipped: vec![],
+            graph: Default::default(),
+            boundary_edges: Vec::new(),
+            metrics: Default::default(),
+        };
+
+        let json = to_json(&report);
+        assert!(
+            json.contains("\"schema_version\": \"1.1\""),
+            "report must carry the schema version: {json}"
+        );
+        assert_eq!(SCHEMA_VERSION, "1.1");
+    }
+
+    #[test]
+    fn json_report_carries_metrics_in_stable_key_order() {
+        let report = ScanReport {
+            findings: vec![],
+            baselined: vec![],
+            suppressed: vec![],
+            skipped: vec![],
+            graph: Default::default(),
+            boundary_edges: Vec::new(),
+            metrics: metrics_fixture(),
+        };
+
+        let json = to_json(&report);
+        assert!(json.contains("\"metrics\""));
+        assert!(json.contains("\"totals\""));
+
+        // File keys are emitted in BTreeMap order, not insertion order.
+        let alpha = json.find("src/alpha.txt").expect("alpha file present");
+        let zebra = json.find("src/zebra.rs").expect("zebra file present");
+        assert!(alpha < zebra, "file keys must be sorted: {json}");
+
+        // A file without a code-line count omits the key entirely.
+        let alpha_entry = &json[alpha..zebra];
+        assert!(
+            !alpha_entry.contains("code_lines"),
+            "absent code_lines must not serialize: {alpha_entry}"
+        );
+        let zebra_entry = &json[zebra..];
+        assert!(
+            zebra_entry.contains("\"code_lines\": 30"),
+            "present code_lines must serialize: {zebra_entry}"
+        );
+    }
+
+    #[test]
+    fn human_summary_includes_code_lines_when_any_file_has_them() {
+        let summary = human_metrics_summary(&metrics_fixture());
+        assert_eq!(
+            summary,
+            "metrics: 100 lines, 30 code lines, 10 duplicated lines, 10.0% duplication"
+        );
+    }
+
+    #[test]
+    fn human_summary_omits_code_lines_when_no_file_has_them() {
+        let mut metrics = Metrics::default();
+        metrics.files.insert(
+            "notes.txt".to_string(),
+            FileMetrics {
+                lines: 8,
+                code_lines: None,
+                duplicated_lines: 0,
+            },
+        );
+        metrics.totals.lines = 8;
+        metrics.totals.code_lines = 0;
+        metrics.totals.duplicated_lines = 0;
+        metrics.totals.duplication_density = 0.0;
+
+        let summary = human_metrics_summary(&metrics);
+        assert_eq!(
+            summary,
+            "metrics: 8 lines, 0 duplicated lines, 0.0% duplication"
+        );
+    }
+
+    #[test]
+    fn human_summary_rounds_density_to_one_decimal() {
+        let mut metrics = Metrics::default();
+        metrics.totals.lines = 300;
+        metrics.totals.duplicated_lines = 40;
+        metrics.totals.duplication_density = 13.3333;
+
+        let summary = human_metrics_summary(&metrics);
+        assert_eq!(
+            summary,
+            "metrics: 300 lines, 40 duplicated lines, 13.3% duplication"
+        );
     }
 }

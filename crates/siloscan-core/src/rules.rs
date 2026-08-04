@@ -56,6 +56,9 @@ pub enum LoadError {
     #[error("{origin}: duplicate rule id: {detail}")]
     DuplicateId { origin: String, detail: String },
 
+    #[error("{origin}: reserved rule id: {detail}")]
+    ReservedId { origin: String, detail: String },
+
     #[error("{origin}: rule has no payload: {detail}")]
     NoPayload { origin: String, detail: String },
 
@@ -98,6 +101,12 @@ pub enum LoadError {
 
     #[error("{origin}: invalid coverage minimum: {detail}")]
     BadCoverageMin { origin: String, detail: String },
+
+    #[error("{origin}: invalid duplication threshold: {detail}")]
+    BadDuplicationMax { origin: String, detail: String },
+
+    #[error("{origin}: unknown duplication scope: {detail}")]
+    BadDuplicationScope { origin: String, detail: String },
 }
 
 // Raw schema. `deny_unknown_fields` does not compose with `serde(flatten)`, so
@@ -126,6 +135,7 @@ pub struct RawRule {
     pub ast: Option<BTreeMap<String, String>>,
     pub boundary: Option<RawBoundary>,
     pub coverage: Option<RawCoverage>,
+    pub duplication: Option<RawDuplication>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -174,6 +184,17 @@ pub struct RawBoundary {
 pub struct RawCoverage {
     /// Minimum line coverage percentage, 0..=100.
     pub min: f64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RawDuplication {
+    /// Maximum duplicated-line percentage, 0 < max_percent <= 100.
+    pub max_percent: f64,
+    /// `scan`, `file` or `silo`. Absent means `scan`. Kept as a string so an
+    /// unknown value reports a scope error naming the rule rather than a
+    /// generic deserialization failure.
+    pub scope: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -299,6 +320,45 @@ impl fmt::Debug for LazyRegex {
     }
 }
 
+/// The set a duplication gate measures its density over.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum DuplicationScope {
+    /// The whole set of files the rule's path filter matched.
+    #[default]
+    Scan,
+    /// Each matched file on its own.
+    File,
+    /// Each silo the matched files belong to.
+    Silo,
+}
+
+impl DuplicationScope {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            DuplicationScope::Scan => "scan",
+            DuplicationScope::File => "file",
+            DuplicationScope::Silo => "silo",
+        }
+    }
+
+    /// Parses a scope as written in a rule document. `None` means the value is
+    /// not one of the three scopes.
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "scan" => Some(DuplicationScope::Scan),
+            "file" => Some(DuplicationScope::File),
+            "silo" => Some(DuplicationScope::Silo),
+            _ => None,
+        }
+    }
+}
+
+impl fmt::Display for DuplicationScope {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum CompiledPayload {
     Regex {
@@ -328,6 +388,11 @@ pub enum CompiledPayload {
     },
     Coverage {
         min: f64,
+    },
+    Duplication {
+        /// Density above which the gate reports, in percent.
+        max_percent: f64,
+        scope: DuplicationScope,
     },
 }
 
@@ -504,6 +569,15 @@ fn compile_rule(raw: RawRule, origin: &str) -> Result<CompiledRule, LoadError> {
         });
     }
 
+    // The scanner emits findings under this id itself, so a rule claiming it
+    // would produce two unrelated kinds of finding under one identity.
+    if raw.id == crate::metrics::DUPLICATE_BLOCK_RULE_ID {
+        return Err(LoadError::ReservedId {
+            origin: origin.to_string(),
+            detail: format!("{} is emitted by the duplication metrics", raw.id),
+        });
+    }
+
     let mut kinds: Vec<&'static str> = Vec::new();
     if raw.regex.is_some() {
         kinds.push("regex");
@@ -519,6 +593,9 @@ fn compile_rule(raw: RawRule, origin: &str) -> Result<CompiledRule, LoadError> {
     }
     if raw.coverage.is_some() {
         kinds.push("coverage");
+    }
+    if raw.duplication.is_some() {
+        kinds.push("duplication");
     }
 
     match kinds.len() {
@@ -544,10 +621,11 @@ fn compile_rule(raw: RawRule, origin: &str) -> Result<CompiledRule, LoadError> {
         });
     }
 
-    // Boundary and coverage rules are evaluated per silo and per report, not
-    // per source language, so a `languages` filter would be meaningless.
+    // Boundary, coverage and duplication rules are evaluated per silo, per
+    // report and per metrics set, not per source language, so a `languages`
+    // filter would be meaningless.
     if raw.languages.is_some()
-        && let Some(kind) = ["boundary", "coverage"]
+        && let Some(kind) = ["boundary", "coverage", "duplication"]
             .into_iter()
             .find(|k| kinds.contains(k))
     {
@@ -572,6 +650,8 @@ fn compile_rule(raw: RawRule, origin: &str) -> Result<CompiledRule, LoadError> {
         compile_boundary(&raw.id, spec, origin)?
     } else if let Some(spec) = raw.coverage {
         compile_coverage(&raw.id, spec, origin)?
+    } else if let Some(spec) = raw.duplication {
+        compile_duplication(&raw.id, spec, origin)?
     } else {
         // Unreachable: the payload count was checked above.
         return Err(LoadError::NoPayload {
@@ -681,6 +761,37 @@ fn compile_coverage(
     }
 
     Ok(CompiledPayload::Coverage { min: spec.min })
+}
+
+fn compile_duplication(
+    id: &str,
+    spec: RawDuplication,
+    origin: &str,
+) -> Result<CompiledPayload, LoadError> {
+    // A threshold of zero would report any duplication at all through a gate
+    // whose whole purpose is to carry a budget, so the range is exclusive at
+    // the bottom.
+    if !spec.max_percent.is_finite() || spec.max_percent <= 0.0 || spec.max_percent > 100.0 {
+        return Err(LoadError::BadDuplicationMax {
+            origin: origin.to_string(),
+            detail: format!("{id}: {}", spec.max_percent),
+        });
+    }
+
+    let scope = match spec.scope.as_deref() {
+        None => DuplicationScope::Scan,
+        Some(value) => {
+            DuplicationScope::parse(value).ok_or_else(|| LoadError::BadDuplicationScope {
+                origin: origin.to_string(),
+                detail: format!("{id}: {value} (expected scan, file or silo)"),
+            })?
+        }
+    };
+
+    Ok(CompiledPayload::Duplication {
+        max_percent: spec.max_percent,
+        scope,
+    })
 }
 
 fn compile_ast(
@@ -1357,6 +1468,185 @@ rules:
         let err = load_str(src, "test").unwrap_err();
         assert!(matches!(err, LoadError::PayloadLanguages { .. }));
         assert!(err.to_string().contains("coverage rule must not set"));
+    }
+
+    #[test]
+    fn valid_duplication_rule_loads() {
+        let src = r#"
+version: 1
+rules:
+  - id: quality.duplication
+    severity: warning
+    message: "too much duplication"
+    paths:
+      include: ["src/**"]
+    duplication:
+      max_percent: 3.5
+      scope: file
+"#;
+        let rules = load_str(src, "test").expect("should load");
+        match &rules[0].payload {
+            CompiledPayload::Duplication { max_percent, scope } => {
+                assert_eq!(*max_percent, 3.5);
+                assert_eq!(*scope, DuplicationScope::File);
+            }
+            other => panic!("expected a duplication payload, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_duplicate_block_rule_id_is_reserved() {
+        let src = format!(
+            "version: 1\nrules:\n  - id: {}\n    severity: info\n    message: m\n    regex:\n      pattern: 'x'\n",
+            crate::metrics::DUPLICATE_BLOCK_RULE_ID
+        );
+        let err = load_str(&src, "test").unwrap_err();
+        assert!(matches!(err, LoadError::ReservedId { .. }), "{err}");
+        assert!(
+            err.to_string()
+                .contains(crate::metrics::DUPLICATE_BLOCK_RULE_ID),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn duplication_scope_defaults_to_scan() {
+        let src = r#"
+version: 1
+rules:
+  - id: a.b
+    severity: info
+    message: m
+    duplication: { max_percent: 5 }
+"#;
+        let rules = load_str(src, "test").expect("should load");
+        match &rules[0].payload {
+            CompiledPayload::Duplication { max_percent, scope } => {
+                assert_eq!(*max_percent, 5.0);
+                assert_eq!(*scope, DuplicationScope::Scan);
+                assert_eq!(scope.to_string(), "scan");
+            }
+            other => panic!("expected a duplication payload, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn duplication_accepts_every_scope() {
+        for (value, expected) in [
+            ("scan", DuplicationScope::Scan),
+            ("file", DuplicationScope::File),
+            ("silo", DuplicationScope::Silo),
+        ] {
+            let src = format!(
+                "version: 1\nrules:\n  - id: a.b\n    severity: info\n    message: m\n    duplication: {{ max_percent: 5, scope: {value} }}\n"
+            );
+            let rules = load_str(&src, "test").expect("should load");
+            match &rules[0].payload {
+                CompiledPayload::Duplication { scope, .. } => {
+                    assert_eq!(*scope, expected);
+                    assert_eq!(scope.as_str(), value);
+                }
+                other => panic!("expected a duplication payload, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn duplication_out_of_range_max_percent_is_fatal() {
+        for max in ["0", "0.0", "-1", "100.5", ".nan", ".inf"] {
+            let src = format!(
+                "version: 1\nrules:\n  - id: a.b\n    severity: info\n    message: m\n    duplication: {{ max_percent: {max} }}\n"
+            );
+            let err = load_str(&src, "test").unwrap_err();
+            assert!(
+                matches!(err, LoadError::BadDuplicationMax { .. }),
+                "max {max} should be rejected, got {err}"
+            );
+            assert!(err.to_string().contains("a.b"), "{err}");
+        }
+    }
+
+    #[test]
+    fn duplication_boundary_max_percent_loads() {
+        for max in ["0.1", "100"] {
+            let src = format!(
+                "version: 1\nrules:\n  - id: a.b\n    severity: info\n    message: m\n    duplication: {{ max_percent: {max} }}\n"
+            );
+            assert!(load_str(&src, "test").is_ok(), "max {max} should load");
+        }
+    }
+
+    #[test]
+    fn duplication_unknown_scope_is_fatal() {
+        let src = r#"
+version: 1
+rules:
+  - id: a.b
+    severity: info
+    message: m
+    duplication: { max_percent: 5, scope: repo }
+"#;
+        let err = load_str(src, "test").unwrap_err();
+        assert!(matches!(err, LoadError::BadDuplicationScope { .. }));
+        assert!(err.to_string().contains("a.b: repo"), "{err}");
+    }
+
+    #[test]
+    fn duplication_unknown_key_is_fatal() {
+        let src = r#"
+version: 1
+rules:
+  - id: a.b
+    severity: info
+    message: m
+    duplication: { max_percent: 5, nonsense: true }
+"#;
+        assert!(matches!(load_str(src, "test"), Err(LoadError::Yaml { .. })));
+    }
+
+    #[test]
+    fn duplication_missing_max_percent_is_fatal() {
+        let src = r#"
+version: 1
+rules:
+  - id: a.b
+    severity: info
+    message: m
+    duplication: { scope: file }
+"#;
+        assert!(matches!(load_str(src, "test"), Err(LoadError::Yaml { .. })));
+    }
+
+    #[test]
+    fn duplication_with_languages_is_fatal() {
+        let src = r#"
+version: 1
+rules:
+  - id: a.b
+    severity: info
+    message: m
+    languages: ["rust"]
+    duplication: { max_percent: 5 }
+"#;
+        let err = load_str(src, "test").unwrap_err();
+        assert!(matches!(err, LoadError::PayloadLanguages { .. }));
+        assert!(err.to_string().contains("duplication rule must not set"));
+    }
+
+    #[test]
+    fn duplication_with_another_payload_is_fatal() {
+        let src = r#"
+version: 1
+rules:
+  - id: a.b
+    severity: info
+    message: m
+    coverage: { min: 50 }
+    duplication: { max_percent: 5 }
+"#;
+        let err = load_str(src, "test").unwrap_err();
+        assert!(matches!(err, LoadError::MultiplePayloads { .. }));
+        assert!(err.to_string().contains("coverage, duplication"), "{err}");
     }
 
     #[test]

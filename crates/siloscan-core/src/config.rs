@@ -13,6 +13,24 @@ use serde::Deserialize;
 
 pub const CONFIG_NAME: &str = "siloscan.toml";
 
+const fn default_min_lines() -> usize {
+    10
+}
+
+/// Duplication detection settings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DuplicationConfig {
+    #[serde(default = "default_min_lines")]
+    pub min_lines: usize,
+}
+
+impl Default for DuplicationConfig {
+    fn default() -> Self {
+        DuplicationConfig { min_lines: 10 }
+    }
+}
+
 /// Repository configuration. Every section is optional; the default value is a
 /// config that changes nothing.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
@@ -36,6 +54,10 @@ pub struct Config {
     /// file.
     #[serde(default)]
     pub rules: Vec<String>,
+
+    /// Duplication detection settings.
+    #[serde(default)]
+    pub duplication: DuplicationConfig,
 }
 
 /// True when `name` is a well-formed silo name (`^[a-z0-9-]+$`).
@@ -109,6 +131,14 @@ pub fn load(path: &Path) -> Result<Config, String> {
     config
         .silo_sets()
         .map_err(|e| format!("{}: {e}", path.display()))?;
+
+    if config.duplication.min_lines < 2 {
+        return Err(format!(
+            "{}: duplication.min_lines must be at least 2, got {}",
+            path.display(),
+            config.duplication.min_lines
+        ));
+    }
 
     Ok(config)
 }
@@ -282,5 +312,51 @@ alpha = ["src/**"]
         );
         assert_eq!(config.silo_of(&sets, "src/main.rs"), Some("alpha"));
         assert_eq!(config.silo_of(&sets, "docs/readme.md"), None);
+    }
+
+    #[test]
+    fn duplication_absent_defaults_to_10() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write(dir.path(), CONFIG_NAME, "");
+        let config = load(&path).expect("should load");
+        assert_eq!(config.duplication.min_lines, 10);
+    }
+
+    #[test]
+    fn duplication_explicit_value_parses() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write(dir.path(), CONFIG_NAME, "[duplication]\nmin_lines = 5\n");
+        let config = load(&path).expect("should load");
+        assert_eq!(config.duplication.min_lines, 5);
+    }
+
+    #[test]
+    fn duplication_min_lines_zero_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write(dir.path(), CONFIG_NAME, "[duplication]\nmin_lines = 0\n");
+        let err = load(&path).unwrap_err();
+        assert!(err.contains("min_lines must be at least 2"), "{err}");
+        assert!(err.contains("0"), "{err}");
+    }
+
+    #[test]
+    fn duplication_min_lines_one_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write(dir.path(), CONFIG_NAME, "[duplication]\nmin_lines = 1\n");
+        let err = load(&path).unwrap_err();
+        assert!(err.contains("min_lines must be at least 2"), "{err}");
+        assert!(err.contains("1"), "{err}");
+    }
+
+    #[test]
+    fn duplication_unknown_key_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write(
+            dir.path(),
+            CONFIG_NAME,
+            "[duplication]\nmin_lines = 10\nwrongkey = true\n",
+        );
+        let err = load(&path).unwrap_err();
+        assert!(err.contains("unknown field"), "{err}");
     }
 }

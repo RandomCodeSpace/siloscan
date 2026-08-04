@@ -211,6 +211,10 @@ fn run_scan(args: ScanArgs) {
                     ),
                 );
             }
+            emit(
+                &mut out,
+                format_args!("{}", output::human_metrics_summary(&report.metrics)),
+            );
         }
         Format::Json => emit(&mut out, format_args!("{}", output::to_json(&report))),
         Format::Sarif => emit(
