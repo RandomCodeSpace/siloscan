@@ -8,6 +8,7 @@
 
 use std::cell::{Cell as StdCell, RefCell};
 use std::cmp::Reverse;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
 
@@ -19,9 +20,10 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Row, Table};
 
 use siloscan_core::findings::Finding;
+use siloscan_core::metrics::DUPLICATE_BLOCK_RULE_ID;
 use siloscan_core::rules::Severity;
 
-use crate::state::{AppState, Pane, Status};
+use crate::state::{AppState, Filters, Pane, Screen, Status};
 use crate::ui::LayoutMap;
 use crate::ui::theme;
 
@@ -33,6 +35,10 @@ const STACK_COLS: u16 = 120;
 const TOP_RULES: usize = 8;
 const WHEEL_LINES: isize = 3;
 const PAGE_ROWS: usize = 10;
+/// Length of the block key inside a duplicate-block finding's matched text.
+const BLOCK_KEY_LEN: usize = 12;
+/// Indent of a copy row under its group header.
+const COPY_INDENT: &str = "  ";
 
 /// Findings table geometry. Status and severity are fixed; the rule column is
 /// sized to the ids it has to show; path and message share what is left.
@@ -109,6 +115,74 @@ pub struct Hits {
     pub rows: Option<Rect>,
 }
 
+/// Block grouping of the findings table: whether it is on, which duplicate sets
+/// are expanded, and where the cursor sits in the grouped row list. Screen-local
+/// like [`TriageView`], and kept apart from it because the expanded set is not
+/// `Copy`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct GroupState {
+    pub on: bool,
+    /// Block keys whose copies are listed. Absent means collapsed, so a fresh
+    /// grouping starts with every set folded into its header.
+    pub expanded: BTreeSet<String>,
+    /// Index into `grouped_rows`, only meaningful while `on`.
+    pub cursor: usize,
+}
+
+impl GroupState {
+    /// Flip grouping, keeping which sets are expanded.
+    pub fn toggle(mut self) -> GroupState {
+        self.on = !self.on;
+        self
+    }
+
+    /// Expand a collapsed set or collapse an expanded one.
+    pub fn toggle_expanded(mut self, key: &str) -> GroupState {
+        if !self.expanded.remove(key) {
+            self.expanded.insert(key.to_string());
+        }
+        self
+    }
+
+    pub fn is_expanded(&self, key: &str) -> bool {
+        self.expanded.contains(key)
+    }
+}
+
+/// One duplicate set as its header row shows it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlockGroup {
+    /// The 12-hex block key: the identity of the duplicate set.
+    pub key: String,
+    /// Copies of the block currently visible.
+    pub copies: usize,
+    /// Lines in the block, as the finding's matched text reports them.
+    pub lines: usize,
+    pub expanded: bool,
+}
+
+/// A row of the grouped findings table.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GroupRow {
+    /// Collapsible header of one duplicate set.
+    Header(BlockGroup),
+    /// One copy of the set above it. `position` indexes `visible_rows()`, like
+    /// every other row index on this screen.
+    Copy { key: String, position: usize },
+    /// A finding that is not part of a duplicate set.
+    Ungrouped { position: usize },
+}
+
+impl GroupRow {
+    /// Position into `visible_rows()` this row opens, if it is a finding.
+    pub fn position(&self) -> Option<usize> {
+        match self {
+            GroupRow::Header(_) => None,
+            GroupRow::Copy { position, .. } | GroupRow::Ungrouped { position } => Some(*position),
+        }
+    }
+}
+
 thread_local! {
     static VIEW: StdCell<TriageView> = const { StdCell::new(TriageView {
         sort: Sort::Canonical,
@@ -120,6 +194,11 @@ thread_local! {
         chips: Vec::new(),
         header: None,
         rows: None,
+    }) };
+    static GROUP: RefCell<GroupState> = const { RefCell::new(GroupState {
+        on: false,
+        expanded: BTreeSet::new(),
+        cursor: 0,
     }) };
 }
 
@@ -137,6 +216,154 @@ pub fn hits() -> Hits {
 
 pub fn set_hits(hits: Hits) {
     HITS.with(|cell| *cell.borrow_mut() = hits);
+}
+
+pub fn group() -> GroupState {
+    GROUP.with(|cell| cell.borrow().clone())
+}
+
+pub fn set_group(group: GroupState) {
+    GROUP.with(|cell| *cell.borrow_mut() = group);
+}
+
+/// Turn block grouping on or off. The two modes index different row spaces, so
+/// the cursor and the table scroll restart; the flat view then re-anchors on the
+/// selection it kept all along.
+pub fn toggle_grouping(state: &mut AppState) {
+    let mut group = group().toggle();
+    group.cursor = 0;
+    let on = group.on;
+    set_group(group);
+
+    state.scroll.table = 0;
+    state.scroll.code = 0;
+    if !on {
+        follow_selection(state, view());
+    }
+}
+
+/// Dashboard and silo-card click-through for the duplication numbers: triage
+/// showing the duplicate-block findings only, grouped by block.
+pub fn open_duplication(state: &mut AppState) {
+    let mut filters = Filters::default();
+    filters.toggle_rule(DUPLICATE_BLOCK_RULE_ID);
+    state.filters = filters;
+    state.screen = Screen::Triage;
+    state.selected = 0;
+    state.clamp_selection();
+    state.scroll.table = 0;
+    state.scroll.code = 0;
+
+    let mut group = group();
+    group.on = true;
+    group.cursor = 0;
+    set_group(group);
+}
+
+/// `"N duplicated lines (block HHHHHHHHHHHH)"` split into its line count and its
+/// block key. The format is the reserved rule's contract; anything else is
+/// rejected rather than guessed at.
+fn parse_duplicate_matched(matched: &str) -> Option<(usize, String)> {
+    let (count, rest) = matched.split_once(" duplicated lines (block ")?;
+    let key = rest.strip_suffix(')')?;
+    if key.len() != BLOCK_KEY_LEN || !key.chars().all(|symbol| symbol.is_ascii_hexdigit()) {
+        return None;
+    }
+    Some((count.parse().ok()?, key.to_string()))
+}
+
+/// Key of the duplicate set a finding belongs to: the 12-hex block hash carried
+/// by the reserved rule's matched text. `None` for every other rule and for
+/// matched text that does not parse, which then triages ungrouped.
+pub fn block_key(finding: &Finding) -> Option<String> {
+    if finding.rule_id != DUPLICATE_BLOCK_RULE_ID {
+        return None;
+    }
+    parse_duplicate_matched(&finding.matched).map(|(_, key)| key)
+}
+
+/// Lines in the block a finding copies, as its matched text reports them. Only
+/// meaningful for a finding [`block_key`] accepted.
+fn block_lines(finding: &Finding) -> usize {
+    parse_duplicate_matched(&finding.matched).map_or(0, |(lines, _)| lines)
+}
+
+/// Rows of the grouped findings table.
+///
+/// The order is part of the contract:
+/// 1. every duplicate set, by copy count descending then block key ascending,
+///    each header immediately followed by its copies when expanded;
+/// 2. every other finding, in the order the flat table would have shown it.
+///
+/// Copies inside a set keep that same flat order.
+pub fn grouped_rows(state: &AppState, sort: Sort, group: &GroupState) -> Vec<GroupRow> {
+    let order = view_order(state, sort);
+    let visible = state.visible_rows();
+
+    let mut sets: BTreeMap<String, (usize, Vec<usize>)> = BTreeMap::new();
+    let mut ungrouped: Vec<usize> = Vec::new();
+    for &position in &order {
+        let finding = &state.rows[visible[position]].finding;
+        match block_key(finding) {
+            Some(key) => sets
+                .entry(key)
+                .or_insert((block_lines(finding), Vec::new()))
+                .1
+                .push(position),
+            None => ungrouped.push(position),
+        }
+    }
+
+    // The map already yields keys ascending; a stable sort by copy count keeps
+    // that as the tie-break.
+    let mut ranked: Vec<(String, usize, Vec<usize>)> = sets
+        .into_iter()
+        .map(|(key, (lines, positions))| (key, lines, positions))
+        .collect();
+    ranked.sort_by_key(|(_, _, positions)| Reverse(positions.len()));
+
+    let mut rows = Vec::new();
+    for (key, lines, positions) in ranked {
+        let expanded = group.is_expanded(&key);
+        rows.push(GroupRow::Header(BlockGroup {
+            copies: positions.len(),
+            lines,
+            expanded,
+            key: key.clone(),
+        }));
+        if expanded {
+            rows.extend(positions.into_iter().map(|position| GroupRow::Copy {
+                key: key.clone(),
+                position,
+            }));
+        }
+    }
+    rows.extend(
+        ungrouped
+            .into_iter()
+            .map(|position| GroupRow::Ungrouped { position }),
+    );
+    rows
+}
+
+/// Rows the table is showing, whichever mode it is in.
+fn row_count(state: &AppState, view: TriageView, group: &GroupState) -> usize {
+    if group.on {
+        grouped_rows(state, view.sort, group).len()
+    } else {
+        state.visible_len()
+    }
+}
+
+/// Keep the group cursor inside the row list after anything that changed it.
+fn clamp_group_cursor(state: &AppState) {
+    let mut group = group();
+    if !group.on {
+        return;
+    }
+    let rows = grouped_rows(state, view().sort, &group);
+    group.cursor = group.cursor.min(rows.len().saturating_sub(1));
+    set_group(group);
 }
 
 /// Display order as a permutation of visible positions: entry `d` holds the
@@ -416,8 +643,10 @@ fn draw_table(frame: &mut Frame, state: &AppState, area: Rect, view: TriageView,
         frame.render_widget(Paragraph::new(Line::from(spans)), input_area);
     }
 
+    let group = group();
+    let grouping = if group.on { "  group:block" } else { "" };
     let title = format!(
-        " findings {}/{}  sort:{} ",
+        " findings {}/{}  sort:{}{grouping} ",
         state.visible_len(),
         state.rows.len(),
         view.sort.as_str()
@@ -434,42 +663,58 @@ fn draw_table(frame: &mut Frame, state: &AppState, area: Rect, view: TriageView,
     hits.header = Some(header_rect);
     hits.rows = Some(rows_rect);
 
-    let order = view_order(state, view.sort);
     let height = rows_rect.height as usize;
     let visible = state.visible_rows();
-    let selected_display = display_position(&order, state.selected);
-    // Draw does not mutate state; the handlers clamp with the same rule.
-    let start = clamp_scroll(state.scroll.table, order.len(), height);
-
     let widths = column_widths(inner.width, rule_width(state, &visible));
-    let rows: Vec<Row> = order
-        .iter()
-        .skip(start)
-        .take(height)
-        .enumerate()
-        .map(|(offset, &position)| {
-            let row = &state.rows[visible[position]];
-            let finding = &row.finding;
-            let cells = vec![
-                Span::styled(status_label(row.status), theme::dim()),
-                theme::severity_span(finding.severity),
-                // The tail of a path carries the file name, so it is the end
-                // that has to survive the truncation.
-                Span::raw(middle_truncate(
-                    &format!("{}:{}", finding.path, finding.line),
-                    widths[2] as usize,
-                )),
-                Span::raw(tail_truncate(&finding.rule_id, widths[3] as usize)),
-                Span::raw(tail_truncate(&finding.message, widths[4] as usize)),
-            ];
-            let table_row = Row::new(cells);
-            if start + offset == selected_display {
-                table_row.style(theme::selected())
-            } else {
-                table_row
-            }
-        })
-        .collect();
+
+    // Draw does not mutate state; the handlers clamp with the same rule.
+    let (rows, total): (Vec<Row>, usize) = if group.on {
+        let display = grouped_rows(state, view.sort, &group);
+        let start = clamp_scroll(state.scroll.table, display.len(), height);
+        let cursor = group.cursor.min(display.len().saturating_sub(1));
+        let rows = display
+            .iter()
+            .skip(start)
+            .take(height)
+            .enumerate()
+            .map(|(offset, entry)| {
+                let row = match entry {
+                    GroupRow::Header(block) => header_row(block, &widths),
+                    GroupRow::Copy { position, .. } => {
+                        finding_row(state, &visible, *position, &widths, COPY_INDENT)
+                    }
+                    GroupRow::Ungrouped { position } => {
+                        finding_row(state, &visible, *position, &widths, "")
+                    }
+                };
+                if start + offset == cursor {
+                    row.style(theme::selected())
+                } else {
+                    row
+                }
+            })
+            .collect();
+        (rows, display.len())
+    } else {
+        let order = view_order(state, view.sort);
+        let start = clamp_scroll(state.scroll.table, order.len(), height);
+        let selected_display = display_position(&order, state.selected);
+        let rows = order
+            .iter()
+            .skip(start)
+            .take(height)
+            .enumerate()
+            .map(|(offset, &position)| {
+                let row = finding_row(state, &visible, position, &widths, "");
+                if start + offset == selected_display {
+                    row.style(theme::selected())
+                } else {
+                    row
+                }
+            })
+            .collect();
+        (rows, order.len())
+    };
 
     let header = Row::new(vec!["St", "Sev", "Path:Line", "Rule", "Message"]).style(
         Style::default()
@@ -481,9 +726,61 @@ fn draw_table(frame: &mut Frame, state: &AppState, area: Rect, view: TriageView,
         .column_spacing(1);
     frame.render_widget(table, inner);
 
-    if order.is_empty() {
+    if total == 0 {
         frame.render_widget(Paragraph::new(empty_table_hint(state)), rows_rect);
     }
+}
+
+/// One finding as a table row. `indent` prefixes the path column, which is how a
+/// copy row sits under its group header.
+fn finding_row(
+    state: &AppState,
+    visible: &[usize],
+    position: usize,
+    widths: &[u16; 5],
+    indent: &str,
+) -> Row<'static> {
+    let row = &state.rows[visible[position]];
+    let finding = &row.finding;
+    Row::new(vec![
+        Span::styled(status_label(row.status), theme::dim()),
+        theme::severity_span(finding.severity),
+        // The tail of a path carries the file name, so it is the end that has
+        // to survive the truncation.
+        Span::raw(middle_truncate(
+            &format!("{indent}{}:{}", finding.path, finding.line),
+            widths[2] as usize,
+        )),
+        Span::raw(tail_truncate(&finding.rule_id, widths[3] as usize)),
+        Span::raw(tail_truncate(&finding.message, widths[4] as usize)),
+    ])
+}
+
+/// Header of one duplicate set, laid out over the same columns as a finding:
+/// `[+]  block HHHHHHHHHHHH  N copies  M lines`.
+fn header_row(block: &BlockGroup, widths: &[u16; 5]) -> Row<'static> {
+    let marker = if block.expanded { "[-]" } else { "[+]" };
+    let copies = if block.copies == 1 {
+        "1 copy".to_string()
+    } else {
+        format!("{} copies", block.copies)
+    };
+
+    Row::new(vec![
+        Span::styled(marker, theme::accent()),
+        Span::raw(""),
+        Span::styled(
+            tail_truncate(&format!("block {}", block.key), widths[2] as usize),
+            Style::default()
+                .fg(theme::ACCENT)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(tail_truncate(&copies, widths[3] as usize), theme::dim()),
+        Span::styled(
+            tail_truncate(&format!("{} lines", block.lines), widths[4] as usize),
+            theme::dim(),
+        ),
+    ])
 }
 
 /// Guidance for an empty table: what to do next depends on why it is empty.
@@ -695,10 +992,22 @@ pub fn handle_key_triage(state: &mut AppState, key: KeyEvent) {
         state.clamp_selection();
         state.scroll.table = 0;
         state.scroll.code = 0;
+        clamp_group_cursor(state);
         return;
     }
 
     let mut view = view();
+    if key.code == KeyCode::Char('g') {
+        toggle_grouping(state);
+        return;
+    }
+    // While grouping is on the group list owns the cursor keys and Enter, so
+    // Enter reaches a header or a copy instead of the sidebar chips; the chips
+    // stay clickable with the mouse.
+    if group().on && handle_group_key(state, key, view) {
+        return;
+    }
+
     match key.code {
         KeyCode::Char('/') => state.input_mode = true,
         KeyCode::Tab => {
@@ -745,6 +1054,60 @@ pub fn handle_key_triage(state: &mut AppState, key: KeyEvent) {
         }
         _ => {}
     }
+
+    clamp_group_cursor(state);
+}
+
+/// Grouped-mode navigation over headers and copies. Returns true when the key
+/// belonged to the group list, which then keeps it from reaching the flat
+/// handler. Landing on a finding selects it, so the code pane follows the cursor
+/// exactly as it follows the flat selection.
+fn handle_group_key(state: &mut AppState, key: KeyEvent, view: TriageView) -> bool {
+    let mut group = group();
+    let rows = grouped_rows(state, view.sort, &group);
+    if rows.is_empty() {
+        group.cursor = 0;
+        set_group(group);
+        return false;
+    }
+
+    let last = rows.len() - 1;
+    let mut cursor = group.cursor.min(last);
+    match key.code {
+        KeyCode::Down | KeyCode::Char('j') => cursor = (cursor + 1).min(last),
+        KeyCode::Up | KeyCode::Char('k') => cursor = cursor.saturating_sub(1),
+        KeyCode::PageDown => cursor = cursor.saturating_add(PAGE_ROWS).min(last),
+        KeyCode::PageUp => cursor = cursor.saturating_sub(PAGE_ROWS),
+        KeyCode::Enter | KeyCode::Char(' ') => {
+            group = activate_group_row(state, group, &rows[cursor]);
+            group.cursor = cursor;
+            set_group(group);
+            clamp_group_cursor(state);
+            follow_group_cursor(state);
+            return true;
+        }
+        _ => return false,
+    }
+
+    group.cursor = cursor;
+    set_group(group);
+    if let Some(position) = rows[cursor].position() {
+        state.select_visible(position);
+    }
+    follow_group_cursor(state);
+    true
+}
+
+/// Enter or a click on a grouped row: a header folds or unfolds, a finding opens
+/// its file context.
+fn activate_group_row(state: &mut AppState, group: GroupState, row: &GroupRow) -> GroupState {
+    match row {
+        GroupRow::Header(block) => group.toggle_expanded(&block.key),
+        GroupRow::Copy { position, .. } | GroupRow::Ungrouped { position } => {
+            state.select_visible(*position);
+            group
+        }
+    }
 }
 
 fn focus_section(state: &AppState, mut view: TriageView, section: Section) {
@@ -761,13 +1124,20 @@ fn focus_section(state: &AppState, mut view: TriageView, section: Section) {
 /// Keep the selected display row inside the viewport of the last frame.
 fn follow_selection(state: &mut AppState, view: TriageView) {
     state.scroll.code = 0;
+    let order = view_order(state, view.sort);
+    scroll_to_display(state, display_position(&order, state.selected));
+}
+
+/// The same, for the cursor of the grouped list.
+fn follow_group_cursor(state: &mut AppState) {
+    scroll_to_display(state, group().cursor);
+}
+
+fn scroll_to_display(state: &mut AppState, display: usize) {
     let height = hits().rows.map_or(0, |rect| rect.height as usize);
     if height == 0 {
         return;
     }
-
-    let order = view_order(state, view.sort);
-    let display = display_position(&order, state.selected);
     if display < state.scroll.table {
         state.scroll.table = display;
     } else if display >= state.scroll.table + height {
@@ -793,7 +1163,22 @@ pub fn handle_mouse_with(state: &mut AppState, event: MouseEvent, layout: &Layou
                 return;
             }
             if let Some(rect) = hits.rows.filter(|rect| inside(*rect, column, row)) {
-                let order = view_order(state, view().sort);
+                let view = view();
+                let group = group();
+                if group.on {
+                    let rows = grouped_rows(state, view.sort, &group);
+                    let start = clamp_scroll(state.scroll.table, rows.len(), rect.height as usize);
+                    let display = start + (row - rect.y) as usize;
+                    if let Some(entry) = rows.get(display) {
+                        let mut group = activate_group_row(state, group, entry);
+                        group.cursor = display;
+                        set_group(group);
+                        clamp_group_cursor(state);
+                    }
+                    return;
+                }
+
+                let order = view_order(state, view.sort);
                 let start = clamp_scroll(state.scroll.table, order.len(), rect.height as usize);
                 let display = start + (row - rect.y) as usize;
                 if let Some(&position) = order.get(display) {
@@ -807,6 +1192,7 @@ pub fn handle_mouse_with(state: &mut AppState, event: MouseEvent, layout: &Layou
                 .find(|(_, rect)| inside(*rect, column, row))
             {
                 apply_chip(state, &chip.clone());
+                clamp_group_cursor(state);
             }
         }
         _ => {}
@@ -827,7 +1213,8 @@ fn wheel(
     state.scroll_by(pane, delta);
     if pane == Pane::Table {
         let height = hits.rows.map_or(0, |rect| rect.height as usize);
-        state.scroll.table = clamp_scroll(state.scroll.table, state.visible_len(), height);
+        let total = row_count(state, view(), &group());
+        state.scroll.table = clamp_scroll(state.scroll.table, total, height);
     }
 }
 
@@ -1379,5 +1766,366 @@ mod tests {
         assert_eq!(tail_truncate("short", 10), "short");
         assert_eq!(tail_truncate("hardcoded", 2), "ha");
         assert_eq!(tail_truncate("hardcoded", 0), "");
+    }
+
+    const BIG_KEY: &str = "a1b2c3d4e5f6";
+    const MID_KEY: &str = "000000000000";
+    const SMALL_KEY: &str = "ffffffffffff";
+
+    fn duplicate_row(path: &str, line: u64, lines: usize, key: &str) -> FindingRow {
+        let mut finding = finding(
+            DUPLICATE_BLOCK_RULE_ID,
+            Severity::Info,
+            path,
+            line,
+            "duplicated block, also at src/b.rs:20",
+        );
+        finding.matched = format!("{lines} duplicated lines (block {key})");
+        FindingRow {
+            finding,
+            status: Status::New,
+        }
+    }
+
+    /// Three copies of one block, two copies of two more, one duplicate-block
+    /// finding whose matched text does not parse, and one ordinary finding.
+    /// Canonical order is the order below, which is what the positions in the
+    /// assertions index.
+    fn grouped_state(root: PathBuf) -> AppState {
+        let mut state = state(root);
+        state.rows = vec![
+            row("secret.token", Severity::Info, "src/a.rs", Status::New),
+            duplicate_row("src/a.rs", 10, 42, BIG_KEY),
+            duplicate_row("src/b.rs", 20, 42, BIG_KEY),
+            duplicate_row("src/a.rs", 30, 42, BIG_KEY),
+            duplicate_row("src/b.rs", 40, 7, SMALL_KEY),
+            duplicate_row("src/a.rs", 50, 7, SMALL_KEY),
+            duplicate_row("src/b.rs", 60, 9, MID_KEY),
+            duplicate_row("src/a.rs", 70, 9, MID_KEY),
+            {
+                let mut broken = duplicate_row("src/b.rs", 80, 5, BIG_KEY);
+                broken.finding.matched = "duplicated block".to_string();
+                broken
+            },
+        ];
+        state
+    }
+
+    fn headers(rows: &[GroupRow]) -> Vec<(String, usize, usize)> {
+        rows.iter()
+            .filter_map(|row| match row {
+                GroupRow::Header(block) => Some((block.key.clone(), block.copies, block.lines)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn reset_group() {
+        set_view(TriageView::default());
+        set_group(GroupState::default());
+    }
+
+    #[test]
+    fn the_block_key_comes_from_the_reserved_matched_text() {
+        let mut finding = finding(
+            DUPLICATE_BLOCK_RULE_ID,
+            Severity::Info,
+            "src/a.rs",
+            10,
+            "duplicated block",
+        );
+        finding.matched = format!("42 duplicated lines (block {BIG_KEY})");
+        assert_eq!(block_key(&finding).as_deref(), Some(BIG_KEY));
+        assert_eq!(block_lines(&finding), 42);
+
+        // Another rule with the same shape of matched text is not a block.
+        let mut other = finding.clone();
+        other.rule_id = "secret.token".to_string();
+        assert_eq!(block_key(&other), None);
+
+        for matched in [
+            "duplicated block",
+            "42 duplicated lines (block )",
+            "42 duplicated lines (block a1b2c3d4e5f)",
+            "42 duplicated lines (block a1b2c3d4e5f6",
+            "42 duplicated lines (block zzzzzzzzzzzz)",
+            "many duplicated lines (block a1b2c3d4e5f6)",
+            "",
+        ] {
+            let mut broken = finding.clone();
+            broken.matched = matched.to_string();
+            assert_eq!(block_key(&broken), None, "{matched:?}");
+        }
+    }
+
+    #[test]
+    fn grouping_collapses_a_duplicate_set_into_one_header() {
+        let root = temp_root("group-collapse");
+        let mut state = grouped_state(root.clone());
+        reset_group();
+
+        let (flat, map) = render(&state, 200, 48);
+        let flat_text = dump_rect(&flat, map.table.unwrap());
+        assert!(flat_text.contains("src/a.rs:10"), "{flat_text}");
+        assert!(!flat_text.contains("copies"), "{flat_text}");
+
+        handle_key_triage(&mut state, key(KeyCode::Char('g')));
+        assert!(group().on);
+
+        let (grouped, map) = render(&state, 200, 48);
+        let text = dump_rect(&grouped, map.table.unwrap());
+        assert!(text.contains("group:block"), "{text}");
+        assert!(text.contains(&format!("block {BIG_KEY}")), "{text}");
+        assert!(text.contains("3 copies"), "{text}");
+        assert!(text.contains("42 lines"), "{text}");
+        // Collapsed: no copy of the set is on screen.
+        assert!(!text.contains("src/a.rs:10"), "{text}");
+        // The ungrouped findings are still listed.
+        assert!(text.contains("src/a.rs:2"), "{text}");
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn expanding_a_group_lists_every_copy() {
+        let root = temp_root("group-expand");
+        let mut state = grouped_state(root.clone());
+        reset_group();
+        set_group(GroupState {
+            on: true,
+            ..GroupState::default()
+        });
+        let _ = render(&state, 200, 48);
+
+        // The cursor starts on the first header: the biggest set.
+        handle_key_triage(&mut state, key(KeyCode::Enter));
+        assert!(group().is_expanded(BIG_KEY));
+
+        let (buffer, map) = render(&state, 200, 48);
+        let text = dump_rect(&buffer, map.table.unwrap());
+        for line in ["src/a.rs:10", "src/b.rs:20", "src/a.rs:30"] {
+            assert!(text.contains(line), "{line} missing: {text}");
+        }
+        assert_eq!(
+            grouped_rows(&state, Sort::Canonical, &group())
+                .iter()
+                .filter(|row| matches!(row, GroupRow::Copy { .. }))
+                .count(),
+            3
+        );
+
+        // Enter again folds it back.
+        handle_key_triage(&mut state, key(KeyCode::Enter));
+        assert!(!group().is_expanded(BIG_KEY));
+        let (buffer, map) = render(&state, 200, 48);
+        assert!(!dump_rect(&buffer, map.table.unwrap()).contains("src/a.rs:10"));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn toggling_grouping_off_restores_the_flat_view() {
+        let root = temp_root("group-off");
+        let mut state = grouped_state(root.clone());
+        reset_group();
+
+        let (before, map) = render(&state, 200, 48);
+        let flat = dump_rect(&before, map.table.unwrap());
+
+        handle_key_triage(&mut state, key(KeyCode::Char('g')));
+        let _ = render(&state, 200, 48);
+        handle_key_triage(&mut state, key(KeyCode::Char('g')));
+        assert!(!group().on);
+
+        let (after, map) = render(&state, 200, 48);
+        assert_eq!(dump_rect(&after, map.table.unwrap()), flat);
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn the_cursor_walks_headers_and_copies() {
+        let root = temp_root("group-walk");
+        let mut state = grouped_state(root.clone());
+        reset_group();
+        set_group(GroupState {
+            on: true,
+            expanded: [BIG_KEY.to_string()].into_iter().collect(),
+            cursor: 0,
+        });
+        let _ = render(&state, 200, 48);
+
+        // Header, three copies, then the two collapsed headers.
+        let rows = grouped_rows(&state, Sort::Canonical, &group());
+        assert!(matches!(rows[0], GroupRow::Header(_)));
+        assert_eq!(rows[1].position(), Some(1));
+        assert_eq!(rows[3].position(), Some(3));
+        assert!(matches!(rows[4], GroupRow::Header(_)));
+
+        handle_key_triage(&mut state, key(KeyCode::Char('j')));
+        assert_eq!(group().cursor, 1);
+        assert_eq!(state.selected, 1, "landing on a copy selects it");
+        assert_eq!(state.selected_row().unwrap().finding.line, 10);
+
+        handle_key_triage(&mut state, key(KeyCode::Down));
+        handle_key_triage(&mut state, key(KeyCode::Down));
+        assert_eq!(group().cursor, 3);
+        assert_eq!(state.selected_row().unwrap().finding.line, 30);
+
+        // Onto the next header: the cursor moves, the selection stays put.
+        handle_key_triage(&mut state, key(KeyCode::Char('j')));
+        assert_eq!(group().cursor, 4);
+        assert_eq!(state.selected_row().unwrap().finding.line, 30);
+
+        handle_key_triage(&mut state, key(KeyCode::Char('k')));
+        assert_eq!(group().cursor, 3);
+
+        // Space on a header folds it, and the cursor stays on that header.
+        handle_key_triage(&mut state, key(KeyCode::Char('k')));
+        handle_key_triage(&mut state, key(KeyCode::Char('k')));
+        handle_key_triage(&mut state, key(KeyCode::Char('k')));
+        assert_eq!(group().cursor, 0);
+        handle_key_triage(&mut state, key(KeyCode::Char(' ')));
+        assert!(!group().is_expanded(BIG_KEY));
+        assert_eq!(group().cursor, 0);
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn clicking_a_header_folds_it_and_clicking_a_copy_opens_it() {
+        let root = temp_root("group-click");
+        let mut state = grouped_state(root.clone());
+        reset_group();
+        set_group(GroupState {
+            on: true,
+            expanded: [BIG_KEY.to_string()].into_iter().collect(),
+            cursor: 0,
+        });
+        let (_, map) = render(&state, 200, 48);
+        let hits = hits();
+        let rows = hits.rows.unwrap();
+
+        // Row 1 is the first copy of the expanded set.
+        handle_mouse_with(&mut state, click(rows.x + 1, rows.y + 1), &map, &hits);
+        assert_eq!(state.selected, 1);
+        assert_eq!(group().cursor, 1);
+
+        // Row 0 is its header.
+        handle_mouse_with(&mut state, click(rows.x + 1, rows.y), &map, &hits);
+        assert!(!group().is_expanded(BIG_KEY));
+        assert_eq!(group().cursor, 0);
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_finding_with_unparseable_matched_text_stays_ungrouped() {
+        let state = grouped_state(PathBuf::from("/nowhere"));
+        let rows = grouped_rows(&state, Sort::Canonical, &GroupState::default());
+
+        // Three headers, then the plain finding and the unparseable one.
+        assert_eq!(rows.len(), 5);
+        assert_eq!(
+            rows[3..],
+            [
+                GroupRow::Ungrouped { position: 0 },
+                GroupRow::Ungrouped { position: 8 },
+            ]
+        );
+        assert_eq!(
+            state.rows[8].finding.rule_id.as_str(),
+            DUPLICATE_BLOCK_RULE_ID
+        );
+        assert_eq!(block_key(&state.rows[8].finding), None);
+    }
+
+    #[test]
+    fn groups_sort_by_copy_count_then_block_key() {
+        let state = grouped_state(PathBuf::from("/nowhere"));
+        let rows = grouped_rows(&state, Sort::Canonical, &GroupState::default());
+
+        assert_eq!(
+            headers(&rows),
+            vec![
+                (BIG_KEY.to_string(), 3, 42),
+                (MID_KEY.to_string(), 2, 9),
+                (SMALL_KEY.to_string(), 2, 7),
+            ]
+        );
+
+        // The order is a property of the findings, not of the row order they
+        // arrived in.
+        let mut reversed = state.clone();
+        reversed.rows.reverse();
+        assert_eq!(
+            headers(&grouped_rows(
+                &reversed,
+                Sort::Canonical,
+                &GroupState::default()
+            )),
+            headers(&rows)
+        );
+        // And it does not move with the table sort.
+        for sort in [Sort::Canonical, Sort::Severity, Sort::Rule] {
+            assert_eq!(
+                headers(&grouped_rows(&state, sort, &GroupState::default())),
+                headers(&rows),
+                "{sort:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_duplication_click_through_filters_and_groups() {
+        let mut state = grouped_state(PathBuf::from("/nowhere"));
+        reset_group();
+        state.screen = crate::state::Screen::Dashboard;
+
+        open_duplication(&mut state);
+
+        assert_eq!(state.screen, crate::state::Screen::Triage);
+        assert_eq!(state.visible_len(), 8, "every duplicate-block finding");
+        assert!(group().on);
+        assert_eq!(group().cursor, 0);
+        assert_eq!(
+            grouped_rows(&state, Sort::Canonical, &group()).len(),
+            4,
+            "three headers and the unparseable copy"
+        );
+    }
+
+    #[test]
+    fn the_grouped_cursor_stays_visible_while_scrolling() {
+        let mut state = grouped_state(PathBuf::from("/nowhere"));
+        for index in 0..60 {
+            state.rows.push(duplicate_row(
+                &format!("src/f{index}.rs"),
+                index as u64 + 1,
+                3,
+                "0123456789ab",
+            ));
+        }
+        reset_group();
+        set_group(GroupState {
+            on: true,
+            expanded: ["0123456789ab".to_string()].into_iter().collect(),
+            cursor: 0,
+        });
+        let _ = render(&state, 160, 20);
+
+        for _ in 0..40 {
+            handle_key_triage(&mut state, key(KeyCode::Char('j')));
+        }
+        let height = hits().rows.unwrap().height as usize;
+        assert!(state.scroll.table > 0);
+        assert!(group().cursor >= state.scroll.table);
+        assert!(group().cursor < state.scroll.table + height);
+
+        for _ in 0..40 {
+            handle_key_triage(&mut state, key(KeyCode::Char('k')));
+        }
+        assert_eq!(state.scroll.table, 0);
+        assert_eq!(group().cursor, 0);
     }
 }

@@ -3,6 +3,7 @@
 
 mod actions;
 mod app;
+mod snapshot;
 mod state;
 mod term;
 mod ui;
@@ -24,7 +25,7 @@ use siloscan_core::default_pack;
 use siloscan_core::rules::{self, CompiledPayload, CompiledRule, RuleSet};
 
 use app::AppEvent;
-use state::{AppState, Screen};
+use state::{AppState, READ_ONLY_RESCAN, Screen};
 
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
 
@@ -32,6 +33,7 @@ const USAGE: &str = "\
 siloscan-tui - interactive terminal UI for siloscan
 
 Usage: siloscan-tui [PATH] [--rules DIR]... [--no-default-rules] [--config FILE]
+       siloscan-tui --report FILE [--config FILE]
 
 Arguments:
   PATH                 Path to scan (default: .)
@@ -42,7 +44,10 @@ Options:
                        Do not load the built-in rule pack
       --config FILE    Repository config (default: nearest siloscan.toml at or
                        above PATH)
+      --report FILE    Open a JSON report as a read-only snapshot instead of
+                       scanning; cannot be combined with PATH
   -h, --help           Print help
+  -V, --version        Print version
 ";
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -51,7 +56,10 @@ struct Args {
     rules: Vec<PathBuf>,
     no_default_rules: bool,
     config: Option<PathBuf>,
+    /// A report to open instead of scanning. Mutually exclusive with `path`.
+    report: Option<PathBuf>,
     help: bool,
+    version: bool,
 }
 
 fn main() {
@@ -63,7 +71,35 @@ fn main() {
         print!("{USAGE}");
         return;
     }
+    if args.version {
+        println!("siloscan-tui {}", env!("CARGO_PKG_VERSION"));
+        return;
+    }
 
+    let (mut state, config) = match args.report.as_deref() {
+        Some(report) => boot_snapshot(&args, report),
+        None => boot_live(&args),
+    };
+
+    let mut terminal = match term::init() {
+        Ok(terminal) => terminal,
+        Err(e) => fail(&format!("error: terminal setup failed: {e}")),
+    };
+    let result = run(&mut terminal, &mut state, config);
+    let restored = term::restore();
+
+    if let Err(e) = result {
+        eprintln!("error: {e}");
+        process::exit(2);
+    }
+    if let Err(e) = restored {
+        eprintln!("error: terminal restore failed: {e}");
+        process::exit(2);
+    }
+}
+
+/// Live boot: rules, config and baseline for the path to be scanned.
+fn boot_live(args: &Args) -> (AppState, Option<Arc<Config>>) {
     let (config, config_rule_dirs) = match load_config(&args.path, args.config.as_deref()) {
         Ok(loaded) => loaded,
         Err(e) => fail(&format!("error: {e}")),
@@ -83,23 +119,34 @@ fn main() {
         Err(e) => fail(&format!("error: {e}")),
     };
 
-    let mut state = AppState::new(args.path, rules, baseline);
+    (AppState::new(args.path.clone(), rules, baseline), config)
+}
 
-    let mut terminal = match term::init() {
-        Ok(terminal) => terminal,
-        Err(e) => fail(&format!("error: terminal setup failed: {e}")),
-    };
-    let result = run(&mut terminal, &mut state, config);
-    let restored = term::restore();
+/// Snapshot boot: the report supplies the findings and metrics, so no rules,
+/// no baseline and no scan. The report records no scan root, so paths resolve
+/// against the working directory - a snapshot opened elsewhere still lists
+/// every finding, it just cannot show file context. The config is still read,
+/// since silo declarations shape the dashboard whether or not a scan runs.
+fn boot_snapshot(args: &Args, report: &Path) -> (AppState, Option<Arc<Config>>) {
+    match load_snapshot(report, args.config.as_deref()) {
+        Ok(booted) => booted,
+        Err(e) => fail(&format!("error: {e}")),
+    }
+}
 
-    if let Err(e) = result {
-        eprintln!("error: {e}");
-        process::exit(2);
-    }
-    if let Err(e) = restored {
-        eprintln!("error: terminal restore failed: {e}");
-        process::exit(2);
-    }
+/// The fallible half of `boot_snapshot`, so the boot path is testable without
+/// taking the process down with it.
+fn load_snapshot(
+    report: &Path,
+    config_arg: Option<&Path>,
+) -> Result<(AppState, Option<Arc<Config>>), String> {
+    let data = snapshot::load(report).map_err(|e| e.to_string())?;
+    let root = PathBuf::from(".");
+    let (config, _) = load_config(&root, config_arg)?;
+
+    let mut state = AppState::new(root, Arc::new(RuleSet::default()), None);
+    app::apply_snapshot(&mut state, data, config.as_deref());
+    Ok((state, config))
 }
 
 /// One scan starts up front; `r` starts another once the previous one is done.
@@ -111,10 +158,13 @@ fn run(
     config: Option<Arc<Config>>,
 ) -> io::Result<()> {
     let (tx, rx): (Sender<AppEvent>, Receiver<AppEvent>) = mpsc::channel();
-    start_scan(state, config.clone(), &tx);
+    // A snapshot is already loaded and never scans; the channel stays empty.
+    if state.snapshot.is_none() {
+        start_scan(state, config.clone(), &tx);
+    }
 
     while !state.should_quit {
-        drain_events(state, &rx);
+        drain_events(state, &rx, config.as_deref());
         terminal.draw(|frame| ui::draw(frame, state))?;
 
         if event::poll(POLL_INTERVAL)? {
@@ -133,11 +183,11 @@ fn run(
     Ok(())
 }
 
-fn drain_events(state: &mut AppState, rx: &Receiver<AppEvent>) {
+fn drain_events(state: &mut AppState, rx: &Receiver<AppEvent>, config: Option<&Config>) {
     while let Ok(event) = rx.try_recv() {
         match event {
             AppEvent::Progress(progress) => state.progress = Some(progress),
-            AppEvent::ScanDone(report) => app::apply_report(state, *report),
+            AppEvent::ScanDone(report) => app::apply_report(state, *report, config),
             AppEvent::Failed(message) => app::apply_failure(state, message),
         }
     }
@@ -157,8 +207,9 @@ fn on_key(state: &mut AppState, key: KeyEvent, config: Option<Arc<Config>>, tx: 
 
     match key.code {
         KeyCode::Char('q') => state.should_quit = true,
+        // A snapshot refuses with its reason in the status line and nothing else.
         KeyCode::Char('r') => {
-            if !state.scan_running {
+            if !state.refuse_if_snapshot(READ_ONLY_RESCAN) && !state.scan_running {
                 reload_baseline(state);
                 start_scan(state, config, tx);
             }
@@ -203,7 +254,14 @@ fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<Args, String> {
     while let Some(arg) = argv.next() {
         match arg.as_str() {
             "-h" | "--help" => args.help = true,
+            "-V" | "--version" => args.version = true,
             "--no-default-rules" => args.no_default_rules = true,
+            "--report" => {
+                let file = argv
+                    .next()
+                    .ok_or_else(|| "--report requires a file".to_string())?;
+                args.report = Some(PathBuf::from(file));
+            }
             "--config" => {
                 let file = argv
                     .next()
@@ -221,6 +279,8 @@ fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<Args, String> {
                     args.rules.push(PathBuf::from(dir));
                 } else if let Some(file) = other.strip_prefix("--config=") {
                     args.config = Some(PathBuf::from(file));
+                } else if let Some(file) = other.strip_prefix("--report=") {
+                    args.report = Some(PathBuf::from(file));
                 } else if other.starts_with('-') && other != "-" {
                     return Err(format!("unknown option: {other}"));
                 } else if path_seen {
@@ -231,6 +291,11 @@ fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<Args, String> {
                 }
             }
         }
+    }
+
+    // A snapshot is the whole input: there is nothing for a scan path to mean.
+    if args.report.is_some() && path_seen {
+        return Err("--report cannot be combined with a scan path".to_string());
     }
 
     Ok(args)
@@ -370,6 +435,43 @@ mod tests {
         assert!(parse(&["--nope"]).is_err());
         assert!(parse(&["a", "b"]).is_err());
         assert!(parse(&["--config"]).is_err());
+        assert!(parse(&["--report"]).is_err());
+    }
+
+    #[test]
+    fn parses_the_report_snapshot_in_both_forms() {
+        assert_eq!(
+            parse(&["--report", "r.json"]).unwrap().report,
+            Some(PathBuf::from("r.json"))
+        );
+        assert_eq!(
+            parse(&["--report=r.json"]).unwrap().report,
+            Some(PathBuf::from("r.json"))
+        );
+        assert_eq!(parse(&[]).unwrap().report, None);
+        // A config still applies: it declares the silos the dashboard groups by.
+        let args = parse(&["--report=r.json", "--config=s.toml"]).unwrap();
+        assert_eq!(args.report, Some(PathBuf::from("r.json")));
+        assert_eq!(args.config, Some(PathBuf::from("s.toml")));
+    }
+
+    #[test]
+    fn a_report_and_a_scan_path_are_mutually_exclusive() {
+        for argv in [
+            vec!["src", "--report", "r.json"],
+            vec!["--report", "r.json", "src"],
+            vec!["--report=r.json", "src"],
+        ] {
+            let err = parse(&argv).unwrap_err();
+            assert!(err.contains("--report"), "{err}");
+        }
+    }
+
+    #[test]
+    fn version_short_circuits() {
+        assert!(parse(&["--version"]).unwrap().version);
+        assert!(parse(&["-V"]).unwrap().version);
+        assert!(!parse(&[]).unwrap().version);
     }
 
     #[test]
