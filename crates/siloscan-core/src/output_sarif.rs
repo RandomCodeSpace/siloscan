@@ -25,12 +25,20 @@ pub struct SarifRun {
 /// per-file metrics stay out of SARIF, which is a findings transport. The
 /// anchor rides along because artifact URIs are relative and mean nothing
 /// without the convention they were written in.
+///
+/// The skipped list rides along for a different reason: a file the scan never
+/// read produces no results, which is indistinguishable in SARIF from a file
+/// that was read and came back clean. A parse cap or an unreadable file would
+/// otherwise be reported as a pass. It is omitted when nothing was skipped, so
+/// a clean run's document is unchanged.
 #[derive(Debug, Serialize)]
 pub struct SarifRunProperties {
     #[serde(rename = "siloscan/metrics")]
     pub metrics: serde_json::Value,
     #[serde(rename = "siloscan/anchor")]
     pub anchor: Anchor,
+    #[serde(rename = "siloscan/skipped", skip_serializing_if = "Vec::is_empty")]
+    pub skipped: Vec<crate::scan::SkippedFile>,
 }
 
 #[derive(Debug, Serialize)]
@@ -204,6 +212,7 @@ pub fn to_sarif(report: &ScanReport, rules: &RuleSet, anchor: Anchor) -> String 
                 // Totals only, never the per-file map.
                 metrics: serde_json::to_value(&report.metrics.totals).unwrap(), // serialization cannot fail
                 anchor,
+                skipped: report.skipped.clone(),
             },
         }],
     };
@@ -354,6 +363,60 @@ mod tests {
         assert!(
             !sarif.contains("src/main.rs"),
             "per-file metrics must not reach SARIF: {sarif}"
+        );
+    }
+
+    #[test]
+    fn skipped_files_are_reported_at_run_level() {
+        use crate::scan::SkippedFile;
+
+        let mut report = report(vec![], Metrics::default());
+        report.skipped = vec![
+            SkippedFile {
+                path: "vendor/huge.ts".to_string(),
+                reason: "exceeds max_parse_bytes".to_string(),
+            },
+            SkippedFile {
+                path: "blob.bin".to_string(),
+                reason: "binary".to_string(),
+            },
+        ];
+
+        let sarif = to_sarif(&report, &no_rules(), Anchor::ScanRoot);
+        let parsed: serde_json::Value = serde_json::from_str(&sarif).expect("sarif is valid json");
+        let properties = &parsed["runs"][0]["properties"];
+
+        // A gated file produces no result, so without this the document reads
+        // exactly like a clean scan.
+        assert!(
+            parsed["runs"][0]["results"]
+                .as_array()
+                .expect("results is an array")
+                .is_empty()
+        );
+        assert_eq!(
+            properties["siloscan/skipped"],
+            serde_json::json!([
+                { "path": "vendor/huge.ts", "reason": "exceeds max_parse_bytes" },
+                { "path": "blob.bin", "reason": "binary" },
+            ]),
+            "skipped must carry path and reason in report order: {sarif}"
+        );
+    }
+
+    #[test]
+    fn a_scan_that_skipped_nothing_omits_the_key() {
+        let report = report(vec![], Metrics::default());
+
+        let sarif = to_sarif(&report, &no_rules(), Anchor::ScanRoot);
+        let parsed: serde_json::Value = serde_json::from_str(&sarif).expect("sarif is valid json");
+        let properties = parsed["runs"][0]["properties"]
+            .as_object()
+            .expect("properties is an object");
+
+        assert!(
+            !properties.contains_key("siloscan/skipped"),
+            "an empty skipped list must not serialize: {sarif}"
         );
     }
 

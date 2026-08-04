@@ -107,7 +107,7 @@ pub fn draw_ratchet(frame: &mut Frame, state: &AppState, area: Rect) -> LayoutMa
     match state.ratchet_finding() {
         Some(finding) => {
             draw_code(frame, state, finding, code_area);
-            draw_details(frame, finding, details_area);
+            draw_details(frame, state, finding, details_area);
         }
         None => {
             let message: Vec<Line> = if state.scan_running {
@@ -330,7 +330,10 @@ fn highlight(text: &str, column: u64, matched: &str) -> Vec<Span<'static>> {
     ]
 }
 
-fn draw_details(frame: &mut Frame, finding: &Finding, area: Rect) {
+/// `state` is read for its rule set alone: the match text is the one field
+/// here that may be a credential, and only the rules say which findings those
+/// are.
+fn draw_details(frame: &mut Frame, state: &AppState, finding: &Finding, area: Rect) {
     let lines = vec![
         detail_line(
             "rule",
@@ -359,7 +362,7 @@ fn draw_details(frame: &mut Frame, finding: &Finding, area: Rect) {
         Line::from(finding.message.clone()),
         Line::from(""),
         Line::from(Span::styled(
-            finding.matched.clone(),
+            crate::ui::display_match(&state.rules, finding).to_string(),
             Style::default().fg(theme::WARNING),
         )),
     ];
@@ -493,7 +496,8 @@ mod tests {
     use crossterm::event::{KeyEventKind, KeyModifiers};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
-    use siloscan_core::rules::{RuleSet, Severity};
+    use siloscan_core::output::REDACTED_MATCH;
+    use siloscan_core::rules::{RuleSet, Severity, load_str};
 
     use crate::state::FindingRow;
 
@@ -817,6 +821,71 @@ mod tests {
             draw_ratchet(frame, &state, frame.area());
         })
         .unwrap();
+    }
+
+    /// One secret rule and one regex rule, so a single session can hold a
+    /// finding that must be redacted next to one that must not.
+    fn secret_rules() -> RuleSet {
+        RuleSet {
+            rules: load_str(
+                "version: 1\nrules:\n  - id: secret.aws-key\n    severity: error\n    \
+                 message: aws access key\n    secret:\n      pattern: 'AKIA[0-9A-Z]{16}'\n  \
+                 - id: style.needle\n    severity: warning\n    message: needle found\n    \
+                 regex:\n      pattern: 'needle'\n",
+                "test",
+            )
+            .expect("rules load"),
+            ..Default::default()
+        }
+    }
+
+    /// A live scan hands the UI the engine's findings with the raw match text
+    /// still in them - only the JSON writer redacts, and this path never goes
+    /// through it. The detail pane has to redact for itself.
+    #[test]
+    fn the_detail_pane_redacts_a_live_secret_finding() {
+        const SECRET: &str = "AKIAIOSFODNN7EXAMPLE";
+
+        let render = |rule_id: &str, matched: &str| {
+            let mut row = row(rule_id, "src/a.rs", 1, Status::New);
+            row.finding.matched = matched.to_string();
+            let mut state = state(vec![row]);
+            state.rules = Arc::new(secret_rules());
+            // No such file, so the source pane cannot be what puts the text on
+            // screen and the assertion is about the detail pane alone.
+            state.root = PathBuf::from("/nonexistent-scan-root");
+
+            let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+            terminal
+                .draw(|frame| {
+                    draw_ratchet(frame, &state, frame.area());
+                })
+                .unwrap();
+            terminal.backend().to_string()
+        };
+
+        let secret = render("secret.aws-key", SECRET);
+        assert!(
+            !secret.contains(SECRET),
+            "credential reached the screen: {secret}"
+        );
+        assert!(secret.contains(REDACTED_MATCH), "{secret}");
+
+        // Every other payload keeps its match text: it is not a credential and
+        // showing it is the reason the pane exists.
+        let regex = render("style.needle", "plain-match-text");
+        assert!(regex.contains("plain-match-text"), "{regex}");
+        assert!(!regex.contains(REDACTED_MATCH), "{regex}");
+
+        // A snapshot already carries the placeholder, so the pane redacts it a
+        // second time; that has to be a no-op rather than a nested placeholder.
+        let already = render("secret.aws-key", REDACTED_MATCH);
+        assert!(already.contains(REDACTED_MATCH), "{already}");
+        assert_eq!(
+            already.matches(REDACTED_MATCH).count(),
+            secret.matches(REDACTED_MATCH).count(),
+            "redacting twice must render the same thing as redacting once"
+        );
     }
 
     #[test]

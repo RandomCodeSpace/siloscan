@@ -25,6 +25,9 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Gauge, Paragraph};
 use siloscan_core::config::Anchor;
+use siloscan_core::findings::Finding;
+use siloscan_core::output::{self, REDACTED_MATCH};
+use siloscan_core::rules::RuleSet;
 
 use crate::state::{AppState, Pane, Screen};
 use crate::ui::dashboard::{Card, MAX_SILO_HITS, SiloHit};
@@ -108,6 +111,27 @@ impl LayoutMap {
         let mut hits = self.silo_cards.iter().flatten().map(|hit| hit.index);
         let first = hits.next()?;
         Some((first, 1 + hits.count()))
+    }
+}
+
+/// Match text as it may be put on screen.
+///
+/// A secret rule's `matched` is the credential itself, so it is replaced by
+/// [`REDACTED_MATCH`] - the same placeholder the JSON report writes - before
+/// any pane draws it. The live-scan path hands the UI findings straight from
+/// the engine, with the raw text still in them, so the substitution has to
+/// happen here rather than at the boundary.
+///
+/// Applying this to an already-redacted finding is a no-op: a snapshot's
+/// secret finding carries the placeholder, and either branch returns the
+/// placeholder. `rules` is whatever rule set the session loaded; a finding
+/// whose rule is not in it keeps its text, which is what a snapshot loaded
+/// against unrelated rules needs.
+pub fn display_match<'a>(rules: &RuleSet, finding: &'a Finding) -> &'a str {
+    if output::is_secret_rule(rules, &finding.rule_id) {
+        REDACTED_MATCH
+    } else {
+        &finding.matched
     }
 }
 

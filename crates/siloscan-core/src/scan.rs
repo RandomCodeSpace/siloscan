@@ -10,7 +10,7 @@ use crate::config::Anchor;
 use crate::findings::Finding;
 use crate::graph::FileFacts;
 use crate::metrics::{DUPLICATE_BLOCK_RULE_ID, DuplicationResult, FileMetrics, Metrics};
-use crate::rules::{CompiledPayload, DuplicationScope, RuleSet, Severity};
+use crate::rules::{CompiledPayload, DuplicationScope, RegexCompileError, RuleSet, Severity};
 use crate::walk::{self, FileKind};
 
 /// Upper bound on scan workers. Past this the per-file work is dominated by the
@@ -32,6 +32,11 @@ pub struct ScanReport {
     pub suppressed: Vec<Finding>,
     pub skipped: Vec<SkippedFile>,
     /// Per-file semantic facts for every file that produced a parse tree.
+    ///
+    /// Files are parsed only when a loaded ast or boundary rule needs a tree,
+    /// so a scan carrying neither leaves this empty. A library consumer must
+    /// not read an empty graph as "the tree has no imports": it usually means
+    /// nothing asked for one.
     pub graph: crate::graph::Graph,
     /// Every boundary violation as `(from silo, to silo, fingerprint)`, sorted.
     /// The finding itself is in `findings`, `baselined` or `suppressed`
@@ -188,29 +193,33 @@ pub struct Progress {
     pub findings: usize,
 }
 
+/// Fails only when a loaded rule turns out to be unusable; see
+/// [`scan_with_progress`].
 pub fn scan(
     root: &Path,
     rules: &RuleSet,
     baseline: Option<&crate::baseline::Baseline>,
-) -> ScanReport {
+) -> Result<ScanReport, String> {
     scan_with_progress(root, rules, baseline, &mut |_| {})
 }
 
 /// Same scan, with a callback invoked once after the walk (`files_done = 0`,
 /// total known) and once after each file.
+///
+/// Silo validation and anchoring, the failures [`scan_opts`] adds, both need a
+/// config that these options do not carry. What is left is a secret rule whose
+/// pattern passed load-time validation and cannot be compiled when a file
+/// finally makes it run: the scan fails rather than report nothing for it.
 pub fn scan_with_progress(
     root: &Path,
     rules: &RuleSet,
     baseline: Option<&crate::baseline::Baseline>,
     on_progress: &mut dyn FnMut(Progress),
-) -> ScanReport {
+) -> Result<ScanReport, String> {
     let options = ScanOptions {
         baseline,
         ..ScanOptions::default()
     };
-    // Silo validation and anchoring are the only fallible steps and both need a
-    // config, which the default options do not carry, so this path cannot fail:
-    // no config means no anchor key, and the absent key means scan-root.
     run(
         root,
         rules,
@@ -223,12 +232,17 @@ pub fn scan_with_progress(
 
 /// The scanner proper. Every file is read once, parsed at most once, and run
 /// through every engine; a cache hit replaces the read-to-engine step only.
+/// A file is parsed only when a loaded rule needs a tree for its language and
+/// the file is within `limits.max_parse_bytes`; over the cap it is recorded in
+/// [`ScanReport::skipped`] and reaches every engine that works on text. A
+/// boundary rule is the one exception: it needs the whole import graph, so it
+/// parses past the cap rather than leave a hole in it.
 ///
 /// Fails when a boundary rule names a silo the config does not define, when
 /// boundary or silo-scoped duplication rules would run against a scan root below
 /// the directory holding the config (a typo or a partial scan would otherwise
-/// silently disable the rule), and when the config's `anchor` cannot be honoured
-/// for this scan root.
+/// silently disable the rule), when the config's `anchor` cannot be honoured
+/// for this scan root, and when a rule a file had to run cannot be compiled.
 pub fn scan_opts(
     root: &Path,
     rules: &RuleSet,
@@ -241,14 +255,7 @@ pub fn scan_opts(
     // it separately - to key a cache, or to label a report - resolved the same
     // value. There is no way for the two to disagree.
     let anchoring = Anchoring::resolve(root, options.config)?;
-    Ok(run(
-        root,
-        rules,
-        options,
-        silo_sets,
-        &anchoring,
-        on_progress,
-    ))
+    run(root, rules, options, silo_sets, &anchoring, on_progress)
 }
 
 /// A duplication rule scoped to silos needs a config that defines silos to know
@@ -358,7 +365,7 @@ fn run(
     silo_sets: Option<Vec<(String, GlobSet)>>,
     anchoring: &Anchoring,
     on_progress: &mut dyn FnMut(Progress),
-) -> ScanReport {
+) -> Result<ScanReport, String> {
     run_with_workers(
         root,
         rules,
@@ -390,7 +397,7 @@ fn run_with_workers(
     anchoring: &Anchoring,
     on_progress: &mut dyn FnMut(Progress),
     workers: usize,
-) -> ScanReport {
+) -> Result<ScanReport, String> {
     let mut findings: Vec<Finding> = Vec::new();
     let mut suppressed: Vec<Finding> = Vec::new();
     let mut skipped: Vec<SkippedFile> = Vec::new();
@@ -414,7 +421,7 @@ fn run_with_workers(
         findings: 0,
     });
 
-    for result in scan_files(
+    let results = scan_files(
         root,
         rules,
         options,
@@ -422,7 +429,20 @@ fn run_with_workers(
         &files,
         on_progress,
         workers,
-    ) {
+    );
+
+    // Results are in walk order, so the failure reported is the first one the
+    // tree contains and not the first one a worker happened to reach. Raised
+    // before anything is merged: a rule that could not run leaves holes the
+    // rest of the report cannot describe.
+    if let Some(error) = results.iter().find_map(|result| match &result.outcome {
+        Outcome::Failed(error) => Some(error),
+        _ => None,
+    }) {
+        return Err(error.to_string());
+    }
+
+    for result in results {
         let FileResult {
             path_rel,
             path,
@@ -432,6 +452,8 @@ fn run_with_workers(
         match outcome {
             // Binary files are not scannable input, not a failure to report.
             Outcome::Binary => {}
+            // Rejected above, before any file was merged.
+            Outcome::Failed(_) => unreachable!("a failed file aborts the scan"),
             Outcome::Unreadable(reason) => skipped.push(SkippedFile {
                 path: path_rel,
                 reason,
@@ -442,9 +464,21 @@ fn run_with_workers(
                 ignored,
                 content,
                 metrics,
+                parse_skipped,
             } => {
                 if let Some(facts) = facts {
                     graph.files.insert(path_rel.clone(), facts);
+                }
+                // A file whose tree was wanted and not built is reported: its
+                // ast findings are missing, and silence there would read as a
+                // clean file. Only ast rules can put a file here - the graph is
+                // whole-tree state and is never gated - so the hole is confined
+                // to the file itself.
+                if let Some(reason) = parse_skipped {
+                    skipped.push(SkippedFile {
+                        path: path_rel.clone(),
+                        reason,
+                    });
                 }
                 contents.insert(path_rel.clone(), content);
                 file_metrics.insert(path_rel.clone(), metrics);
@@ -514,7 +548,7 @@ fn run_with_workers(
         None => (findings, Vec::new()),
     };
 
-    ScanReport {
+    Ok(ScanReport {
         findings,
         baselined,
         suppressed,
@@ -522,7 +556,7 @@ fn run_with_workers(
         graph,
         boundary_edges,
         metrics,
-    }
+    })
 }
 
 /// Fill the duplication counts into the per-file metrics and roll them up.
@@ -728,6 +762,11 @@ struct FileResult {
 enum Outcome {
     Binary,
     Unreadable(String),
+    /// A rule this file had to run could not be compiled. Carried rather than
+    /// raised on the spot: the workers run in parallel, and the scan reports
+    /// the failure of the earliest file in walk order so the message does not
+    /// depend on which worker reached it first.
+    Failed(RegexCompileError),
     Text {
         facts: Option<FileFacts>,
         kept: Vec<Finding>,
@@ -736,7 +775,110 @@ enum Outcome {
         content: String,
         /// Line counts, measured from the file and never from the cache.
         metrics: FileMetrics,
+        /// Why the size cap stopped a parse the rules asked for, when it did.
+        /// Decided from the file and the config, never from the cache.
+        parse_skipped: Option<String>,
     },
+}
+
+/// What the loaded rules need parse trees for, derived from the rule set alone.
+///
+/// Nothing else in the scanner reads a tree: `code_lines` classifies lines with
+/// a heuristic, and the regex, secret, duplication and metrics passes all work
+/// on the text. A file no rule needs parsed therefore never reaches tree-sitter,
+/// which is the difference between reading a generated bundle and parsing one.
+#[derive(Debug, Default)]
+struct ParseNeeds {
+    /// A boundary rule is loaded. The boundary engine reads its edges out of
+    /// the import facts, and only a parse produces those, in any language. It
+    /// reads them for the tree as a whole, so this need is not gated by the
+    /// parse size cap; see [`parse_decision`].
+    boundary: bool,
+    /// Languages some ast rule carries a query for, sorted and deduplicated.
+    ast_languages: Vec<String>,
+}
+
+impl ParseNeeds {
+    fn of(rules: &RuleSet) -> ParseNeeds {
+        let mut needs = ParseNeeds::default();
+        for rule in &rules.rules {
+            match &rule.payload {
+                CompiledPayload::Boundary { .. } => needs.boundary = true,
+                CompiledPayload::Ast { queries } => {
+                    needs
+                        .ast_languages
+                        .extend(queries.iter().map(|(lang, _)| lang.clone()));
+                }
+                _ => {}
+            }
+        }
+        needs.ast_languages.sort();
+        needs.ast_languages.dedup();
+        needs
+    }
+
+    /// Whether a file in `language` has to be parsed at all.
+    fn wants(&self, language: Option<&str>) -> bool {
+        let Some(language) = language else {
+            return false;
+        };
+        self.boundary || self.ast_languages.iter().any(|wanted| wanted == language)
+    }
+}
+
+/// Whether one file is parsed, and what the report says when the size cap
+/// stopped a parse the rules had asked for.
+struct ParseDecision {
+    parse: bool,
+    skipped: Option<String>,
+}
+
+/// A file is parsed when some rule needs a tree for its language and the file
+/// is no larger than `limits.max_parse_bytes`. Over the cap the file still goes
+/// through every engine that works on text; only its tree, and with it its ast
+/// findings, are absent, so the file is recorded as skipped.
+///
+/// A boundary rule overrides the cap. Its engine resolves every import against
+/// the set of files in the graph, so a file missing from the graph is not a hole
+/// in that file's own results: an import from an under-cap file to a gated one
+/// stops resolving, and the violation the under-cap file really commits is never
+/// reported - or, where the language resolves a package directory to whichever
+/// file it finds there, reported against the wrong silo pair. The graph is
+/// whole-tree state, and partial whole-tree state changes results for files that
+/// are nowhere near the cap, so it is built whole.
+fn parse_decision(
+    needs: &ParseNeeds,
+    config: Option<&crate::config::Config>,
+    language: Option<&str>,
+    size: usize,
+) -> ParseDecision {
+    if !needs.wants(language) {
+        return ParseDecision {
+            parse: false,
+            skipped: None,
+        };
+    }
+    if needs.boundary {
+        return ParseDecision {
+            parse: true,
+            skipped: None,
+        };
+    }
+
+    let cap = config
+        .map(|config| config.limits.max_parse_bytes)
+        .unwrap_or(crate::config::DEFAULT_MAX_PARSE_BYTES);
+    if size as u64 > cap {
+        return ParseDecision {
+            parse: false,
+            skipped: Some(format!("exceeds max_parse_bytes ({size} > {cap})")),
+        };
+    }
+
+    ParseDecision {
+        parse: true,
+        skipped: None,
+    }
 }
 
 /// Run the per-file phase across `workers` scoped threads and return every
@@ -757,6 +899,9 @@ fn scan_files(
     on_progress: &mut dyn FnMut(Progress),
     workers: usize,
 ) -> Vec<FileResult> {
+    // Read from the rules once rather than once per file: the answer is the
+    // same for every file of a language, and it decides who reaches a parser.
+    let needs = &ParseNeeds::of(rules);
     let files_total = files.len();
     let cursor = AtomicUsize::new(0);
     let (sender, receiver) = mpsc::channel::<usize>();
@@ -773,7 +918,8 @@ fn scan_files(
                     let Some(path) = files.get(index) else {
                         break;
                     };
-                    let (result, raw) = scan_one(root, rules, options, anchoring, index, path);
+                    let (result, raw) =
+                        scan_one(root, rules, options, anchoring, needs, index, path);
                     produced.push(result);
                     // The receiver outlives every worker, so this cannot fail.
                     let _ = sender.send(raw);
@@ -816,6 +962,7 @@ fn scan_one(
     rules: &RuleSet,
     options: &ScanOptions,
     anchoring: &Anchoring,
+    needs: &ParseNeeds,
     index: usize,
     path: &Path,
 ) -> (FileResult, usize) {
@@ -831,19 +978,35 @@ fn scan_one(
             // Measured here, from the file itself: a cache hit replaces the
             // engine work below, and metrics must not move with the cache.
             let metrics = crate::metrics::measure_file(&content, language);
-            let entry = scan_text(rules, options, &path_rel, &content, language);
-            let raw = entry.findings.len();
-            let (kept, ignored) = crate::suppress::partition(&content, entry.findings);
-            (
-                Outcome::Text {
-                    facts: entry.facts,
-                    kept,
-                    ignored,
-                    content,
-                    metrics,
-                },
-                raw,
-            )
+            // Decided here, from the file and the config: the cache replaces
+            // the engine work below, and a decision taken inside it would move
+            // with the cache state.
+            let decision = parse_decision(needs, options.config, language, content.len());
+            match scan_text(
+                rules,
+                options,
+                &path_rel,
+                &content,
+                language,
+                decision.parse,
+            ) {
+                Err(error) => (Outcome::Failed(error), 0),
+                Ok(entry) => {
+                    let raw = entry.findings.len();
+                    let (kept, ignored) = crate::suppress::partition(&content, entry.findings);
+                    (
+                        Outcome::Text {
+                            facts: entry.facts,
+                            kept,
+                            ignored,
+                            content,
+                            metrics,
+                            parse_skipped: decision.skipped,
+                        },
+                        raw,
+                    )
+                }
+            }
         }
     };
 
@@ -917,25 +1080,32 @@ fn scan_text(
     path_rel: &str,
     content: &str,
     language: Option<&'static str>,
-) -> crate::cache::CachedFile {
-    let hash = options.cache.map(|_| entry_hash(path_rel, content));
+    parse: bool,
+) -> Result<crate::cache::CachedFile, RegexCompileError> {
+    let hash = options.cache.map(|_| entry_hash(path_rel, content, parse));
 
     if let (Some(cache), Some(hash)) = (options.cache, &hash)
         && let Some(entry) = cache.get(hash, content)
     {
-        return entry;
+        return Ok(entry);
     }
 
-    let tree = language.and_then(|lang| crate::parsers::parse(lang, content));
+    let tree = match parse {
+        true => language.and_then(|lang| crate::parsers::parse(lang, content)),
+        false => None,
+    };
 
     let mut file_findings =
         crate::engines::regex::scan_file(&rules.rules, path_rel, language, content);
+    // A secret rule that had to match and could not compile fails the scan
+    // here, before anything is cached: a failed file must not leave an entry a
+    // later run would be served in place of the same failure.
     file_findings.extend(crate::engines::secret::scan_file(
         &rules.rules,
         path_rel,
         language,
         content,
-    ));
+    )?);
     file_findings.extend(crate::engines::ast::scan_file(
         &rules.rules,
         path_rel,
@@ -956,14 +1126,20 @@ fn scan_text(
     if let (Some(cache), Some(hash)) = (options.cache, &hash) {
         cache.put(hash, &entry);
     }
-    entry
+    Ok(entry)
 }
 
 /// Cache entries are keyed by path and content together: a finding carries its
 /// repo-relative path, and its fingerprint is derived from it, so two identical
 /// files at different paths are not interchangeable.
-fn entry_hash(path_rel: &str, content: &str) -> String {
-    let mut buf = Vec::with_capacity(path_rel.len() + content.len() + 1);
+///
+/// The parse decision leads the key. It selects which engines ran, and it is
+/// taken from the config rather than from the rule sources the rest of the key
+/// covers, so a config that moves `limits.max_parse_bytes` across a file's size
+/// must not be served the entry the other side of the cap wrote.
+fn entry_hash(path_rel: &str, content: &str, parse: bool) -> String {
+    let mut buf = Vec::with_capacity(path_rel.len() + content.len() + 2);
+    buf.push(if parse { b'1' } else { b'0' });
     buf.extend_from_slice(path_rel.as_bytes());
     buf.push(0);
     buf.extend_from_slice(content.as_bytes());
@@ -1041,6 +1217,48 @@ rules:
 
     fn tempdir() -> tempfile::TempDir {
         tempfile::tempdir().unwrap()
+    }
+
+    // Every rule set below compiles, so a scan of it cannot fail on one. These
+    // shadow the fallible entry points for the tests that only care about the
+    // report; the failure path has its own tests at the bottom of this module.
+
+    fn scan(
+        root: &Path,
+        rules: &RuleSet,
+        baseline: Option<&crate::baseline::Baseline>,
+    ) -> ScanReport {
+        super::scan(root, rules, baseline).expect("rules compile")
+    }
+
+    fn scan_with_progress(
+        root: &Path,
+        rules: &RuleSet,
+        baseline: Option<&crate::baseline::Baseline>,
+        on_progress: &mut dyn FnMut(Progress),
+    ) -> ScanReport {
+        super::scan_with_progress(root, rules, baseline, on_progress).expect("rules compile")
+    }
+
+    fn run_with_workers(
+        root: &Path,
+        rules: &RuleSet,
+        options: &ScanOptions,
+        silo_sets: Option<Vec<(String, GlobSet)>>,
+        anchoring: &Anchoring,
+        on_progress: &mut dyn FnMut(Progress),
+        workers: usize,
+    ) -> ScanReport {
+        super::run_with_workers(
+            root,
+            rules,
+            options,
+            silo_sets,
+            anchoring,
+            on_progress,
+            workers,
+        )
+        .expect("rules compile")
     }
 
     /// Mark `dir` as a repository root the way git does, so `config::discover`
@@ -1436,7 +1654,16 @@ rules:
         );
         write(dir.path(), "notes.txt", b"needle\n");
 
-        let rules = ruleset();
+        // An ast rule in the set is what asks for a tree; nothing here matches
+        // it, so the facts below are the only thing it contributes. A rule set
+        // that needs no tree collects no facts at all, which is what keeps a
+        // regex-only scan off tree-sitter.
+        let mut rules = ruleset();
+        rules.rules.extend(load_str(AST_RULES, "ast").unwrap());
+        rules
+            .sources
+            .push(("ast".to_string(), AST_RULES.to_string()));
+
         let cache = cache_for(dir.path(), &rules);
         let cold = cached_scan(dir.path(), &rules, &cache);
         let warm = cached_scan(dir.path(), &rules, &cache);
@@ -2489,7 +2716,7 @@ rules:
                 &mut |_| {},
                 workers,
             );
-            crate::output::to_json(&report, anchoring.anchor())
+            crate::output::to_json(&report, &rules, anchoring.anchor())
         };
 
         // Cold cache first, so the warm run below reads what it wrote.
@@ -2619,8 +2846,8 @@ rules:
             .expect("empty config");
 
         assert_eq!(
-            crate::output::to_json(&bare, anchor),
-            crate::output::to_json(&loaded, anchor),
+            crate::output::to_json(&bare, &rules, anchor),
+            crate::output::to_json(&loaded, &rules, anchor),
             "an empty config must change nothing at all"
         );
 
@@ -2642,6 +2869,224 @@ rules:
                 );
             }
         }
+    }
+
+    // Parse gating and the size cap: who reaches tree-sitter at all.
+
+    #[cfg(feature = "tree-sitter-rust")]
+    const AST_RULES: &str = r#"
+version: 1
+rules:
+  - id: rust.dbg-macro
+    severity: warning
+    message: "leftover dbg"
+    ast:
+      rust: '(macro_invocation macro: (identifier) @report (#eq? @report "dbg"))'
+"#;
+
+    #[cfg(feature = "tree-sitter-rust")]
+    fn ast_ruleset() -> RuleSet {
+        RuleSet {
+            rules: load_str(AST_RULES, "ast").unwrap(),
+            sources: vec![("ast".to_string(), AST_RULES.to_string())],
+        }
+    }
+
+    /// A config whose only setting is the parse size cap.
+    fn limits_config(max_parse_bytes: u64) -> crate::config::Config {
+        crate::config::Config {
+            limits: crate::config::LimitsConfig { max_parse_bytes },
+            ..Default::default()
+        }
+    }
+
+    /// Rust source holding one `dbg!` for the ast rule and one `needle` for the
+    /// regex rule, so a run says both whether it parsed and whether it read.
+    const GATED_SOURCE: &str = "fn main() {\n    dbg!(1);\n    let needle = 2;\n}\n";
+
+    #[test]
+    fn a_rule_set_needing_no_tree_never_reports_a_parse_skip() {
+        let dir = tempdir();
+        write(dir.path(), "src/a.rs", GATED_SOURCE.as_bytes());
+
+        // A cap far below the file size: with no ast and no boundary rule
+        // loaded, nothing asked for a tree, so the cap has nothing to stop.
+        let config = limits_config(8);
+        let options = ScanOptions {
+            config: Some(&config),
+            ..ScanOptions::default()
+        };
+        let report = scan_opts(dir.path(), &ruleset(), &options, &mut |_| {}).unwrap();
+
+        assert!(report.skipped.is_empty(), "{:?}", report.skipped);
+        assert!(report.graph.files.is_empty());
+        // The text engines ran regardless.
+        assert_eq!(report.findings.len(), 1);
+        assert_eq!(report.findings[0].rule_id, "test.needle");
+        assert_eq!(report.metrics.files["src/a.rs"].lines, 4);
+    }
+
+    #[cfg(feature = "tree-sitter-rust")]
+    #[test]
+    fn an_oversize_file_is_skipped_when_an_ast_rule_targets_it() {
+        let dir = tempdir();
+        write(dir.path(), "src/a.rs", GATED_SOURCE.as_bytes());
+
+        let config = limits_config(8);
+        let options = ScanOptions {
+            config: Some(&config),
+            ..ScanOptions::default()
+        };
+        let report = scan_opts(dir.path(), &ast_ruleset(), &options, &mut |_| {}).unwrap();
+
+        assert_eq!(report.skipped.len(), 1);
+        assert_eq!(report.skipped[0].path, "src/a.rs");
+        assert_eq!(
+            report.skipped[0].reason,
+            format!("exceeds max_parse_bytes ({} > 8)", GATED_SOURCE.len())
+        );
+        // No tree means no ast finding and no graph entry for the file.
+        assert!(report.findings.is_empty(), "{:?}", report.findings);
+        assert!(report.graph.files.is_empty());
+        // And the file is still measured.
+        assert_eq!(report.metrics.files["src/a.rs"].lines, 4);
+    }
+
+    #[cfg(feature = "tree-sitter-rust")]
+    #[test]
+    fn a_file_at_the_cap_parses_and_one_byte_over_does_not() {
+        let dir = tempdir();
+        write(dir.path(), "src/a.rs", GATED_SOURCE.as_bytes());
+
+        let size = GATED_SOURCE.len() as u64;
+        let report = |cap: u64| {
+            let config = limits_config(cap);
+            let options = ScanOptions {
+                config: Some(&config),
+                ..ScanOptions::default()
+            };
+            scan_opts(dir.path(), &ast_ruleset(), &options, &mut |_| {}).unwrap()
+        };
+
+        let at_cap = report(size);
+        assert!(at_cap.skipped.is_empty(), "{:?}", at_cap.skipped);
+        assert_eq!(at_cap.findings.len(), 1);
+        assert_eq!(at_cap.findings[0].rule_id, "rust.dbg-macro");
+        assert!(at_cap.graph.files.contains_key("src/a.rs"));
+
+        let over_cap = report(size - 1);
+        assert_eq!(over_cap.skipped.len(), 1);
+        assert_eq!(
+            over_cap.skipped[0].reason,
+            format!("exceeds max_parse_bytes ({size} > {})", size - 1)
+        );
+        assert!(over_cap.findings.is_empty());
+        assert!(over_cap.graph.files.is_empty());
+    }
+
+    /// The cap gates a tree wanted for that file's own ast findings. It must not
+    /// gate one wanted for the import graph, which is whole-tree state: dropping
+    /// a file out of the graph stops every import of it resolving, silently
+    /// changing the boundary results of files well under the cap.
+    #[test]
+    fn a_boundary_rule_parses_past_the_size_cap() {
+        let config = limits_config(8);
+        let boundary = ParseNeeds {
+            boundary: true,
+            ast_languages: Vec::new(),
+        };
+        let ast_only = ParseNeeds {
+            boundary: false,
+            ast_languages: vec!["rust".to_string()],
+        };
+
+        let forced = parse_decision(&boundary, Some(&config), Some("rust"), 4096);
+        assert!(forced.parse);
+        assert!(forced.skipped.is_none());
+
+        let gated = parse_decision(&ast_only, Some(&config), Some("rust"), 4096);
+        assert!(!gated.parse);
+        assert!(gated.skipped.is_some());
+    }
+
+    /// The same thing end to end: the importer is under the cap and the file it
+    /// imports is over it. The violation is the importer's, and it is reported
+    /// against the right silo pair.
+    #[cfg(feature = "tree-sitter-javascript")]
+    #[test]
+    fn a_gated_import_target_still_resolves_for_the_boundary_engine() {
+        let dir = tempdir();
+        let importer = b"import x from '../db/client';\n";
+        let imported = format!("// {}\nexport const x = 1;\n", "pad".repeat(64));
+        write(dir.path(), "src/api/handler.js", importer);
+        write(dir.path(), "src/db/client.js", imported.as_bytes());
+
+        let mut config = silo_config(SILOS);
+        config.limits.max_parse_bytes = 64;
+        // The importer is under the cap and its target is over it, so the old
+        // hole in the graph was the only thing this could be measuring.
+        assert!(importer.len() < 64);
+        assert!(imported.len() > 64);
+
+        let options = ScanOptions {
+            config: Some(&config),
+            ..ScanOptions::default()
+        };
+        let report = scan_opts(dir.path(), &boundary_rules(), &options, &mut |_| {}).unwrap();
+
+        assert_eq!(report.findings.len(), 1, "{:?}", report.findings);
+        assert!(report.graph.files.contains_key("src/db/client.js"));
+        assert!(report.skipped.is_empty(), "{:?}", report.skipped);
+        let finding = &report.findings[0];
+        assert_eq!(finding.rule_id, "arch.api-must-not-import-db");
+        assert_eq!(finding.path, "src/api/handler.js");
+        assert_eq!(
+            report.boundary_edges,
+            vec![(
+                "api".to_string(),
+                "db".to_string(),
+                finding.fingerprint.clone()
+            )]
+        );
+    }
+
+    #[cfg(feature = "tree-sitter-rust")]
+    #[test]
+    fn the_cap_decision_is_never_served_from_the_other_side_of_it() {
+        let dir = tempdir();
+        write(dir.path(), "src/a.rs", GATED_SOURCE.as_bytes());
+
+        let rules = ast_ruleset();
+        let cache = cache_for(dir.path(), &rules);
+        let json = |cap: u64, cache: Option<&crate::cache::Cache>| {
+            let config = limits_config(cap);
+            let options = ScanOptions {
+                cache,
+                config: Some(&config),
+                ..ScanOptions::default()
+            };
+            let report = run_with_workers(
+                dir.path(),
+                &rules,
+                &options,
+                None,
+                &Anchoring::default(),
+                &mut |_| {},
+                1,
+            );
+            crate::output::to_json(&report, &rules, crate::config::Anchor::ScanRoot)
+        };
+
+        let size = GATED_SOURCE.len() as u64;
+        // A generous cap fills the cache with a parsed entry; the tight cap
+        // that follows must not be handed that entry's ast finding.
+        let parsed = json(size, Some(&cache));
+        let gated = json(size - 1, Some(&cache));
+
+        assert!(parsed.contains("rust.dbg-macro"));
+        assert!(!gated.contains("rust.dbg-macro"), "{gated}");
+        assert_eq!(gated, json(size - 1, None), "the cache must not move it");
+        assert_eq!(parsed, json(size, None));
     }
 
     #[cfg(unix)]
@@ -2669,5 +3114,89 @@ rules:
         assert_eq!(report.findings[0].path, "ok.txt");
 
         fs::set_permissions(&locked, fs::Permissions::from_mode(0o644)).unwrap();
+    }
+
+    /// Valid syntax, past the regex size limit: `regex_syntax` accepts it at
+    /// load and the compile fails the first time a file makes the rule run.
+    const OVERSIZED_RULES: &str = concat!(
+        "version: 1\n",
+        "rules:\n",
+        "  - id: a.oversized\n",
+        "    severity: error\n",
+        "    message: m\n",
+        "    secret:\n",
+        "      pattern: 'needle-(?:[A-Za-z0-9]{1000}){1000}'\n",
+        "      keywords: ['needle-']\n",
+    );
+
+    fn oversized_ruleset() -> RuleSet {
+        RuleSet {
+            rules: load_str(OVERSIZED_RULES, "test").expect("an oversized pattern still loads"),
+            sources: vec![("test".to_string(), OVERSIZED_RULES.to_string())],
+        }
+    }
+
+    /// A rule that cannot be compiled reports nothing, and a scan that reports
+    /// nothing reads as a clean one. So the scan fails instead, and the failure
+    /// names the rule.
+    #[test]
+    fn a_rule_that_cannot_compile_fails_the_scan_rather_than_sitting_out() {
+        let dir = tempdir();
+        write(dir.path(), "a.txt", b"needle-abc\n");
+
+        let err = super::scan(dir.path(), &oversized_ruleset(), None)
+            .expect_err("an unusable rule must not be skipped");
+
+        assert!(err.contains("a.oversized"), "{err}");
+    }
+
+    /// A rule no file makes run never compiles, so it never fails. Laziness is
+    /// the point of the deferred compile and must survive the failure path.
+    #[test]
+    fn a_rule_that_never_runs_cannot_fail_the_scan() {
+        let dir = tempdir();
+        write(dir.path(), "a.txt", b"haystack\n");
+
+        let report = super::scan(dir.path(), &oversized_ruleset(), None)
+            .expect("a rule that never runs cannot fail");
+
+        assert!(report.findings.is_empty());
+    }
+
+    /// The workers race, so the failure a scan reports must be chosen by walk
+    /// order and not by whoever hit one first. Two files fail here; both worker
+    /// counts must name the same one.
+    #[test]
+    fn the_reported_failure_does_not_depend_on_the_worker_count() {
+        let dir = tempdir();
+        write(dir.path(), "a.txt", b"needle-first\n");
+        write(dir.path(), "b.txt", b"needle-second\n");
+
+        let rules = oversized_ruleset();
+        let options = ScanOptions::default();
+        let anchoring = &Anchoring::default();
+
+        let one = super::run_with_workers(
+            dir.path(),
+            &rules,
+            &options,
+            None,
+            anchoring,
+            &mut |_| {},
+            1,
+        )
+        .expect_err("the rule cannot compile");
+        let many = super::run_with_workers(
+            dir.path(),
+            &rules,
+            &options,
+            None,
+            anchoring,
+            &mut |_| {},
+            8,
+        )
+        .expect_err("the rule cannot compile");
+
+        assert_eq!(one, many);
     }
 }

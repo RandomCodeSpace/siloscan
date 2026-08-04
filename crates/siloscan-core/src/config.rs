@@ -23,6 +23,18 @@ const fn default_min_lines() -> usize {
     10
 }
 
+/// Largest file, in bytes, that is handed to a parser: 2 MiB.
+///
+/// Parsing costs memory in the tens of times the source size, so a generated
+/// bundle or a vendored blob can turn a scan into hundreds of megabytes of
+/// parser state for findings nobody reads. Above the cap a file still goes
+/// through every engine that works on text; only its tree is never built.
+pub const DEFAULT_MAX_PARSE_BYTES: u64 = 2 * 1024 * 1024;
+
+const fn default_max_parse_bytes() -> u64 {
+    DEFAULT_MAX_PARSE_BYTES
+}
+
 /// The directory every path a scan reports is relative to.
 ///
 /// One convention holds for a whole scan: fingerprints, displayed paths, JSON
@@ -64,6 +76,23 @@ impl Default for DuplicationConfig {
     }
 }
 
+/// Bounds on the work one file may cost.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LimitsConfig {
+    /// Files larger than this are never parsed. Measured on the file's bytes.
+    #[serde(default = "default_max_parse_bytes")]
+    pub max_parse_bytes: u64,
+}
+
+impl Default for LimitsConfig {
+    fn default() -> Self {
+        LimitsConfig {
+            max_parse_bytes: DEFAULT_MAX_PARSE_BYTES,
+        }
+    }
+}
+
 /// Repository configuration. Every section is optional; the default value is a
 /// config that changes nothing.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
@@ -91,6 +120,10 @@ pub struct Config {
     /// Duplication detection settings. Root-only key.
     #[serde(default)]
     pub duplication: DuplicationConfig,
+
+    /// Bounds on the work one file may cost. Root-only key.
+    #[serde(default)]
+    pub limits: LimitsConfig,
 
     /// The directory every reported path is relative to. Root-only key.
     #[serde(default)]
@@ -196,6 +229,16 @@ pub fn load(path: &Path) -> Result<Config, String> {
             "{}: duplication.min_lines must be at least 2, got {}",
             path.display(),
             config.duplication.min_lines
+        ));
+    }
+
+    // Zero would read as "no limit" to whoever wrote it and would mean "parse
+    // nothing" to the scanner, so it is refused rather than silently disabling
+    // every ast and boundary rule in the pack.
+    if config.limits.max_parse_bytes == 0 {
+        return Err(format!(
+            "{}: limits.max_parse_bytes must be at least 1, got 0",
+            path.display()
         ));
     }
 
@@ -698,6 +741,62 @@ alpha = ["src/**"]
         assert!(err.contains("1"), "{err}");
     }
 
+    #[test]
+    fn limits_absent_defaults_to_two_mib() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write(dir.path(), CONFIG_NAME, "");
+        let config = load(&path).expect("should load");
+        assert_eq!(config.limits.max_parse_bytes, 2_097_152);
+        assert_eq!(DEFAULT_MAX_PARSE_BYTES, 2_097_152);
+    }
+
+    #[test]
+    fn limits_explicit_value_parses() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write(
+            dir.path(),
+            CONFIG_NAME,
+            "[limits]\nmax_parse_bytes = 4096\n",
+        );
+        let config = load(&path).expect("should load");
+        assert_eq!(config.limits.max_parse_bytes, 4096);
+    }
+
+    #[test]
+    fn limits_max_parse_bytes_zero_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write(dir.path(), CONFIG_NAME, "[limits]\nmax_parse_bytes = 0\n");
+        let err = load(&path).unwrap_err();
+        assert!(err.contains("max_parse_bytes must be at least 1"), "{err}");
+        assert!(err.contains("0"), "{err}");
+    }
+
+    #[test]
+    fn limits_unknown_key_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write(
+            dir.path(),
+            CONFIG_NAME,
+            "[limits]\nmax_parse_bytes = 4096\nwrongkey = true\n",
+        );
+        let err = load(&path).unwrap_err();
+        assert!(err.contains("unknown field"), "{err}");
+    }
+
+    #[test]
+    fn limits_rejects_a_negative_or_fractional_value() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write(dir.path(), CONFIG_NAME, "[limits]\nmax_parse_bytes = -1\n");
+        assert!(load(&path).is_err());
+
+        let path = write(
+            dir.path(),
+            "other.toml",
+            "[limits]\nmax_parse_bytes = 1.5\n",
+        );
+        assert!(load(&path).is_err());
+    }
+
     /// Root config plus a module config two directories down.
     fn with_include(dir: &Path, root_body: &str, module_body: &str) -> PathBuf {
         fs::create_dir_all(dir.join("modules/api")).unwrap();
@@ -786,6 +885,7 @@ api = ["src/a\\[0\\].rs"]
         for (key, body) in [
             ("anchor", "anchor = \"config\"\n"),
             ("duplication", "[duplication]\nmin_lines = 4\n"),
+            ("limits", "[limits]\nmax_parse_bytes = 4096\n"),
             ("languages", "[languages]\nmjs = \"javascript\"\n"),
         ] {
             let dir = tempfile::tempdir().unwrap();

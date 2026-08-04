@@ -24,6 +24,15 @@
 //! are dropped, and a CPD-style rolling window of `min_lines` normalized lines
 //! is grouped across the whole scanned set. Matches are extended to their
 //! maximal common length and reported as longest non-overlapping blocks.
+//!
+//! [`detect_duplication`] takes every file's contents at once, so its peak
+//! memory is proportional to the total text scanned. The per-file size cap
+//! (`[limits] max_parse_bytes`) gates parsing, not reading: a file above it is
+//! still measured and still compared here. What it bounds is tree-sitter, which
+//! is where a large file actually costs, and the file is reported as skipped so
+//! the ast findings it did not produce are not read as absence. Graph edges are
+//! not among them: a loaded boundary rule parses past the cap, because a hole in
+//! the import graph changes results for files nowhere near it.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::Write as _;

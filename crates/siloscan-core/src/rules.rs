@@ -247,6 +247,22 @@ pub struct CompiledRule {
     pub payload: CompiledPayload,
 }
 
+/// A deferred pattern that passed load-time validation but could not be
+/// compiled when the rule first had to match.
+///
+/// This is a scan error, not a load error: it is raised from the engine that
+/// asked for the regex, and it aborts the scan rather than dropping the rule.
+/// A disabled secret rule reports nothing, and a scan that reports nothing is
+/// indistinguishable from a clean one, so there is no safe way to continue.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("rule {rule_id}: regex compile failed at first use: {detail}")]
+pub struct RegexCompileError {
+    /// Id of the rule the pattern belongs to.
+    pub rule_id: String,
+    /// The `regex` crate's error, prefixed by the pattern's context.
+    pub detail: String,
+}
+
 /// A secret rule's pattern: source text plus the regex it compiles to, built on
 /// first use.
 ///
@@ -260,21 +276,38 @@ pub struct CompiledRule {
 /// Trade-off: syntax errors and out-of-range capture groups still fail the load
 /// with the same errors and the same messages as an eager compile. The one
 /// class that moves is `CompiledTooBig`: a syntactically valid pattern whose
-/// compiled program exceeds the regex size limit is now discovered at first
-/// use, where there is no error channel, so the rule is skipped for the rest of
-/// the run instead of failing the load. Only the compile step is deferred;
-/// nothing about the pattern's meaning changes.
+/// compiled program exceeds the regex size limit is discovered at first use
+/// instead of at load. It is still reported - `get` hands the caller a
+/// `RegexCompileError` naming the rule, which the engine turns into a failed
+/// scan. Only when the failure is raised moves; a bad pattern never silently
+/// disables its rule, and nothing about a pattern's meaning changes.
+///
+/// The outcome is memoized either way, so a pattern is compiled at most once
+/// per rule and every later call reports the identical error.
+///
+/// Every field here is carried by each of the pack's ~200 rules and sits inside
+/// `CompiledPayload`, so the identity is stored as narrowly as it can be: a
+/// boxed id, a static context, and a boxed error that only exists on the
+/// failure path.
 pub struct LazyRegex {
+    /// Rule this pattern belongs to, named in a compile failure.
+    rule_id: Box<str>,
+    /// Prefix for a compile failure's detail, e.g. `"allowlist: "`.
+    context: &'static str,
     pattern: String,
-    /// `None` records a failed compile so it is attempted once, not per file.
-    compiled: OnceLock<Option<Regex>>,
+    /// Records the outcome, failure included, so a pattern is attempted once
+    /// rather than per file.
+    compiled: OnceLock<Result<Regex, Box<RegexCompileError>>>,
 }
 
 impl LazyRegex {
     /// Wraps a pattern whose syntax has already been validated. Callers that
-    /// skip validation only move the failure to first use, where it is silent.
-    pub fn new(pattern: String) -> Self {
+    /// skip validation only move the failure to first use, where it surfaces as
+    /// a `RegexCompileError` instead of a `LoadError`.
+    pub fn new(rule_id: &str, context: &'static str, pattern: String) -> Self {
         LazyRegex {
+            rule_id: rule_id.into(),
+            context,
             pattern,
             compiled: OnceLock::new(),
         }
@@ -284,15 +317,25 @@ impl LazyRegex {
         &self.pattern
     }
 
-    /// The compiled regex, building it on first call. `None` means the pattern
-    /// parses but cannot be compiled within the regex size limit.
-    pub fn get(&self) -> Option<&Regex> {
-        self.compiled
-            .get_or_init(|| Regex::new(&self.pattern).ok())
-            .as_ref()
+    /// The compiled regex, building it on first call. `Err` means the pattern
+    /// parses but cannot be compiled - in practice, not within the regex size
+    /// limit - and the caller must fail rather than skip the rule.
+    pub fn get(&self) -> Result<&Regex, &RegexCompileError> {
+        match self.compiled.get_or_init(|| {
+            Regex::new(&self.pattern).map_err(|e| {
+                Box::new(RegexCompileError {
+                    rule_id: self.rule_id.to_string(),
+                    detail: format!("{}{e}", self.context),
+                })
+            })
+        }) {
+            Ok(regex) => Ok(regex),
+            Err(error) => Err(error),
+        }
     }
 
-    /// Whether the regex has been built yet. Load must leave this `false`.
+    /// Whether the compile has been attempted yet. Load must leave this
+    /// `false`.
     pub fn is_compiled(&self) -> bool {
         self.compiled.get().is_some()
     }
@@ -301,10 +344,12 @@ impl LazyRegex {
 impl Clone for LazyRegex {
     fn clone(&self) -> Self {
         let compiled = OnceLock::new();
-        if let Some(regex) = self.compiled.get() {
-            let _ = compiled.set(regex.clone());
+        if let Some(outcome) = self.compiled.get() {
+            let _ = compiled.set(outcome.clone());
         }
         LazyRegex {
+            rule_id: self.rule_id.clone(),
+            context: self.context,
             pattern: self.pattern.clone(),
             compiled,
         }
@@ -314,6 +359,7 @@ impl Clone for LazyRegex {
 impl fmt::Debug for LazyRegex {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("LazyRegex")
+            .field("rule_id", &self.rule_id)
             .field("pattern", &self.pattern)
             .field("compiled", &self.is_compiled())
             .finish()
@@ -844,13 +890,14 @@ fn compile_pattern(id: &str, pattern: &str, origin: &str) -> Result<Regex, LoadE
 /// default configuration, so every error it reports - and the message it
 /// reports it with - is the one an eager compile would have produced. The HIR
 /// also carries the exact capture count, so the group check is unchanged.
-/// `context` prefixes the error detail, e.g. `"allowlist: "`.
+/// `context` prefixes the error detail, e.g. `"allowlist: "`, both here and in
+/// the compile error the returned `LazyRegex` may raise later.
 fn lazy_pattern(
     id: &str,
     pattern: String,
     group: Option<usize>,
     origin: &str,
-    context: &str,
+    context: &'static str,
 ) -> Result<LazyRegex, LoadError> {
     let hir = regex_syntax::Parser::new()
         .parse(&pattern)
@@ -863,7 +910,7 @@ fn lazy_pattern(
     let captures_len = hir.properties().explicit_captures_len() + 1;
     check_group_count(id, captures_len, group, origin)?;
 
-    Ok(LazyRegex::new(pattern))
+    Ok(LazyRegex::new(id, context, pattern))
 }
 
 fn check_group(
@@ -999,7 +1046,12 @@ rules:
                 allow_paths,
                 stopwords,
             } => {
-                assert!(pattern.get().unwrap().is_match("AKIAIOSFODNN7EXAMPLE"));
+                assert!(
+                    pattern
+                        .get()
+                        .expect("compiles")
+                        .is_match("AKIAIOSFODNN7EXAMPLE")
+                );
                 assert_eq!(*group, Some(1));
                 assert_eq!(*entropy, Some(3.5));
                 assert_eq!(keywords, &["akia".to_string(), "aws".to_string()]);
@@ -1007,7 +1059,7 @@ rules:
                 assert!(
                     allow_patterns[0]
                         .get()
-                        .unwrap()
+                        .expect("compiles")
                         .is_match("AKIAIOSFODNN7EXAMPLE")
                 );
                 assert!(allow_paths.as_ref().unwrap().is_match("src/testdata/a.tf"));
@@ -1076,27 +1128,122 @@ rules:
         assert!(!allow[0].is_compiled(), "load must not compile allowlist");
 
         // A file the keyword prefilter rejects still must not compile it.
-        assert!(crate::engines::secret::scan_file(&rules, "f.txt", None, "haystack\n").is_empty());
+        let none = crate::engines::secret::scan_file(&rules, "f.txt", None, "haystack\n")
+            .expect("no rule ran");
+        assert!(none.is_empty());
         let (pattern, _) = secret_payload(&rules[0]);
         assert!(!pattern.is_compiled(), "a filtered rule must not compile");
 
         // Only a rule that actually has to match pays for its pattern.
         let hit = format!("needle-{}\n", "Aa1Bb2Cc3D".repeat(25));
-        let found = crate::engines::secret::scan_file(&rules, "f.txt", None, &hit);
+        let found =
+            crate::engines::secret::scan_file(&rules, "f.txt", None, &hit).expect("compiles");
         assert_eq!(found.len(), 1);
         let (pattern, allow) = secret_payload(&rules[0]);
         assert!(pattern.is_compiled());
         assert!(allow[0].is_compiled(), "a match consults the allowlist");
     }
 
+    /// Valid syntax, but the compiled program is far past the regex size limit.
+    /// `regex_syntax` accepts it, so it survives load and only fails when a rule
+    /// actually needs it.
+    const OVERSIZED: &str = r"needle-(?:[A-Za-z0-9]{1000}){1000}";
+
+    fn oversized_rules() -> Vec<CompiledRule> {
+        let src = format!(
+            "version: 1\nrules:\n  - id: a.b\n    severity: info\n    message: m\n    secret:\n      pattern: '{OVERSIZED}'\n      keywords: ['needle-']\n"
+        );
+        load_str(&src, "test").expect("an oversized pattern still loads")
+    }
+
+    #[test]
+    fn oversized_pattern_loads_and_fails_at_first_use() {
+        // The eager path rejects it outright; the deferred path must not lose
+        // that rejection, only move it.
+        assert!(Regex::new(OVERSIZED).is_err());
+
+        let rules = oversized_rules();
+        let (pattern, _) = secret_payload(&rules[0]);
+        assert!(!pattern.is_compiled(), "load must not compile the pattern");
+
+        let err = pattern.get().expect_err("oversized pattern cannot compile");
+        assert_eq!(err.rule_id, "a.b");
+        assert_eq!(
+            err.detail,
+            Regex::new(OVERSIZED).unwrap_err().to_string(),
+            "the detail must be the error an eager compile reports"
+        );
+        assert!(
+            err.to_string().contains("a.b"),
+            "the message must name the rule: {err}"
+        );
+    }
+
+    #[test]
+    fn a_compile_failure_is_memoized_and_repeats_identically() {
+        let rules = oversized_rules();
+        let (pattern, _) = secret_payload(&rules[0]);
+
+        let first = pattern.get().expect_err("first use fails").clone();
+        assert!(pattern.is_compiled(), "the outcome is recorded");
+        let second = pattern.get().expect_err("later uses fail the same way");
+        assert_eq!(&first, second);
+
+        // A clone carries the recorded failure rather than retrying it.
+        let clone = pattern.clone();
+        assert!(clone.is_compiled());
+        assert_eq!(clone.get().expect_err("clone fails too"), &first);
+    }
+
+    #[test]
+    fn an_allowlist_compile_failure_names_the_rule_and_its_context() {
+        let src = format!(
+            "version: 1\nrules:\n  - id: a.b\n    severity: info\n    message: m\n    secret:\n      pattern: 'needle-[a-z]+'\n      allowlist:\n        patterns: ['{OVERSIZED}']\n"
+        );
+        let rules = load_str(&src, "test").expect("should load");
+        let (_, allow) = secret_payload(&rules[0]);
+
+        let err = allow[0].get().expect_err("oversized allowlist pattern");
+        assert_eq!(err.rule_id, "a.b");
+        assert!(
+            err.detail.starts_with("allowlist: "),
+            "the detail must say which pattern failed: {}",
+            err.detail
+        );
+    }
+
+    #[test]
+    fn an_oversized_rule_fails_the_scan_when_its_keywords_match() {
+        let rules = oversized_rules();
+
+        // No keyword in the file: the rule never runs, so it never compiles and
+        // the scan is clean. Laziness is the point and must survive the fix.
+        let clean = crate::engines::secret::scan_file(&rules, "f.txt", None, "haystack\n")
+            .expect("a rule that never runs cannot fail");
+        assert!(clean.is_empty());
+        let (pattern, _) = secret_payload(&rules[0]);
+        assert!(!pattern.is_compiled());
+
+        // Keyword present: the rule has to match, cannot compile, and the scan
+        // fails instead of quietly reporting nothing.
+        let err = crate::engines::secret::scan_file(&rules, "f.txt", None, "needle-abc\n")
+            .expect_err("an unusable rule must not be skipped");
+        assert_eq!(err.rule_id, "a.b");
+
+        // Same input, same error: the failure does not depend on run order.
+        let again = crate::engines::secret::scan_file(&rules, "f.txt", None, "needle-abc\n")
+            .expect_err("still fails");
+        assert_eq!(err, again);
+    }
+
     #[test]
     fn lazy_regex_clone_keeps_the_compiled_state() {
-        let lazy = LazyRegex::new("a+".to_string());
+        let lazy = LazyRegex::new("a.b", "", "a+".to_string());
         assert!(!lazy.clone().is_compiled());
-        assert!(lazy.get().unwrap().is_match("aaa"));
+        assert!(lazy.get().expect("compiles").is_match("aaa"));
         let clone = lazy.clone();
         assert!(clone.is_compiled());
-        assert!(clone.get().unwrap().is_match("aaa"));
+        assert!(clone.get().expect("compiles").is_match("aaa"));
     }
 
     #[test]

@@ -51,9 +51,9 @@ mod tests {
 
     /// Deferring the compile moves one failure class out of load: a pattern that
     /// parses but whose program exceeds the regex size limit is discovered at
-    /// first use, where there is no error channel, so the rule would silently
-    /// sit out and quietly cost findings. Nothing in the shipped pack may be in
-    /// that class - every pattern has to actually build.
+    /// first use, where it fails the scan instead of the load. Nothing in the
+    /// shipped pack may be in that class - every pattern has to actually build,
+    /// or a repository holding the right keyword cannot be scanned at all.
     #[test]
     fn every_default_pack_pattern_compiles() {
         use crate::rules::CompiledPayload;
@@ -70,14 +70,14 @@ mod tests {
                 panic!("the default pack is secret rules only: {}", rule.id);
             };
             assert!(
-                pattern.get().is_some(),
+                pattern.get().is_ok(),
                 "{} does not compile: {}",
                 rule.id,
                 pattern.pattern()
             );
             for allow in allow_patterns {
                 assert!(
-                    allow.get().is_some(),
+                    allow.get().is_ok(),
                     "{} allowlist does not compile: {}",
                     rule.id,
                     allow.pattern()

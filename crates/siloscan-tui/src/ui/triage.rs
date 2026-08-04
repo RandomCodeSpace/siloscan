@@ -21,6 +21,7 @@ use ratatui::widgets::{Paragraph, Row, Table};
 
 use siloscan_core::findings::Finding;
 use siloscan_core::metrics::DUPLICATE_BLOCK_RULE_ID;
+use siloscan_core::output::REDACTED_MATCH;
 use siloscan_core::rules::Severity;
 
 use crate::state::{AppState, Filters, Pane, Screen, Status};
@@ -930,7 +931,7 @@ fn code_lines(source: &str, finding: &Finding, height: usize, scroll: usize) -> 
             let (before, matched, after) = split_span(
                 text,
                 finding.column.max(1) as usize - 1,
-                finding.matched.len(),
+                highlight_len(finding),
             );
             // The finding line is drawn in its severity color; the matched span
             // inverts that color instead of inverting the terminal default, so
@@ -951,6 +952,19 @@ fn code_lines(source: &str, finding: &Finding, height: usize, scroll: usize) -> 
         }
     }
     lines
+}
+
+/// Bytes of the source line the finding's match covers.
+///
+/// A JSON report redacts a secret finding's `matched`, so its length describes
+/// the placeholder and not the credential. Highlighting that many bytes would
+/// mark the wrong span, so a redacted finding highlights nothing and the line
+/// carries its severity color alone; the column still points at the match.
+fn highlight_len(finding: &Finding) -> usize {
+    match finding.matched == REDACTED_MATCH {
+        true => 0,
+        false => finding.matched.len(),
+    }
 }
 
 /// Split `text` at a byte offset and length, snapped to char boundaries.
@@ -1633,6 +1647,26 @@ mod tests {
         // Gutter, before, matched, after.
         assert_eq!(lines[5].spans.len(), 4);
         assert_eq!(lines[5].spans[2].content, "20");
+    }
+
+    #[test]
+    fn a_redacted_match_highlights_nothing_rather_than_the_wrong_span() {
+        let source = "let token = \"hunter2\";\n";
+        let mut finding = finding("secret.token", Severity::Error, "a.rs", 1, "m");
+        finding.column = 14;
+        finding.matched = REDACTED_MATCH.to_string();
+
+        let lines = code_lines(source, &finding, 1, 0);
+        // The placeholder is 10 bytes; highlighting them would mark
+        // `hunter2";` and part of nothing at all.
+        assert!(lines[0].spans[2].content.is_empty());
+        assert_eq!(
+            format!(
+                "{}{}{}",
+                lines[0].spans[1].content, lines[0].spans[2].content, lines[0].spans[3].content
+            ),
+            source.trim_end()
+        );
     }
 
     #[test]
