@@ -14,15 +14,16 @@ use std::path::Path;
 use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Paragraph, Row, Table};
+use ratatui::widgets::{Paragraph, Row, Table};
 
 use siloscan_core::findings::Finding;
 use siloscan_core::rules::Severity;
 
 use crate::state::{AppState, Pane, Status};
 use crate::ui::LayoutMap;
+use crate::ui::theme;
 
 const SIDEBAR_WIDTH: u16 = 24;
 /// Below this width the sidebar is dropped whatever the collapse flag says.
@@ -32,6 +33,15 @@ const STACK_COLS: u16 = 120;
 const TOP_RULES: usize = 8;
 const WHEEL_LINES: isize = 3;
 const PAGE_ROWS: usize = 10;
+
+/// Findings table geometry. Status and severity are fixed; the rule column is
+/// sized to the ids it has to show; path and message share what is left.
+const STATUS_W: u16 = 4;
+const SEVERITY_W: u16 = 4;
+const RULE_MAX_W: u16 = 24;
+const MIN_TEXT_W: u16 = 20;
+/// One space between each of the five columns.
+const COLUMN_GAPS: u16 = 4;
 
 /// View order of the findings table. Purely a permutation of the visible rows;
 /// `AppState::rows` stays in canonical order.
@@ -87,17 +97,6 @@ pub enum Chip {
     Severity(Severity),
     Status(Status),
     Rule(String),
-}
-
-/// One rendered sidebar row.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SidebarLine {
-    Header(&'static str),
-    Chip {
-        chip: Chip,
-        label: String,
-        active: bool,
-    },
 }
 
 /// Clickable rectangles of the last rendered frame.
@@ -185,51 +184,6 @@ pub fn section_chips(state: &AppState, section: Section) -> Vec<Chip> {
     }
 }
 
-/// Every sidebar row: section headers interleaved with their chips.
-pub fn sidebar_lines(state: &AppState) -> Vec<SidebarLine> {
-    let mut lines = vec![SidebarLine::Header("Severity")];
-    for (severity, count) in state.counts_by_severity() {
-        let active = state.filters.severities.contains(&severity);
-        lines.push(SidebarLine::Chip {
-            label: chip_label(active, severity.as_str(), count),
-            chip: Chip::Severity(severity),
-            active,
-        });
-    }
-
-    lines.push(SidebarLine::Header("Status"));
-    let (new, baselined, suppressed) = state.debt_counts();
-    for (status, count) in [
-        (Status::New, new),
-        (Status::Baselined, baselined),
-        (Status::Suppressed, suppressed),
-    ] {
-        let active = state.filters.statuses.contains(&status);
-        lines.push(SidebarLine::Chip {
-            label: chip_label(active, status.as_str(), count),
-            chip: Chip::Status(status),
-            active,
-        });
-    }
-
-    lines.push(SidebarLine::Header("Top rules"));
-    for (rule, count) in state.top_rules(TOP_RULES) {
-        let active = state.filters.rules.contains(&rule);
-        lines.push(SidebarLine::Chip {
-            label: chip_label(active, &rule, count),
-            chip: Chip::Rule(rule),
-            active,
-        });
-    }
-
-    lines
-}
-
-fn chip_label(active: bool, name: &str, count: usize) -> String {
-    let marker = if active { 'x' } else { ' ' };
-    format!("[{marker}] {name} {count}")
-}
-
 fn focused_chip(state: &AppState, view: TriageView) -> Option<Chip> {
     section_chips(state, view.focus)
         .into_iter()
@@ -280,6 +234,67 @@ pub fn draw_triage(frame: &mut Frame, area: Rect, state: &AppState, layout: &mut
     layout.code = Some(code_area);
 }
 
+/// One chip as the sidebar renders it: marker, name and count are styled
+/// apart, so they are kept apart here too.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SectionRow {
+    chip: Chip,
+    name: String,
+    count: usize,
+    active: bool,
+}
+
+/// Title and rows of one sidebar section.
+fn section_rows(state: &AppState, section: Section) -> (&'static str, Vec<SectionRow>) {
+    match section {
+        Section::Severity => (
+            "Severity",
+            state
+                .counts_by_severity()
+                .into_iter()
+                .map(|(severity, count)| SectionRow {
+                    chip: Chip::Severity(severity),
+                    name: severity.as_str().to_string(),
+                    count,
+                    active: state.filters.severities.contains(&severity),
+                })
+                .collect(),
+        ),
+        Section::Status => {
+            let (new, baselined, suppressed) = state.debt_counts();
+            (
+                "Status",
+                [
+                    (Status::New, new),
+                    (Status::Baselined, baselined),
+                    (Status::Suppressed, suppressed),
+                ]
+                .into_iter()
+                .map(|(status, count)| SectionRow {
+                    chip: Chip::Status(status),
+                    name: status.as_str().to_string(),
+                    count,
+                    active: state.filters.statuses.contains(&status),
+                })
+                .collect(),
+            )
+        }
+        Section::Rules => (
+            "Top rules",
+            state
+                .top_rules(TOP_RULES)
+                .into_iter()
+                .map(|(rule, count)| SectionRow {
+                    active: state.filters.rules.contains(&rule),
+                    name: rule.clone(),
+                    chip: Chip::Rule(rule),
+                    count,
+                })
+                .collect(),
+        ),
+    }
+}
+
 fn draw_sidebar(
     frame: &mut Frame,
     state: &AppState,
@@ -287,49 +302,93 @@ fn draw_sidebar(
     view: TriageView,
     hits: &mut Hits,
 ) {
-    let block = Block::bordered().title(" filters ");
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-    if inner.width == 0 || inner.height == 0 {
-        return;
-    }
-
-    let lines = sidebar_lines(state);
-    let focused = focused_chip(state, view);
-    let start = state
-        .scroll
-        .sidebar
-        .min(lines.len().saturating_sub(inner.height as usize));
-
-    for (offset, line) in lines
+    let sections = [Section::Severity, Section::Status, Section::Rules];
+    let rows: Vec<(&'static str, Vec<SectionRow>)> = sections
         .iter()
-        .skip(start)
-        .take(inner.height as usize)
-        .enumerate()
+        .map(|section| section_rows(state, *section))
+        .collect();
+
+    // The first two sections are fixed lists; the rules section takes the rest
+    // and is the only one that ever needs scrolling.
+    let areas = Layout::vertical([
+        Constraint::Length(rows[0].1.len() as u16 + 2),
+        Constraint::Length(rows[1].1.len() as u16 + 2),
+        Constraint::Min(3),
+    ])
+    .split(area);
+
+    let focused = focused_chip(state, view);
+    for ((section, (title, chips)), rect) in sections.into_iter().zip(rows.iter()).zip(areas.iter())
     {
-        let rect = Rect::new(inner.x, inner.y + offset as u16, inner.width, 1);
-        match line {
-            SidebarLine::Header(name) => {
-                let style = Style::default().add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
-                frame.render_widget(Paragraph::new(Line::styled(*name, style)), rect);
-            }
-            SidebarLine::Chip {
-                chip,
-                label,
-                active,
-            } => {
-                let mut style = Style::default();
-                if *active {
-                    style = style.fg(Color::Green).add_modifier(Modifier::BOLD);
-                }
-                if focused.as_ref() == Some(chip) {
-                    style = style.add_modifier(Modifier::REVERSED);
-                }
-                frame.render_widget(Paragraph::new(Line::styled(label.clone(), style)), rect);
-                hits.chips.push((chip.clone(), rect));
-            }
+        let block = theme::pane_block(title, view.focus == section);
+        let inner = block.inner(*rect);
+        frame.render_widget(block, *rect);
+        if inner.width == 0 || inner.height == 0 {
+            continue;
+        }
+
+        let start = if section == Section::Rules {
+            state
+                .scroll
+                .sidebar
+                .min(chips.len().saturating_sub(inner.height as usize))
+        } else {
+            0
+        };
+
+        for (offset, chip) in chips
+            .iter()
+            .skip(start)
+            .take(inner.height as usize)
+            .enumerate()
+        {
+            let row = Rect::new(inner.x, inner.y + offset as u16, inner.width, 1);
+            let line = chip_line(chip, inner.width);
+            let paragraph = if focused.as_ref() == Some(&chip.chip) {
+                Paragraph::new(line).style(Style::default().add_modifier(Modifier::REVERSED))
+            } else {
+                Paragraph::new(line)
+            };
+            frame.render_widget(paragraph, row);
+            hits.chips.push((chip.chip.clone(), row));
         }
     }
+}
+
+/// `[x] name          count`: marker and count carry the styling, the name
+/// carries the text.
+fn chip_line(chip: &SectionRow, width: u16) -> Line<'static> {
+    let marker = if chip.active {
+        Span::styled(
+            "[x]",
+            Style::default()
+                .fg(theme::ACCENT)
+                .add_modifier(Modifier::BOLD),
+        )
+    } else {
+        Span::styled("[ ]", Style::default().fg(theme::DIM))
+    };
+
+    let count = chip.count.to_string();
+    let room = (width as usize).saturating_sub(4 + count.len());
+    let name = tail_truncate(&chip.name, room);
+    let pad = room.saturating_sub(name.chars().count());
+
+    let name_style = if chip.active {
+        Style::default()
+            .fg(theme::ACCENT)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+    };
+
+    Line::from(vec![
+        marker,
+        Span::raw(" "),
+        Span::styled(name, name_style),
+        Span::raw(" ".repeat(pad)),
+        Span::styled(count, Style::default().fg(theme::DIM)),
+    ])
 }
 
 fn draw_table(frame: &mut Frame, state: &AppState, area: Rect, view: TriageView, hits: &mut Hits) {
@@ -345,7 +404,12 @@ fn draw_table(frame: &mut Frame, state: &AppState, area: Rect, view: TriageView,
     if let Some(input_area) = input_area {
         let caret = if state.input_mode { "_" } else { "" };
         let spans = vec![
-            Span::styled("/", Style::default().fg(Color::Cyan)),
+            Span::styled(
+                "/",
+                Style::default()
+                    .fg(theme::ACCENT)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::raw(state.filters.text.clone()),
             Span::styled(caret, Style::default().add_modifier(Modifier::REVERSED)),
         ];
@@ -358,7 +422,7 @@ fn draw_table(frame: &mut Frame, state: &AppState, area: Rect, view: TriageView,
         state.rows.len(),
         view.sort.as_str()
     );
-    let block = Block::bordered().title(title);
+    let block = theme::pane_block(&title, true);
     let inner = block.inner(list_area);
     frame.render_widget(block, list_area);
     if inner.width == 0 || inner.height < 2 {
@@ -377,6 +441,7 @@ fn draw_table(frame: &mut Frame, state: &AppState, area: Rect, view: TriageView,
     // Draw does not mutate state; the handlers clamp with the same rule.
     let start = clamp_scroll(state.scroll.table, order.len(), height);
 
+    let widths = column_widths(inner.width, rule_width(state, &visible));
     let rows: Vec<Row> = order
         .iter()
         .skip(start)
@@ -386,39 +451,110 @@ fn draw_table(frame: &mut Frame, state: &AppState, area: Rect, view: TriageView,
             let row = &state.rows[visible[position]];
             let finding = &row.finding;
             let cells = vec![
-                Span::raw(status_label(row.status).to_string()),
-                Span::styled(
-                    severity_label(finding.severity).to_string(),
-                    Style::default().fg(severity_color(finding.severity)),
-                ),
-                Span::raw(format!("{}:{}", finding.path, finding.line)),
-                Span::raw(finding.rule_id.clone()),
-                Span::raw(finding.message.clone()),
+                Span::styled(status_label(row.status), theme::dim()),
+                theme::severity_span(finding.severity),
+                // The tail of a path carries the file name, so it is the end
+                // that has to survive the truncation.
+                Span::raw(middle_truncate(
+                    &format!("{}:{}", finding.path, finding.line),
+                    widths[2] as usize,
+                )),
+                Span::raw(tail_truncate(&finding.rule_id, widths[3] as usize)),
+                Span::raw(tail_truncate(&finding.message, widths[4] as usize)),
             ];
             let table_row = Row::new(cells);
             if start + offset == selected_display {
-                table_row.style(Style::default().add_modifier(Modifier::REVERSED))
+                table_row.style(theme::selected())
             } else {
                 table_row
             }
         })
         .collect();
 
-    let widths = [
-        Constraint::Length(4),
-        Constraint::Length(4),
-        Constraint::Fill(3),
-        Constraint::Fill(2),
-        Constraint::Fill(5),
-    ];
-    let header = Row::new(vec!["St", "Sev", "Path:Line", "Rule", "Message"])
-        .style(Style::default().add_modifier(Modifier::BOLD | Modifier::UNDERLINED));
-    let table = Table::new(rows, widths).header(header).column_spacing(1);
+    let header = Row::new(vec!["St", "Sev", "Path:Line", "Rule", "Message"]).style(
+        Style::default()
+            .fg(theme::ACCENT)
+            .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+    );
+    let table = Table::new(rows, widths.map(Constraint::Length))
+        .header(header)
+        .column_spacing(1);
     frame.render_widget(table, inner);
 
     if order.is_empty() {
-        frame.render_widget(Paragraph::new("no findings match the filters"), rows_rect);
+        frame.render_widget(Paragraph::new(empty_table_hint(state)), rows_rect);
     }
+}
+
+/// Guidance for an empty table: what to do next depends on why it is empty.
+fn empty_table_hint(state: &AppState) -> Vec<Line<'static>> {
+    let lines = if state.rows.is_empty() {
+        vec![
+            "no findings loaded".to_string(),
+            "press r to rescan the tree".to_string(),
+        ]
+    } else {
+        vec![
+            "no findings match the filters".to_string(),
+            "press esc to clear them, / to search".to_string(),
+        ]
+    };
+    lines
+        .into_iter()
+        .map(|line| Line::styled(line, theme::dim()))
+        .collect()
+}
+
+/// Widest rule id on screen, bounded so one long id cannot starve the message
+/// column.
+fn rule_width(state: &AppState, visible: &[usize]) -> u16 {
+    let longest = visible
+        .iter()
+        .map(|index| state.rows[*index].finding.rule_id.chars().count())
+        .max()
+        .unwrap_or(0);
+    (longest as u16).clamp(4, RULE_MAX_W)
+}
+
+/// Column widths across `total`, gaps included. Path and message split what the
+/// fixed columns leave, message taking the larger share.
+fn column_widths(total: u16, rule_w: u16) -> [u16; 5] {
+    let rest = total.saturating_sub(STATUS_W + SEVERITY_W + rule_w + COLUMN_GAPS);
+    let path = if rest >= 2 * MIN_TEXT_W {
+        ((rest as u32 * 2 / 5) as u16).max(MIN_TEXT_W)
+    } else {
+        rest / 2
+    };
+    [STATUS_W, SEVERITY_W, path, rule_w, rest - path]
+}
+
+/// Truncate the middle, keeping the tail: `core/.../app.js:1`.
+fn middle_truncate(text: &str, width: usize) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    if chars.len() <= width {
+        return text.to_string();
+    }
+    if width <= 3 {
+        return chars[chars.len() - width..].iter().collect();
+    }
+    let tail_len = (width - 3) * 2 / 3;
+    let head_len = width - 3 - tail_len;
+    let head: String = chars[..head_len].iter().collect();
+    let tail: String = chars[chars.len() - tail_len..].iter().collect();
+    format!("{head}...{tail}")
+}
+
+/// Truncate the tail, marking the cut with an ellipsis.
+fn tail_truncate(text: &str, width: usize) -> String {
+    let count = text.chars().count();
+    if count <= width {
+        return text.to_string();
+    }
+    if width <= 3 {
+        return text.chars().take(width).collect();
+    }
+    let kept: String = text.chars().take(width - 3).collect();
+    format!("{kept}...")
 }
 
 fn clamp_scroll(offset: usize, rows: usize, height: usize) -> usize {
@@ -431,7 +567,8 @@ fn draw_code(frame: &mut Frame, state: &AppState, area: Rect) {
         Some(row) => format!(" {}:{} ", row.finding.path, row.finding.line),
         None => " code ".to_string(),
     };
-    let block = Block::bordered().title(title);
+    // A pane showing a file gets the accent title; an empty one recedes.
+    let block = theme::pane_block(&title, selected.is_some());
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.width == 0 || inner.height == 0 {
@@ -439,7 +576,11 @@ fn draw_code(frame: &mut Frame, state: &AppState, area: Rect) {
     }
 
     let Some(row) = selected else {
-        frame.render_widget(Paragraph::new("no finding selected"), inner);
+        let hint = vec![
+            Line::styled("no finding selected", theme::dim()),
+            Line::styled("pick a row with j/k or the mouse", theme::dim()),
+        ];
+        frame.render_widget(Paragraph::new(hint), inner);
         return;
     };
 
@@ -487,27 +628,26 @@ fn code_lines(source: &str, finding: &Finding, height: usize, scroll: usize) -> 
     for (offset, text) in all[start..end].iter().enumerate() {
         let number = start + offset + 1;
         let text = *text;
-        let gutter = Span::styled(
-            format!("{number:>5} "),
-            Style::default().fg(Color::DarkGray),
-        );
+        let gutter = Span::styled(format!("{number:>5} "), theme::dim());
         if number as u64 == finding.line {
             let (before, matched, after) = split_span(
                 text,
                 finding.column.max(1) as usize - 1,
                 finding.matched.len(),
             );
-            let highlight = Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD);
+            // The finding line is drawn in its severity color; the matched span
+            // inverts that color instead of inverting the terminal default, so
+            // the severity stays readable inside the highlight.
+            let color = theme::severity_color(finding.severity);
+            let context = Style::default().fg(color);
             lines.push(Line::from(vec![
                 gutter,
-                Span::styled(before.to_string(), highlight),
+                Span::styled(before.to_string(), context),
                 Span::styled(
                     matched.to_string(),
-                    Style::default().add_modifier(Modifier::REVERSED),
+                    context.add_modifier(Modifier::REVERSED | Modifier::BOLD),
                 ),
-                Span::styled(after.to_string(), highlight),
+                Span::styled(after.to_string(), context),
             ]));
         } else {
             lines.push(Line::from(vec![gutter, Span::raw(text.to_string())]));
@@ -535,22 +675,6 @@ fn status_label(status: Status) -> &'static str {
         Status::New => "new",
         Status::Baselined => "base",
         Status::Suppressed => "supp",
-    }
-}
-
-fn severity_label(severity: Severity) -> &'static str {
-    match severity {
-        Severity::Error => "err",
-        Severity::Warning => "warn",
-        Severity::Info => "info",
-    }
-}
-
-fn severity_color(severity: Severity) -> Color {
-    match severity {
-        Severity::Error => Color::Red,
-        Severity::Warning => Color::Yellow,
-        Severity::Info => Color::Cyan,
     }
 }
 
@@ -1148,26 +1272,21 @@ mod tests {
     }
 
     #[test]
-    fn sidebar_lines_cover_every_section() {
+    fn sidebar_sections_cover_every_axis() {
         let mut state = state(PathBuf::from("/nowhere"));
         state.filters.toggle_severity(Severity::Error);
-        let lines = sidebar_lines(&state);
 
-        let headers: Vec<&str> = lines
-            .iter()
-            .filter_map(|line| match line {
-                SidebarLine::Header(name) => Some(*name),
-                _ => None,
-            })
-            .collect();
+        let sections = [Section::Severity, Section::Status, Section::Rules]
+            .map(|section| section_rows(&state, section));
+
+        let headers: Vec<&str> = sections.iter().map(|(title, _)| *title).collect();
         assert_eq!(headers, vec!["Severity", "Status", "Top rules"]);
 
-        let active: Vec<&Chip> = lines
+        let active: Vec<&Chip> = sections
             .iter()
-            .filter_map(|line| match line {
-                SidebarLine::Chip { chip, active, .. } if *active => Some(chip),
-                _ => None,
-            })
+            .flat_map(|(_, rows)| rows.iter())
+            .filter(|row| row.active)
+            .map(|row| &row.chip)
             .collect();
         assert_eq!(active, vec![&Chip::Severity(Severity::Error)]);
         assert_eq!(
@@ -1206,5 +1325,59 @@ mod tests {
             handle_key_triage(&mut state, key(KeyCode::Char('k')));
         }
         assert_eq!(state.scroll.table, 0);
+    }
+
+    #[test]
+    fn column_widths_fill_the_table_and_favour_the_message() {
+        for total in [40u16, 80, 160, 200] {
+            let widths = column_widths(total, 24);
+            assert_eq!(
+                widths.iter().sum::<u16>() + COLUMN_GAPS,
+                total,
+                "columns tile {total}"
+            );
+        }
+
+        let wide = column_widths(160, 24);
+        assert_eq!(wide[0], STATUS_W);
+        assert_eq!(wide[1], SEVERITY_W);
+        assert_eq!(wide[3], 24);
+        assert!(wide[2] >= MIN_TEXT_W, "path keeps its floor");
+        assert!(wide[4] > wide[2], "message takes the larger share");
+
+        // Nothing to divide: the table degrades instead of underflowing.
+        assert_eq!(column_widths(4, 24), [4, 4, 0, 24, 0]);
+    }
+
+    #[test]
+    fn the_rule_column_is_sized_to_the_ids_on_screen() {
+        let mut state = state(PathBuf::from("/nowhere"));
+        let visible = state.visible_rows();
+        // "secret.token" is the longest of the sample ids.
+        assert_eq!(rule_width(&state, &visible), 12);
+
+        state.rows[0].finding.rule_id = "a".repeat(80);
+        assert_eq!(rule_width(&state, &state.visible_rows()), RULE_MAX_W);
+        assert_eq!(rule_width(&state, &[]), 4);
+    }
+
+    #[test]
+    fn a_long_path_keeps_its_file_name_and_line() {
+        assert_eq!(
+            middle_truncate("core/deep/nested/app.js:1", 17),
+            "core/.../app.js:1"
+        );
+        assert_eq!(middle_truncate("src/a.rs:2", 20), "src/a.rs:2");
+        // Too narrow for an ellipsis: the tail still wins.
+        assert_eq!(middle_truncate("src/a.rs:2", 3), "s:2");
+        assert_eq!(middle_truncate("src/a.rs:2", 0), "");
+    }
+
+    #[test]
+    fn a_long_message_is_cut_at_the_tail() {
+        assert_eq!(tail_truncate("hardcoded secret", 10), "hardcod...");
+        assert_eq!(tail_truncate("short", 10), "short");
+        assert_eq!(tail_truncate("hardcoded", 2), "ha");
+        assert_eq!(tail_truncate("hardcoded", 0), "");
     }
 }

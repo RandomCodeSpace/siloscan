@@ -13,10 +13,11 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Paragraph};
+use ratatui::widgets::Paragraph;
 
 use crate::state::{AppState, SiloMatrix};
 use crate::ui::LayoutMap;
+use crate::ui::theme;
 
 /// Width bounds for one matrix column, gap column included.
 const MIN_CELL: u16 = 5;
@@ -25,7 +26,7 @@ const MAX_CELL: u16 = 10;
 const MIN_HEADER: u16 = 6;
 const MAX_HEADER: u16 = 16;
 const HINT: &str = "rows from, cols to | arrows move cell | enter open edge | esc close";
-const EMPTY_HINT: &str = "no boundary violations | tab next screen";
+const EMPTY_HINT: &str = "nothing crossed a boundary | tab next screen";
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct SiloView {
@@ -205,27 +206,25 @@ pub fn draw_silo(frame: &mut Frame, area: Rect, state: &AppState, layout: &mut L
         DETAIL.with(|cell| cell.set(None));
     }
 
-    frame.render_widget(
-        Paragraph::new(Line::styled(HINT, Style::default().fg(Color::DarkGray))),
-        hint,
-    );
+    frame.render_widget(Paragraph::new(Line::styled(HINT, theme::dim())), hint);
 
     layout.table = Some(matrix_area);
 }
 
 fn draw_empty(frame: &mut Frame, area: Rect) {
     let [body, hint] = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(area);
+    let lines = vec![
+        Line::styled("no boundary violations", theme::dim()),
+        Line::styled(
+            "every import stayed inside its silo; run a scan to refresh",
+            theme::dim(),
+        ),
+    ];
     frame.render_widget(
-        Paragraph::new("no boundary violations").block(Block::bordered().title(" silos ")),
+        Paragraph::new(lines).block(theme::pane_block(" silos ", false)),
         body,
     );
-    frame.render_widget(
-        Paragraph::new(Line::styled(
-            EMPTY_HINT,
-            Style::default().fg(Color::DarkGray),
-        )),
-        hint,
-    );
+    frame.render_widget(Paragraph::new(Line::styled(EMPTY_HINT, theme::dim())), hint);
 }
 
 fn draw_matrix(
@@ -235,10 +234,8 @@ fn draw_matrix(
     view: SiloView,
 ) -> Vec<((usize, usize), Rect)> {
     let total: usize = matrix.cells.iter().flatten().sum();
-    let block = Block::bordered().title(format!(
-        " silos {} | violations {total} ",
-        matrix.names.len()
-    ));
+    let title = format!(" silos {} | violations {total} ", matrix.names.len());
+    let block = theme::pane_block(&title, true);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.width == 0 || inner.height == 0 {
@@ -247,23 +244,25 @@ fn draw_matrix(
 
     let grid = grid(inner, matrix, view);
     if grid.cells.is_empty() {
-        frame.render_widget(Paragraph::new("terminal too small"), inner);
+        frame.render_widget(
+            Paragraph::new(Line::styled("terminal too small", theme::dim())),
+            inner,
+        );
         return Vec::new();
     }
 
     frame.render_widget(
-        Paragraph::new(Line::styled(
-            fit("from", grid.header_w),
-            Style::default().add_modifier(Modifier::BOLD),
-        )),
+        Paragraph::new(Line::styled(fit("from", grid.header_w), theme::dim())),
         Rect::new(inner.x, inner.y, grid.header_w, 1),
     );
 
     for offset in 0..grid.cols {
         let index = grid.col_start + offset;
-        let mut style = Style::default().add_modifier(Modifier::BOLD);
+        // Every header is accented; the cursor's own row and column are bold on
+        // top of that, so the crosshair reads without a second color.
+        let mut style = Style::default().fg(theme::ACCENT);
         if index == view.col {
-            style = style.fg(Color::Cyan);
+            style = style.add_modifier(Modifier::BOLD);
         }
         frame.render_widget(
             Paragraph::new(Line::styled(
@@ -282,9 +281,9 @@ fn draw_matrix(
 
     for offset in 0..grid.rows {
         let index = grid.row_start + offset;
-        let mut style = Style::default().add_modifier(Modifier::BOLD);
+        let mut style = Style::default().fg(theme::ACCENT);
         if index == view.row {
-            style = style.fg(Color::Cyan);
+            style = style.add_modifier(Modifier::BOLD);
         }
         frame.render_widget(
             Paragraph::new(Line::styled(
@@ -298,11 +297,12 @@ fn draw_matrix(
     for ((row, col), rect) in &grid.cells {
         let count = matrix.cells[*row][*col];
         let mut style = if count > 0 {
-            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
-        } else {
             Style::default()
-                .fg(Color::DarkGray)
-                .add_modifier(Modifier::DIM)
+                .fg(Color::White)
+                .bg(theme::ERROR)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(theme::DIM).add_modifier(Modifier::DIM)
         };
         if (*row, *col) == (view.row, view.col) {
             style = style.add_modifier(Modifier::REVERSED);
@@ -335,7 +335,7 @@ fn draw_detail(
         matrix.names[view.col],
         rows.len()
     );
-    let block = Block::bordered().title(title);
+    let block = theme::pane_block(&title, true);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.width == 0 || inner.height == 0 {
@@ -353,7 +353,7 @@ fn draw_detail(
             Line::from(vec![
                 Span::styled(
                     format!("{}:{}", finding.path, finding.line),
-                    Style::default().fg(Color::Cyan),
+                    theme::accent(),
                 ),
                 Span::raw("  "),
                 Span::styled(
@@ -631,12 +631,13 @@ mod tests {
             .cell((violating.x + violating.width - 2, violating.y))
             .unwrap();
         assert_eq!(hot.symbol(), "2");
-        assert_eq!(hot.style().fg, Some(Color::Red));
+        assert_eq!(hot.style().fg, Some(Color::White));
+        assert_eq!(hot.style().bg, Some(theme::ERROR));
         assert!(hot.style().add_modifier.contains(Modifier::BOLD));
 
         let cold = buffer.cell((empty.x + empty.width - 2, empty.y)).unwrap();
         assert_eq!(cold.symbol(), ".");
-        assert_eq!(cold.style().fg, Some(Color::DarkGray));
+        assert_eq!(cold.style().fg, Some(theme::DIM));
         assert!(cold.style().add_modifier.contains(Modifier::DIM));
     }
 
