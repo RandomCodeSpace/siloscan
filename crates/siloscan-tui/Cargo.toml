@@ -2,6 +2,7 @@
 name = "siloscan-tui"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Interactive terminal UI for siloscan: triage board, ratchet console, dashboards"

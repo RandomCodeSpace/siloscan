@@ -5,5 +5,6 @@ members = ["crates/siloscan-core", "crates/siloscan", "crates/siloscan-tui"]
 [workspace.package]
 version = "1.1.0"
 edition = "2024"
+rust-version = "1.96"
 license = "MIT"
 repository = "https://github.com/RandomCodeSpace/siloscan"
