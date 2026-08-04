@@ -249,6 +249,74 @@ mod tests {
         );
     }
 
+    /// A real password that spells `pass`, `word`, `secret` or `token` is the
+    /// shape a leaked database credential most often has. Through 1.4.0 those
+    /// were substring stopwords, and `engines::secret` tests a stopword with
+    /// `lowercased.contains(word)`, so every one of these was allowlisted by
+    /// the rule that exists to report it.
+    #[test]
+    fn a_real_password_that_spells_a_placeholder_word_is_still_reported() {
+        for url in [
+            "postgres://admin:s3cr3tPassw0rd99@db.internal:5432/prod",
+            "mysql://root:MyPassword123@10.0.0.5/app",
+            "amqp://svc:Xk7Qm2pLv9Rt4Ws8@broker:5672",
+            "mongodb://u:P%40ssw0rd-2024@cluster0/db",
+            "postgres://svc:Tokenb3arer-Xk29@db.internal/prod",
+            "https://ci:Secr3tWord!7Qm2@registry.internal/repo",
+        ] {
+            let line = format!("db = \"{url}\"\n");
+            assert!(
+                scan(&line).contains(&"secrets.generic-credentialed-url".to_string()),
+                "{url} was not reported"
+            );
+        }
+    }
+
+    /// The same defect in `secrets.generic-secret-assignment`: `password`,
+    /// `secret`, `token` and `your` were substring stopwords there too. Each
+    /// value here also has to clear the rule's own identifier and CamelCase
+    /// allowlists, which is why they carry punctuation.
+    #[test]
+    fn a_real_secret_that_spells_a_placeholder_word_is_still_reported() {
+        for line in [
+            "db_password = \"s3cr3tPassword99!Xk2\"",
+            "client_secret = \"MyPassword123!SuperQ7\"",
+            "auth_token = \"Tokenb3arer!Xk29Qm2Lv9\"",
+            "api_key = \"Yourk3y!Xk29Qm2Lv9Rt4W\"",
+        ] {
+            let hits = scan(&format!("{line}\n"));
+            assert!(
+                hits.contains(&"secrets.generic-secret-assignment".to_string()),
+                "{line} reported {hits:?}"
+            );
+        }
+    }
+
+    /// The other side of the same change: replacing substring stopwords with
+    /// anchored patterns must keep every placeholder quiet. A placeholder is a
+    /// value built entirely out of placeholder words, which is what separates
+    /// `your-password-here` from `MyPassword123`.
+    #[test]
+    fn placeholder_credentials_in_urls_are_not_reported() {
+        for line in [
+            "postgres://user:password@localhost:5432/db",
+            "postgres://appuser:changeme@localhost/app",
+            "redis://:${REDIS_PASSWORD}@redis:6379/0",
+            "https://user:your-password-here@example.com",
+            "postgres://u:$DB_PASS@host/db",
+            "mysql://root:changeit@db/app",
+            "amqp://svc:your_db_password@broker:5672",
+            "https://user:replace-with-your-password@example.com",
+            "postgres://u:placeholder@host/db",
+            "postgres://u:credentials@host/db",
+            "mongodb://u:xxxxxxxxxxxx@cluster0/db",
+            "https://user:pass%20word@example.com",
+        ] {
+            let hits = scan(&format!("{line}\n"));
+            assert!(hits.is_empty(), "{line} reported {hits:?}");
+        }
+    }
+
     /// A generic rule earns its place only if it stays quiet on the shapes that
     /// surround real code: placeholders, environment lookups, interpolated
     /// values, documentation, hashes and ordinary identifiers. Each line here

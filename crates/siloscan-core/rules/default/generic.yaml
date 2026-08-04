@@ -22,27 +22,22 @@ rules:
           - '\{\{'
           - '%\(?[a-zA-Z_]'
           - '^\[[^]]+]$'
-        stopwords:
-          - 'pass'
-          - 'word'
-          - 'secret'
-          - 'token'
-          - 'credential'
-          - 'changeme'
-          - 'changeit'
-          - 'example'
-          - 'sample'
-          - 'dummy'
-          - 'placeholder'
-          - 'redacted'
-          - 'xxx'
-          - 'your'
-          - 'mysql'
-          - 'postgres'
-          - 'admin'
-          - 'root'
-          - 'test'
-          - '%20'
+          # Placeholder passwords, matched against the whole captured value.
+          #
+          # These were substring stopwords through 1.4.0, and `pass` and `word`
+          # were among them. Stopword matching is `lowercased.contains(word)`
+          # (see engines/secret.rs), so every real password with `pass` or
+          # `word` anywhere in it - `MyPassword123`, `s3cr3tPassw0rd99`,
+          # `Passw0rd!` - was allowlisted. That is the shape a leaked database
+          # credential most often has, and this is the rule that exists to
+          # catch it.
+          #
+          # Anchored and composed instead: a value is a placeholder only when
+          # every token in it comes from the vocabulary below, so
+          # `your-db-password-here` is suppressed and `MyPassword123` is not.
+          # Every word that was a stopword before is still here, which makes
+          # this strictly less suppressive than what it replaces.
+          - '(?i)^(?:(?:[-_.+~*]|%20)*(?:pass(?:wd|word|phrase)?|word|secret|token|credentials?|creds|api|apikey|key|db|database|user(?:name)?|admin|root|host|local(?:host)?|changeme|changeit|change|replace|insert|enter|put|set|goes|here|with|your|my|our|the|some|own|new|real|actual|not(?:real)?|none|null|empty|unset|undefined|todo|fixme|value|string|placeholder|redacted|hidden|masked|example|sample|dummy|fake|invalid|test(?:ing)?|demo|sandbox|super|top(?:secret)?|mysecret|hunter2|letmein|x{3,}))+(?:[-_.+~*]|%20)*$'
   - id: secrets.aws-secret-access-key
     severity: error
     message: 'Identified an AWS secret access key, which pairs with an access key id to grant API access to the account.'
@@ -53,6 +48,12 @@ rules:
       keywords:
         - 'secret'
       allowlist:
+        # Substring stopwords are safe here and nowhere else in this document:
+        # the captured value is exactly forty characters drawn from a
+        # 62-symbol alphabet, so none of these six-plus character runs occurs
+        # in a real key by chance, and `example` is in the value because the
+        # AWS documentation key spells `EXAMPLE`, not because a human picked a
+        # password. Audited alongside the 1.4.1 stopword fix; left as is.
         stopwords:
           - 'example'
           - 'sample'
@@ -122,36 +123,35 @@ rules:
           - '^\.{0,2}/'
           - '^[^0-9]*$'
           - '^(?:[A-Z]{1,4}|[A-Z][a-z]+|[a-z]{3,})(?:[0-9]{0,5}(?:[A-Z][a-z]+|[A-Z]{2,4}|[a-z]{3,}))*[0-9]{0,5}$'
-          - '^(?:[A-Za-z][A-Za-z0-9]{0,23}|[0-9]{1,10})(?:[_.\-/](?:[A-Za-z][A-Za-z0-9]{0,23}|[0-9]{1,10})){1,8}$'
+          # Separator-joined identifier tokens. Widened in 1.4.1 to carry the
+          # weight the `secret` and `token` stopwords used to carry by
+          # accident: a dotted minified reference (`_chunk7UDY.DEFAULT_TOKEN_TTL`),
+          # a token whose digits lead its words (`SecretName-6RandomCharacters`)
+          # and a hyphenated English sentence longer than eight words are all
+          # identifiers, and none of them stops being one because it spells
+          # `secret`. The leading digits must be followed by whole words, so a
+          # hex token like `4f3a9b2c` is still reported.
+          - '^[_$]?(?:[A-Za-z][A-Za-z0-9]{0,23}|[0-9]{1,10}|[0-9]{1,5}(?:[A-Z][a-z]{2,}|[a-z]{3,})+)(?:[_.\-/](?:[A-Za-z][A-Za-z0-9]{0,23}|[0-9]{1,10}|[0-9]{1,5}(?:[A-Z][a-z]{2,}|[a-z]{3,})+)){1,12}$'
+          # Placeholder values, anchored on the whole captured value, for the
+          # same reason as `secrets.generic-credentialed-url` above: `password`,
+          # `secret`, `token` and `your` were substring stopwords, so a real
+          # credential that spelled one of them - `s3cr3tPassword99!Xk2` - was
+          # allowlisted by the rule meant to report it.
+          - '(?i)^(?:[-_.+~*/]*(?:pass(?:wd|word|phrase)?|word|secret|token|credentials?|creds|api|apikey|key|db|database|user(?:name)?|admin|root|host|local(?:host)?|changeme|changeit|change|replace|insert|enter|put|set|goes|here|with|your|my|our|the|some|own|new|real|actual|not(?:real)?|none|null|empty|unset|undefined|todo|fixme|value|string|placeholder|redacted|hidden|masked|example|sample|dummy|fake|invalid|test(?:ing)?|demo|sandbox|super|top(?:secret)?|mysecret|hunter2|letmein|x{3,}))+[-_.+~*/]*$'
         stopwords:
-          - 'example'
-          - 'sample'
-          - 'dummy'
-          - 'placeholder'
-          - 'redacted'
-          - 'changeme'
-          - 'changeit'
-          - 'xxxx'
-          - 'your'
-          - 'password'
-          - 'passwd'
-          - 'secret'
-          - 'token'
-          - 'apikey'
-          - 'api_key'
-          - 'credential'
-          - 'notreal'
-          - 'fake'
-          - 'invalid'
+          # Substring matching is correct for these and only these: an
+          # environment lookup is the value's shape, not a word inside it, and
+          # the filler runs below do not occur inside a real high-entropy
+          # value by chance (six or more fixed characters out of a 62-symbol
+          # alphabet). Every English-word stopword that used to sit here moved
+          # to the anchored pattern above.
+          - 'process.env'
+          - 'os.environ'
+          - 'getenv'
+          - 'localhost'
           - 'deadbeef'
           - 'abcdefghij'
           - '0123456789'
           - 'qwerty'
           - 'foobar'
           - 'lorem'
-          - 'todo'
-          - 'undefined'
-          - 'localhost'
-          - 'process.env'
-          - 'os.environ'
-          - 'getenv'
