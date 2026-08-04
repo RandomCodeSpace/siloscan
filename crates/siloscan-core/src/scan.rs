@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
@@ -8,7 +8,8 @@ use serde::Serialize;
 
 use crate::findings::Finding;
 use crate::graph::FileFacts;
-use crate::rules::{CompiledPayload, RuleSet};
+use crate::metrics::{DUPLICATE_BLOCK_RULE_ID, DuplicationResult, FileMetrics, Metrics};
+use crate::rules::{CompiledPayload, DuplicationScope, RuleSet, Severity};
 use crate::walk::{self, FileKind};
 
 /// Upper bound on scan workers. Past this the per-file work is dominated by the
@@ -35,6 +36,8 @@ pub struct ScanReport {
     /// The finding itself is in `findings`, `baselined` or `suppressed`
     /// depending on how it was partitioned, and is identified by fingerprint.
     pub boundary_edges: Vec<(String, String, String)>,
+    /// Size and duplication metrics for every text file that was scanned.
+    pub metrics: Metrics,
 }
 
 /// Optional inputs to a scan. Defaults to no baseline, cache, config or
@@ -90,8 +93,9 @@ pub fn scan_with_progress(
 /// through every engine; a cache hit replaces the read-to-engine step only.
 ///
 /// Fails when a boundary rule names a silo the config does not define, and when
-/// boundary rules would run against a scan root below the directory holding the
-/// config: a typo or a partial scan would otherwise silently disable the rule.
+/// boundary or silo-scoped duplication rules would run against a scan root below
+/// the directory holding the config: a typo or a partial scan would otherwise
+/// silently disable the rule.
 pub fn scan_opts(
     root: &Path,
     rules: &RuleSet,
@@ -99,7 +103,41 @@ pub fn scan_opts(
     on_progress: &mut dyn FnMut(Progress),
 ) -> Result<ScanReport, String> {
     let silo_sets = boundary_setup(root, rules, options.config)?;
+    duplication_setup(root, rules, options.config)?;
     Ok(run(root, rules, options, silo_sets, on_progress))
+}
+
+/// A duplication rule scoped to silos needs a config that defines silos to know
+/// what a silo is. Running it without one would report nothing at all, which
+/// reads as a passing gate, so it is refused instead. A config that loads but
+/// declares no `[silos]` is the same hole as no config, so both are refused,
+/// and so is a scan root below the directory holding the config: the silo globs
+/// would match nothing there.
+fn duplication_setup(
+    root: &Path,
+    rules: &RuleSet,
+    config: Option<&crate::config::Config>,
+) -> Result<(), String> {
+    let silo_scoped = rules.rules.iter().find(|rule| {
+        matches!(
+            rule.payload,
+            CompiledPayload::Duplication {
+                scope: DuplicationScope::Silo,
+                ..
+            }
+        )
+    });
+    let Some(rule) = silo_scoped else {
+        return Ok(());
+    };
+    if !config.is_some_and(|config| !config.silos.is_empty()) {
+        return Err(format!(
+            "rule {}: duplication scope silo needs a {} defining [silos]",
+            rule.id,
+            crate::config::CONFIG_NAME
+        ));
+    }
+    require_config_root(root, "silo-scoped duplication rules")
 }
 
 /// Compiled silo globs, once it is established that at least one boundary rule
@@ -130,7 +168,7 @@ fn boundary_setup(
     if !any || config.silos.is_empty() {
         return Ok(None);
     }
-    require_config_root(root)?;
+    require_config_root(root, "boundary rules")?;
     config.silo_sets().map(Some)
 }
 
@@ -138,8 +176,9 @@ fn boundary_setup(
 /// paths are relative to the scan root. Scanning below the config's directory
 /// would match every file against the wrong path and report nothing at all, so
 /// it is refused rather than silently passed. A config that is not on disk
-/// (built in memory by a caller) cannot be located and is trusted.
-fn require_config_root(root: &Path) -> Result<(), String> {
+/// (built in memory by a caller) cannot be located and is trusted. `subject`
+/// names the rules that forced the check.
+fn require_config_root(root: &Path, subject: &str) -> Result<(), String> {
     let Some(dir) =
         crate::config::discover(root).and_then(|path| path.parent().map(Path::to_owned))
     else {
@@ -149,7 +188,7 @@ fn require_config_root(root: &Path) -> Result<(), String> {
         return Ok(());
     }
     Err(format!(
-        "boundary rules are relative to {}, the directory holding {}: scan it instead of {}",
+        "{subject} are relative to {}, the directory holding {}: scan it instead of {}",
         dir.display(),
         crate::config::CONFIG_NAME,
         root.display()
@@ -197,6 +236,12 @@ fn run_with_workers(
     let mut graph = crate::graph::Graph::default();
     // Repo-relative path -> the file it came from, for every scannable file.
     let mut scanned: BTreeMap<String, PathBuf> = BTreeMap::new();
+    // Contents of every text file, kept until the duplication pass: it compares
+    // every file against every other and so needs them all at once. Holding
+    // them costs one copy of the scanned text; reading them a second time after
+    // the walk would cost the same memory plus the reads.
+    let mut contents: BTreeMap<String, String> = BTreeMap::new();
+    let mut file_metrics: BTreeMap<String, FileMetrics> = BTreeMap::new();
 
     let files = walk::collect_files(root);
     let files_total = files.len();
@@ -224,10 +269,14 @@ fn run_with_workers(
                 facts,
                 kept,
                 ignored,
+                content,
+                metrics,
             } => {
                 if let Some(facts) = facts {
                     graph.files.insert(path_rel.clone(), facts);
                 }
+                contents.insert(path_rel.clone(), content);
+                file_metrics.insert(path_rel.clone(), metrics);
                 scanned.insert(path_rel, path);
 
                 findings.extend(kept);
@@ -266,6 +315,13 @@ fn run_with_workers(
         ));
     }
 
+    // Metrics are cross-file, so they are computed here rather than per file,
+    // and they are never stored in or read from the per-file cache: a warm
+    // cache must produce the same numbers as a cold one.
+    let (metrics, duplication) = measure(contents, file_metrics, options.config);
+    whole_tree.extend(duplicate_block_findings(&duplication));
+    whole_tree.extend(duplication_gates(rules, &metrics, options.config));
+
     let (kept, ignored) = suppress_whole_tree(&scanned, whole_tree);
     findings.extend(kept);
     suppressed.extend(ignored);
@@ -289,6 +345,148 @@ fn run_with_workers(
         skipped,
         graph,
         boundary_edges,
+        metrics,
+    }
+}
+
+/// Fill the duplication counts into the per-file metrics and roll them up.
+/// `contents` is keyed by path, so the files reach the detector in path order
+/// and the blocks it reports do not depend on the order the walk finished in.
+fn measure(
+    contents: BTreeMap<String, String>,
+    mut file_metrics: BTreeMap<String, FileMetrics>,
+    config: Option<&crate::config::Config>,
+) -> (Metrics, DuplicationResult) {
+    let min_lines = config
+        .map(|config| config.duplication.min_lines)
+        .unwrap_or(crate::metrics::DEFAULT_MIN_LINES);
+
+    let files: Vec<(String, String)> = contents.into_iter().collect();
+    let duplication = crate::metrics::detect_duplication(&files, min_lines);
+
+    for (path, count) in &duplication.duplicated_lines {
+        if let Some(metrics) = file_metrics.get_mut(path) {
+            metrics.duplicated_lines = *count;
+        }
+    }
+
+    let totals = crate::metrics::compute_totals(&file_metrics);
+    (
+        Metrics {
+            files: file_metrics,
+            totals,
+        },
+        duplication,
+    )
+}
+
+/// How many other copies a duplicate block message names before it stops
+/// listing and starts counting. A block copied into every file of a repository
+/// would otherwise put one location per copy into every one of its messages,
+/// which is quadratic in both time and report size; the locations are all in the
+/// report anyway, one finding per copy. The message is not part of the
+/// fingerprint, so the cap does not move any identity.
+const MAX_LISTED_COPIES: usize = 10;
+
+/// One info finding per copy of every duplicate block, under the reserved rule
+/// id. The matched text names the block, so every copy of one block shares it
+/// and the occurrence index separates two copies that live in the same file;
+/// the message names the other copies and stays out of the fingerprint.
+fn duplicate_block_findings(duplication: &DuplicationResult) -> Vec<Finding> {
+    let mut occurrences: HashMap<(String, String), u32> = HashMap::new();
+    let mut findings = Vec::new();
+
+    for block in &duplication.blocks {
+        let matched = format!(
+            "{} duplicated lines (block {})",
+            block.line_count, block.normalized_hash_hex12
+        );
+        // Formatted once per block rather than once per copy: every copy needs
+        // the same locations, only its own left out.
+        let locations: Vec<String> = block
+            .copies
+            .iter()
+            .map(|copy| format!("{}:{}", copy.path, copy.start_line))
+            .collect();
+
+        for (index, copy) in block.copies.iter().enumerate() {
+            // Lazy, so at most `MAX_LISTED_COPIES` entries are cloned per copy.
+            let others: Vec<&str> = locations
+                .iter()
+                .enumerate()
+                .filter(|(other, _)| *other != index)
+                .map(|(_, location)| location.as_str())
+                .take(MAX_LISTED_COPIES)
+                .collect();
+            let hidden = block.copies.len().saturating_sub(1 + others.len());
+            let message = if hidden == 0 {
+                format!("duplicated block, also at {}", others.join(", "))
+            } else {
+                format!(
+                    "duplicated block, also at {}, and {hidden} more",
+                    others.join(", ")
+                )
+            };
+
+            let counter = occurrences
+                .entry((copy.path.clone(), matched.clone()))
+                .or_insert(0);
+            let occurrence = *counter;
+            *counter += 1;
+
+            findings.push(Finding {
+                rule_id: DUPLICATE_BLOCK_RULE_ID.to_string(),
+                severity: Severity::Info,
+                message,
+                path: copy.path.clone(),
+                line: copy.start_line,
+                column: 1,
+                matched: matched.clone(),
+                fingerprint: crate::findings::fingerprint(
+                    DUPLICATE_BLOCK_RULE_ID,
+                    &copy.path,
+                    &matched,
+                    occurrence,
+                ),
+            });
+        }
+    }
+
+    findings
+}
+
+/// Run every duplication gate rule over the measured metrics. Silo scope needs
+/// the config's silo globs; without a config it reports nothing, which
+/// [`scan_opts`] refuses up front.
+fn duplication_gates(
+    rules: &RuleSet,
+    metrics: &Metrics,
+    config: Option<&crate::config::Config>,
+) -> Vec<Finding> {
+    let needs_silos = rules.rules.iter().any(|rule| {
+        matches!(
+            rule.payload,
+            CompiledPayload::Duplication {
+                scope: DuplicationScope::Silo,
+                ..
+            }
+        )
+    });
+
+    // The globs were already validated when the config was loaded, so a failure
+    // here is not reachable through the CLI; an in-memory config with a bad
+    // glob simply claims no files.
+    let sets = match (config, needs_silos) {
+        (Some(config), true) => config.silo_sets().ok(),
+        _ => None,
+    };
+
+    match (config, &sets) {
+        (Some(config), Some(sets)) => {
+            let silo_of = |path: &str| config.silo_of(sets, path).map(str::to_string);
+            crate::engines::duplication::scan_duplication(&rules.rules, metrics, Some(&silo_of))
+        }
+        _ => crate::engines::duplication::scan_duplication(&rules.rules, metrics, None),
     }
 }
 
@@ -308,6 +506,10 @@ enum Outcome {
         facts: Option<FileFacts>,
         kept: Vec<Finding>,
         ignored: Vec<Finding>,
+        /// Kept for the cross-file duplication pass.
+        content: String,
+        /// Line counts, measured from the file and never from the cache.
+        metrics: FileMetrics,
     },
 }
 
@@ -394,7 +596,11 @@ fn scan_one(
         FileKind::Binary => (Outcome::Binary, 0),
         FileKind::Unreadable(reason) => (Outcome::Unreadable(reason), 0),
         FileKind::Text(content) => {
-            let entry = scan_text(rules, options, path, &path_rel, &content);
+            let language = crate::lang::detect(path, &content);
+            // Measured here, from the file itself: a cache hit replaces the
+            // engine work below, and metrics must not move with the cache.
+            let metrics = crate::metrics::measure_file(&content, language);
+            let entry = scan_text(rules, options, &path_rel, &content, language);
             let raw = entry.findings.len();
             let (kept, ignored) = crate::suppress::partition(&content, entry.findings);
             (
@@ -402,6 +608,8 @@ fn scan_one(
                     facts: entry.facts,
                     kept,
                     ignored,
+                    content,
+                    metrics,
                 },
                 raw,
             )
@@ -475,9 +683,9 @@ fn suppress_whole_tree(
 fn scan_text(
     rules: &RuleSet,
     options: &ScanOptions,
-    path: &Path,
     path_rel: &str,
     content: &str,
+    language: Option<&'static str>,
 ) -> crate::cache::CachedFile {
     let hash = options.cache.map(|_| entry_hash(path_rel, content));
 
@@ -487,7 +695,6 @@ fn scan_text(
         return entry;
     }
 
-    let language = crate::lang::detect(path, content);
     let tree = language.and_then(|lang| crate::parsers::parse(lang, content));
 
     let mut file_findings =
@@ -1312,6 +1519,412 @@ db = ["src/db/**"]
                 ("src/b.rs", "test.needle"),
             ]
         );
+    }
+
+    const DUPLICATION_RULES: &str = r#"
+version: 1
+rules:
+  - id: quality.duplication
+    severity: warning
+    message: "duplication over budget"
+    duplication:
+      max_percent: 10
+      scope: scan
+"#;
+
+    /// Twelve identical lines: two copies of this clear the default ten-line
+    /// window with room to spare.
+    fn duplicated_block() -> String {
+        (0..12).map(|i| format!("let value{i} = {i};\n")).collect()
+    }
+
+    /// One regex rule and one scan-scope duplication gate.
+    fn duplication_ruleset() -> RuleSet {
+        let mut rules = ruleset();
+        rules
+            .rules
+            .extend(load_str(DUPLICATION_RULES, "duplication").unwrap());
+        rules
+            .sources
+            .push(("duplication".to_string(), DUPLICATION_RULES.to_string()));
+        rules
+    }
+
+    /// Two files sharing a twelve-line block, plus a file that shares nothing.
+    fn duplicated_tree(root: &Path) {
+        let block = duplicated_block();
+        write(root, "src/a.rs", format!("// header\n{block}").as_bytes());
+        write(root, "src/b.rs", block.as_bytes());
+        write(root, "notes.txt", b"plain text\n\nsecond line\n");
+    }
+
+    #[test]
+    fn metrics_cover_every_text_file_and_count_duplication() {
+        let dir = tempdir();
+        duplicated_tree(dir.path());
+        write(dir.path(), "blob.bin", b"\0\0binary\0\0");
+
+        let report = scan(dir.path(), &ruleset(), None);
+
+        let files = &report.metrics.files;
+        assert_eq!(files.len(), 3, "binary files carry no metrics");
+        assert_eq!(files["src/a.rs"].lines, 13);
+        assert_eq!(files["src/a.rs"].code_lines, Some(12));
+        assert_eq!(files["src/a.rs"].duplicated_lines, 12);
+        assert_eq!(files["src/b.rs"].lines, 12);
+        assert_eq!(files["src/b.rs"].duplicated_lines, 12);
+        // A non-tier-1 language reports no code lines and no duplication.
+        assert_eq!(files["notes.txt"].lines, 2);
+        assert_eq!(files["notes.txt"].code_lines, None);
+        assert_eq!(files["notes.txt"].duplicated_lines, 0);
+
+        let totals = &report.metrics.totals;
+        assert_eq!(totals.lines, 27);
+        assert_eq!(totals.code_lines, 24);
+        assert_eq!(totals.duplicated_lines, 24);
+        assert!((totals.duplication_density - 24.0 / 27.0 * 100.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn duplicate_blocks_are_reported_as_info_findings() {
+        let dir = tempdir();
+        duplicated_tree(dir.path());
+
+        let report = scan(dir.path(), &ruleset(), None);
+
+        let blocks: Vec<&Finding> = report
+            .findings
+            .iter()
+            .filter(|f| f.rule_id == crate::metrics::DUPLICATE_BLOCK_RULE_ID)
+            .collect();
+        assert_eq!(blocks.len(), 2, "one finding per copy");
+
+        // Copies sort with every other finding: a.rs before b.rs.
+        assert_eq!((blocks[0].path.as_str(), blocks[0].line), ("src/a.rs", 2));
+        assert_eq!((blocks[1].path.as_str(), blocks[1].line), ("src/b.rs", 1));
+        assert!(blocks.iter().all(|f| f.column == 1));
+        assert!(blocks.iter().all(|f| f.severity == Severity::Info));
+
+        // Both copies of one block share the synthetic matched text.
+        assert_eq!(blocks[0].matched, blocks[1].matched);
+        let hash = blocks[0]
+            .matched
+            .strip_prefix("12 duplicated lines (block ")
+            .and_then(|rest| rest.strip_suffix(')'))
+            .expect("matched names the block");
+        assert_eq!(hash.len(), 12);
+        assert!(hash.chars().all(|c| c.is_ascii_hexdigit()));
+
+        // The message names the other copies, and stays out of the fingerprint.
+        assert_eq!(blocks[0].message, "duplicated block, also at src/b.rs:1");
+        assert_eq!(blocks[1].message, "duplicated block, also at src/a.rs:2");
+        assert_eq!(
+            blocks[0].fingerprint,
+            crate::findings::fingerprint(
+                crate::metrics::DUPLICATE_BLOCK_RULE_ID,
+                "src/a.rs",
+                &blocks[0].matched,
+                0
+            )
+        );
+        assert_ne!(blocks[0].fingerprint, blocks[1].fingerprint);
+    }
+
+    #[test]
+    fn a_widely_copied_block_names_at_most_ten_other_copies() {
+        let dir = tempdir();
+        let block = duplicated_block();
+        // Fifteen copies: ten named, four counted, one being the copy itself.
+        for index in 0..15 {
+            write(dir.path(), &format!("src/f{index:02}.rs"), block.as_bytes());
+        }
+
+        let report = scan(dir.path(), &ruleset(), None);
+
+        let blocks: Vec<&Finding> = report
+            .findings
+            .iter()
+            .filter(|f| f.rule_id == crate::metrics::DUPLICATE_BLOCK_RULE_ID)
+            .collect();
+        assert_eq!(blocks.len(), 15, "one finding per copy");
+
+        let message = &blocks[0].message;
+        assert!(message.ends_with(", and 4 more"), "{message}");
+        let listed = message
+            .strip_prefix("duplicated block, also at ")
+            .and_then(|rest| rest.strip_suffix(", and 4 more"))
+            .expect("the message lists the named copies");
+        assert_eq!(listed.split(", ").count(), MAX_LISTED_COPIES);
+        // The copy itself is never one of the others it names.
+        assert!(!listed.contains("src/f00.rs:1"), "{listed}");
+        assert!(listed.starts_with("src/f01.rs:1, "), "{listed}");
+    }
+
+    #[test]
+    fn two_copies_in_one_file_differ_by_occurrence() {
+        let dir = tempdir();
+        // Twenty identical lines hold two disjoint ten-line copies.
+        let content: String = (0..20).map(|_| "call(same);\n".to_string()).collect();
+        write(dir.path(), "src/a.rs", content.as_bytes());
+
+        let report = scan(dir.path(), &ruleset(), None);
+
+        let blocks: Vec<&Finding> = report
+            .findings
+            .iter()
+            .filter(|f| f.rule_id == crate::metrics::DUPLICATE_BLOCK_RULE_ID)
+            .collect();
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0].matched, blocks[1].matched);
+        assert_eq!(blocks[0].path, blocks[1].path);
+        assert_ne!(blocks[0].fingerprint, blocks[1].fingerprint);
+        assert_eq!(
+            blocks[1].fingerprint,
+            crate::findings::fingerprint(
+                crate::metrics::DUPLICATE_BLOCK_RULE_ID,
+                "src/a.rs",
+                &blocks[1].matched,
+                1
+            )
+        );
+    }
+
+    #[test]
+    fn inline_markers_suppress_duplicate_block_findings() {
+        let dir = tempdir();
+        let block = duplicated_block();
+        write(
+            dir.path(),
+            "src/a.rs",
+            format!("// siloscan-ignore: metrics.duplicate-block\n{block}").as_bytes(),
+        );
+        write(dir.path(), "src/b.rs", block.as_bytes());
+
+        let report = scan(dir.path(), &ruleset(), None);
+
+        let reported: Vec<&str> = report
+            .findings
+            .iter()
+            .filter(|f| f.rule_id == crate::metrics::DUPLICATE_BLOCK_RULE_ID)
+            .map(|f| f.path.as_str())
+            .collect();
+        assert_eq!(reported, vec!["src/b.rs"]);
+        assert_eq!(report.suppressed.len(), 1);
+        assert_eq!(report.suppressed[0].path, "src/a.rs");
+        // The lines stay counted: suppression hides a finding, not a metric.
+        assert_eq!(report.metrics.files["src/a.rs"].duplicated_lines, 12);
+    }
+
+    #[test]
+    fn a_duplication_gate_reports_against_the_whole_scan() {
+        let dir = tempdir();
+        duplicated_tree(dir.path());
+
+        let report = scan(dir.path(), &duplication_ruleset(), None);
+
+        let gate: Vec<&Finding> = report
+            .findings
+            .iter()
+            .filter(|f| f.rule_id == "quality.duplication")
+            .collect();
+        assert_eq!(gate.len(), 1);
+        assert_eq!(gate[0].path, ".");
+        assert_eq!((gate[0].line, gate[0].column), (1, 1));
+        assert_eq!(gate[0].severity, Severity::Warning);
+        assert_eq!(gate[0].matched, "density 88.9% (max 10.0%)");
+    }
+
+    #[test]
+    fn a_duplication_gate_under_its_budget_is_quiet() {
+        let dir = tempdir();
+        write(dir.path(), "src/a.rs", b"let x = 1;\n");
+
+        let report = scan(dir.path(), &duplication_ruleset(), None);
+
+        assert!(
+            report
+                .findings
+                .iter()
+                .all(|f| f.rule_id != "quality.duplication")
+        );
+    }
+
+    #[test]
+    fn config_min_lines_changes_what_counts_as_duplication() {
+        let dir = tempdir();
+        let block: String = (0..4).map(|i| format!("let short{i} = {i};\n")).collect();
+        write(dir.path(), "src/a.rs", block.as_bytes());
+        write(dir.path(), "src/b.rs", block.as_bytes());
+
+        // Four lines is under the default window, so nothing is duplicated.
+        let default = scan(dir.path(), &ruleset(), None);
+        assert_eq!(default.metrics.totals.duplicated_lines, 0);
+
+        let config = crate::config::Config {
+            duplication: crate::config::DuplicationConfig { min_lines: 4 },
+            ..Default::default()
+        };
+        let options = ScanOptions {
+            config: Some(&config),
+            ..ScanOptions::default()
+        };
+        let report = scan_opts(dir.path(), &ruleset(), &options, &mut |_| {}).unwrap();
+
+        assert_eq!(report.metrics.totals.duplicated_lines, 8);
+        assert_eq!(
+            report
+                .findings
+                .iter()
+                .filter(|f| f.rule_id == crate::metrics::DUPLICATE_BLOCK_RULE_ID)
+                .count(),
+            2
+        );
+    }
+
+    const SILO_DUPLICATION_RULES: &str = r#"
+version: 1
+rules:
+  - id: quality.silo-duplication
+    severity: error
+    message: "silo duplication over budget"
+    duplication:
+      max_percent: 10
+      scope: silo
+"#;
+
+    fn silo_duplication_rules() -> RuleSet {
+        RuleSet {
+            rules: load_str(SILO_DUPLICATION_RULES, "duplication").unwrap(),
+            sources: vec![(
+                "duplication".to_string(),
+                SILO_DUPLICATION_RULES.to_string(),
+            )],
+        }
+    }
+
+    #[test]
+    fn a_silo_scoped_duplication_rule_without_a_config_is_an_error() {
+        let dir = tempdir();
+        duplicated_tree(dir.path());
+
+        let err = scan_opts(
+            dir.path(),
+            &silo_duplication_rules(),
+            &ScanOptions::default(),
+            &mut |_| {},
+        )
+        .unwrap_err();
+
+        assert!(err.contains("quality.silo-duplication"), "{err}");
+        assert!(err.contains("duplication scope silo"), "{err}");
+    }
+
+    #[test]
+    fn a_silo_scoped_duplication_rule_without_silos_is_an_error() {
+        let dir = tempdir();
+        duplicated_tree(dir.path());
+
+        // A config that loads but defines no silos leaves the gate unable to
+        // fire, which is the same hole as no config at all.
+        let config = crate::config::Config::default();
+        let options = ScanOptions {
+            config: Some(&config),
+            ..ScanOptions::default()
+        };
+        let err =
+            scan_opts(dir.path(), &silo_duplication_rules(), &options, &mut |_| {}).unwrap_err();
+
+        assert!(err.contains("quality.silo-duplication"), "{err}");
+        assert!(err.contains("duplication scope silo"), "{err}");
+    }
+
+    #[test]
+    fn a_silo_scoped_duplication_rule_below_the_config_is_an_error() {
+        let dir = tempdir();
+        git_root(dir.path());
+        write(dir.path(), "siloscan.toml", SILOS.as_bytes());
+        let block = duplicated_block();
+        write(dir.path(), "src/api/a.rs", block.as_bytes());
+        write(dir.path(), "src/api/b.rs", block.as_bytes());
+
+        let config = silo_config(SILOS);
+        let options = ScanOptions {
+            config: Some(&config),
+            ..ScanOptions::default()
+        };
+        let err = scan_opts(
+            &dir.path().join("src/api"),
+            &silo_duplication_rules(),
+            &options,
+            &mut |_| {},
+        )
+        .unwrap_err();
+
+        assert!(
+            err.contains("silo-scoped duplication rules are relative to"),
+            "{err}"
+        );
+        assert!(err.contains("siloscan.toml"), "{err}");
+    }
+
+    #[test]
+    fn a_silo_scoped_duplication_rule_reports_each_offending_silo() {
+        let dir = tempdir();
+        let block = duplicated_block();
+        write(dir.path(), "src/api/a.rs", block.as_bytes());
+        write(dir.path(), "src/api/b.rs", block.as_bytes());
+        write(dir.path(), "src/db/c.rs", b"let unique = 1;\n");
+
+        let config = silo_config("[silos]\napi = [\"src/api/**\"]\ndb = [\"src/db/**\"]\n");
+        let options = ScanOptions {
+            config: Some(&config),
+            ..ScanOptions::default()
+        };
+        let report =
+            scan_opts(dir.path(), &silo_duplication_rules(), &options, &mut |_| {}).unwrap();
+
+        let gate: Vec<&Finding> = report
+            .findings
+            .iter()
+            .filter(|f| f.rule_id == "quality.silo-duplication")
+            .collect();
+        assert_eq!(gate.len(), 1, "only api is over budget");
+        assert_eq!(gate[0].path, ".");
+        assert_eq!(gate[0].matched, "silo api: density 100.0% (max 10.0%)");
+        assert_eq!(
+            gate[0].fingerprint,
+            crate::findings::fingerprint("quality.silo-duplication", ".", "silo api", 0)
+        );
+    }
+
+    #[test]
+    fn metrics_and_duplication_survive_workers_and_cache_state() {
+        let dir = tempdir();
+        synthetic_tree(dir.path(), 60);
+        duplicated_tree(dir.path());
+
+        let rules = duplication_ruleset();
+        let cache = crate::cache::Cache::open(dir.path(), &rules);
+        let report = |workers, cache: Option<&crate::cache::Cache>| {
+            let options = ScanOptions {
+                cache,
+                ..ScanOptions::default()
+            };
+            let report = run_with_workers(dir.path(), &rules, &options, None, &mut |_| {}, workers);
+            serde_json::to_string(&report).unwrap()
+        };
+
+        // Cold cache first, so the warm run below reads what it wrote.
+        let cold = report(1, Some(&cache));
+        let warm = report(8, Some(&cache));
+        let uncached = report(4, None);
+
+        assert_eq!(cold, warm, "a warm cache must not move the metrics");
+        assert_eq!(cold, uncached, "the cache must not move the metrics at all");
+        // Non-empty, so the comparisons above are not vacuous.
+        assert!(cold.contains("metrics.duplicate-block"));
+        assert!(cold.contains("quality.duplication"));
+        assert!(cold.contains("\"duplicated_lines\":24"));
     }
 
     #[cfg(unix)]

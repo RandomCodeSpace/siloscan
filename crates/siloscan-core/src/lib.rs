@@ -10,6 +10,7 @@ pub mod findings;
 pub mod graph;
 pub mod harness;
 pub mod lang;
+pub mod metrics;
 pub mod output;
 pub mod output_sarif;
 pub mod parsers;

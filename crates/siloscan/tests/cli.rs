@@ -255,6 +255,14 @@ fn stderr(output: &Output) -> String {
     String::from_utf8(output.stderr.clone()).expect("stderr should be UTF-8")
 }
 
+/// Human stdout without the metrics summary every scan ends with, so the
+/// assertions below pin the findings listing alone.
+fn report_lines(text: &str) -> Vec<&str> {
+    text.lines()
+        .filter(|line| !line.starts_with("metrics: "))
+        .collect()
+}
+
 #[test]
 fn findings_exit_one_in_canonical_order() {
     let (rules, src) = fixture(MATCHING_RULE);
@@ -262,7 +270,7 @@ fn findings_exit_one_in_canonical_order() {
 
     assert_eq!(output.status.code(), Some(1));
     let stdout = String::from_utf8(output.stdout).unwrap();
-    let lines: Vec<&str> = stdout.lines().collect();
+    let lines = report_lines(&stdout);
     assert_eq!(
         lines,
         vec![
@@ -298,7 +306,12 @@ fn no_findings_exits_zero() {
     let output = run(rules.path(), src.path(), &[]);
 
     assert_eq!(output.status.code(), Some(0));
-    assert!(String::from_utf8(output.stdout).unwrap().is_empty());
+    // No findings, so the metrics summary is the whole of human output.
+    let text = stdout(&output);
+    assert_eq!(
+        text.lines().collect::<Vec<_>>(),
+        vec!["metrics: 3 lines, 3 code lines, 0 duplicated lines, 0.0% duplication"]
+    );
 }
 
 #[test]
@@ -335,7 +348,7 @@ fn secret_rule_reports_only_above_the_entropy_threshold() {
 
     assert_eq!(output.status.code(), Some(1));
     let text = stdout(&output);
-    let lines: Vec<&str> = text.lines().collect();
+    let lines = report_lines(&text);
     assert_eq!(lines, vec!["s.rs:2:10 error test.token token found"]);
 }
 
@@ -352,7 +365,7 @@ fn baseline_then_rescan_reports_baselined_and_exits_zero() {
 
     assert_eq!(rescan.status.code(), Some(0));
     let text = stdout(&rescan);
-    let lines: Vec<&str> = text.lines().collect();
+    let lines = report_lines(&text);
     assert_eq!(lines, vec!["0 findings (2 baselined, 0 suppressed)"]);
 }
 
@@ -368,7 +381,7 @@ fn inline_ignore_line_suppresses_and_is_counted() {
 
     assert_eq!(output.status.code(), Some(1));
     let text = stdout(&output);
-    let lines: Vec<&str> = text.lines().collect();
+    let lines = report_lines(&text);
     assert_eq!(
         lines,
         vec![
@@ -451,7 +464,7 @@ fn test_subcommand_fails_on_a_missing_expectation() {
 
     assert_eq!(output.status.code(), Some(1));
     let text = stdout(&output);
-    let lines: Vec<&str> = text.lines().collect();
+    let lines = report_lines(&text);
     assert_eq!(
         lines,
         vec![
@@ -468,7 +481,8 @@ fn no_default_rules_without_rule_dirs_scans_with_zero_rules() {
     let output = run_args(&[path_str(&src), "--no-default-rules"]);
 
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
-    assert!(stdout(&output).is_empty(), "stdout: {}", stdout(&output));
+    let text = stdout(&output);
+    assert!(report_lines(&text).is_empty(), "stdout: {text}");
 }
 
 #[test]
@@ -478,7 +492,7 @@ fn ast_rule_reports_the_report_capture_position() {
 
     assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
     let text = stdout(&output);
-    let lines: Vec<&str> = text.lines().collect();
+    let lines = report_lines(&text);
     assert_eq!(lines, vec!["src/main.rs:3:5 error ast.dbg leftover dbg"]);
 }
 
@@ -532,7 +546,7 @@ fn editing_a_scanned_file_invalidates_its_cached_entry() {
 
     let first = run(rules.path(), src.path(), &["--no-default-rules"]);
     assert_eq!(
-        stdout(&first).lines().collect::<Vec<_>>(),
+        report_lines(&stdout(&first)),
         vec!["src/main.rs:3:5 error ast.dbg leftover dbg"]
     );
     let before = cache_entries(src.path());
@@ -546,7 +560,7 @@ fn editing_a_scanned_file_invalidates_its_cached_entry() {
     let second = run(rules.path(), src.path(), &["--no-default-rules"]);
     assert_eq!(second.status.code(), Some(1), "{}", stderr(&second));
     assert_eq!(
-        stdout(&second).lines().collect::<Vec<_>>(),
+        report_lines(&stdout(&second)),
         vec!["src/main.rs:4:5 error ast.dbg leftover dbg"]
     );
     assert!(
@@ -564,7 +578,7 @@ fn boundary_rule_reports_the_denied_import_and_leaves_same_silo_imports_alone() 
 
     assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
     let text = stdout(&output);
-    let lines: Vec<&str> = text.lines().collect();
+    let lines = report_lines(&text);
     assert_eq!(
         lines,
         vec!["src/api/handler.js:1:15 error arch.api-db api must not import db"]
@@ -611,7 +625,7 @@ fn coverage_rule_reports_a_file_below_the_threshold() {
 
     assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
     let text = stdout(&output);
-    let lines: Vec<&str> = text.lines().collect();
+    let lines = report_lines(&text);
     assert_eq!(
         lines,
         vec!["src/low.rs:1:1 error cov.min line coverage below threshold"]
@@ -626,7 +640,8 @@ fn coverage_rules_are_inert_without_a_report() {
     let output = run(rules.path(), src.path(), &["--no-default-rules"]);
 
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
-    assert!(stdout(&output).is_empty(), "stdout: {}", stdout(&output));
+    let text = stdout(&output);
+    assert!(report_lines(&text).is_empty(), "stdout: {text}");
 }
 
 /// A consumer that exits early (`siloscan | head`) closes the read end of the

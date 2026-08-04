@@ -171,6 +171,7 @@ mod tests {
             }],
             graph: Default::default(),
             boundary_edges: Vec::new(),
+            metrics: Default::default(),
         }
     }
 
@@ -251,6 +252,7 @@ mod tests {
                 skipped: Vec::new(),
                 graph: Default::default(),
                 boundary_edges: Vec::new(),
+                metrics: Default::default(),
             },
         );
 
