@@ -61,11 +61,40 @@
 //! Walk order is unaffected by any of this: results are sorted bytewise by
 //! path after collection, and the counts are sums over set membership, so they
 //! do not depend on the order any directory was read in.
+//!
+//! ## Saying which links were not followed (1.4.0)
+//!
+//! Symbolic links were the last silent hole. The walk does not follow them -
+//! for good reasons, kept below - and up to 1.3.0 it also said nothing about
+//! them: a link was neither a file nor a directory, so it fell out of the walk
+//! at the type check and appeared in no finding, no skipped entry and no
+//! ignored count. A tree containing `.env -> ../vault/prod.env` with a live key
+//! behind it scanned clean and exited 0, while naming the same file directly
+//! exited 1. Same key, two verdicts, and the quiet one is the default.
+//!
+//! Every link the walk meets is now recorded ([`WalkResult::symlinks`]) with a
+//! [`SymlinkDisposition`] that says what happened to the file behind it. The
+//! distinction the reader needs is target *location*, not link type: a link
+//! into the scan root costs nothing, because the walk reaches the target on its
+//! own path anyway, while a link out of the root - or a broken one - is a file
+//! the scan never opened.
+//!
+//! Following by default would close the hole by opening two worse ones. A link
+//! out of the tree makes the scan a function of what is *around* the tree,
+//! which is the same defect as a parent `.gitignore` pointed the other way: a
+//! scan of the same commit would then read `/etc`, or a home directory, or
+//! whatever a checked-in link names, and report findings that belong to no file
+//! under review. And a link into an ancestor makes the walk unbounded until
+//! something detects the cycle. [`WalkOptions::follow_symlinks`] therefore
+//! defaults to off, and even when it is on a target outside the root is still
+//! refused and still recorded, because a scan has to stay self-contained to
+//! mean anything.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use ignore::Match;
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
@@ -223,8 +252,9 @@ impl Ignored {
     /// part of what the count means: the directory clause is what stops the
     /// number being read as a file count.
     pub fn summary_line(self) -> Option<String> {
-        let files = quantity(self.files, "file", "files");
-        let directories = quantity(self.directories, "directory", "directories");
+        // `usize` to `u64` is lossless on every target this builds for.
+        let files = quantity(self.files as u64, "file", "files");
+        let directories = quantity(self.directories as u64, "directory", "directories");
         match (self.files, self.directories) {
             (0, 0) => None,
             (_, 0) => Some(format!("{files} ignored by .gitignore/.ignore")),
@@ -248,20 +278,332 @@ impl Ignored {
     }
 }
 
-fn quantity(count: usize, singular: &str, plural: &str) -> String {
+/// `count` with the right noun for it. Shared across the crate so that one
+/// report cannot say "1 file" in one line and "1 lines" in the next.
+pub(crate) fn quantity(count: u64, singular: &str, plural: &str) -> String {
     match count {
         1 => format!("1 {singular}"),
         _ => format!("{count} {plural}"),
     }
 }
 
-/// Everything a walk has to say: the files to scan, and how much was kept out
-/// of them.
+/// What a walk did about one symbolic link, and so what happened to the file
+/// behind it.
+///
+/// Two of these mean the target was read and three mean it was not, and the
+/// split is by where the target *is*, not by what kind of thing it is: a link
+/// into the scan root is bookkeeping, a link out of it is a file the scan never
+/// opened. [`SymlinkDisposition::reason`] is the wording that goes in a report,
+/// and it is a constant per case so two runs over the same tree word the same
+/// link identically.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum SymlinkDisposition {
+    /// The target is under the scan root, and the walk was not following links,
+    /// so it reached the target by its own path instead. Informational: nothing
+    /// is missing from the scan.
+    InsideRoot,
+    /// The target is under the scan root and the walk followed the link, so the
+    /// target was read through it as well as on its own path. Only possible
+    /// under [`WalkOptions::follow_symlinks`].
+    Followed,
+    /// The target is outside the scan root. Refused, so the target was never
+    /// read - the security-relevant case, and the reason the walk records links
+    /// at all.
+    OutsideRoot,
+    /// The link resolves to nothing: the target does not exist.
+    Broken,
+    /// The link points at a directory that contains it, so following it would
+    /// not terminate. Not followed; the directory itself is under the scan root
+    /// and is walked on its own path, so nothing is missing from the scan.
+    Cycle,
+    /// The target could not be resolved at all - a cycle among links, a
+    /// directory the scan may not traverse, a path the filesystem rejected.
+    /// Treated as unread, because it is.
+    Unresolvable,
+}
+
+impl SymlinkDisposition {
+    /// One clause for a report, naming what was and was not scanned.
+    ///
+    /// A constant per case, so the wording is a property of the disposition and
+    /// not of the run: a link is described the same way on every machine, which
+    /// is what lets a report be diffed.
+    pub fn reason(self) -> &'static str {
+        match self {
+            SymlinkDisposition::InsideRoot => {
+                "symlink to a path inside the scan root; the target is walked on its own path, so \
+                 nothing was read through the link"
+            }
+            SymlinkDisposition::Followed => {
+                "symlink to a path inside the scan root; followed, so the target was read through \
+                 the link as well as on its own path"
+            }
+            SymlinkDisposition::OutsideRoot => {
+                "symlink to a path outside the scan root; its target was not scanned"
+            }
+            SymlinkDisposition::Broken => {
+                "broken symlink; its target does not exist and was not scanned"
+            }
+            SymlinkDisposition::Cycle => {
+                "symlink to a directory that contains it; not followed, and the target is walked \
+                 on its own path"
+            }
+            SymlinkDisposition::Unresolvable => {
+                "symlink whose target could not be resolved; its target was not scanned"
+            }
+        }
+    }
+
+    /// Whether the file behind the link was read by this scan, by either path.
+    ///
+    /// False is the case a reader has to act on: the report says where the scan
+    /// did not look, and this is the flag that separates that from bookkeeping.
+    pub fn target_was_scanned(self) -> bool {
+        matches!(
+            self,
+            SymlinkDisposition::InsideRoot
+                | SymlinkDisposition::Followed
+                | SymlinkDisposition::Cycle
+        )
+    }
+}
+
+/// One symbolic link the walk met, and what it did about it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SymlinkEntry {
+    /// The link itself, spelled as the walk spells it: under the scan root as
+    /// the caller gave it, never resolved. The target is deliberately absent -
+    /// a link out of the tree names a path the report has no business
+    /// repeating, and the disposition is what a reader has to act on.
+    pub path: PathBuf,
+    /// What happened to the file behind it.
+    pub disposition: SymlinkDisposition,
+}
+
+/// Everything a walk has to say: the files to scan, how much was kept out of
+/// them, and which links it declined to follow.
 pub struct WalkResult {
     /// Files to scan, sorted bytewise by path.
     pub files: Vec<PathBuf>,
     /// What the ignore machinery excluded on the way.
     pub ignored: Ignored,
+    /// Every symbolic link the walk met, sorted bytewise by path, one entry per
+    /// link.
+    ///
+    /// A list and not a count, unlike [`Ignored`]: an ignored `node_modules` is
+    /// one pruned directory standing for a hundred thousand files, while a link
+    /// is one path a reader may have to go and look at by hand, and "3 links
+    /// were not followed" does not say which. There is no cap on the list for
+    /// the same reason there is none on the binary skips beside it in a report:
+    /// the walk records one entry per link it actually reached, links under a
+    /// pruned directory are never enumerated at all, and the total is bounded
+    /// by the entries the scan was already going to visit and read.
+    ///
+    /// Links excluded by an ignore rule are not here - they are in
+    /// [`Ignored`], which is where the walk already says what an ignore file
+    /// removed. Recording them twice would double-count the same exclusion.
+    pub symlinks: Vec<SymlinkEntry>,
+}
+
+/// Everything a walk needs beyond the root it starts at.
+///
+/// It exists to keep "which files does this scan read" answerable from one
+/// value: the ignore sources, the directories above the root whose ignore files
+/// are in scope, and whether links are followed all decide that, and a caller
+/// that has to pass three loose arguments to say it will eventually pass them
+/// in the wrong order.
+///
+/// [`Default`] is not derived on purpose: there is no default scan root, and
+/// the ignore policy is a decision the caller makes. Build it from
+/// [`WalkOptions::new`].
+#[derive(Debug, Clone, Copy)]
+pub struct WalkOptions<'a> {
+    /// Which ignore sources the walk consults.
+    pub ignore: &'a IgnoreOptions,
+    /// Directories above the scan root whose ignore files are in scope,
+    /// outermost first - see
+    /// [`Config::project_ignore_dirs`](crate::config::Config::project_ignore_dirs),
+    /// the only intended source. Empty is the self-contained default.
+    pub project_dirs: &'a [PathBuf],
+    /// Follow symbolic links whose target is under the scan root. Default
+    /// `false`.
+    ///
+    /// Off, a link is recorded and its target is reached only by its own path,
+    /// which for an in-root target is every bit as thorough and costs nothing.
+    /// On, an in-root target is additionally read through the link, which is
+    /// what makes a link to a file the walk would not otherwise open - one
+    /// naming an ignored path, say - reachable. The cost is that a file behind
+    /// a followed link is scanned twice, under two paths, and so reported
+    /// twice; that is what following means, and it is why this is opt-in.
+    ///
+    /// A target *outside* the scan root is refused either way. A scan that
+    /// reads files above its own root is a scan of the machine it ran on, and
+    /// its result stops being a property of the tree under review. Loops are
+    /// bounded: a cycle among links fails to resolve and is refused before it
+    /// is entered, and a link into an ancestor directory is caught by the
+    /// walker's own ancestor check.
+    pub follow_symlinks: bool,
+}
+
+impl<'a> WalkOptions<'a> {
+    /// A walk under `ignore`, self-contained: no directories above the root are
+    /// consulted, and links are not followed.
+    pub fn new(ignore: &'a IgnoreOptions) -> Self {
+        WalkOptions {
+            ignore,
+            project_dirs: &[],
+            follow_symlinks: false,
+        }
+    }
+
+    /// The directories above the scan root whose ignore files are in scope,
+    /// outermost first.
+    pub fn in_project(mut self, project_dirs: &'a [PathBuf]) -> Self {
+        self.project_dirs = project_dirs;
+        self
+    }
+
+    /// Follow links whose target is under the scan root. See
+    /// [`WalkOptions::follow_symlinks`] for what it does and does not widen.
+    pub fn follow_symlinks(mut self, follow: bool) -> Self {
+        self.follow_symlinks = follow;
+        self
+    }
+}
+
+/// A recorded link, and whether the walk got an entry for it.
+///
+/// The two are independent, which is why `visited` is tracked rather than
+/// derived: a link into a directory that contains it is walked on its own path,
+/// so nothing is missing from the scan, and yet the walk never yields an entry
+/// for the link itself, because the descent fails first. The ignore counts are
+/// a difference between what the walk saw and what `read_dir` sees, so they
+/// need the second fact and not the first.
+struct LoggedLink {
+    entry: SymlinkEntry,
+    visited: bool,
+}
+
+/// Where the walk writes links as it meets them.
+///
+/// Shared rather than returned because the decision to record a link and the
+/// decision to descend into it are the same decision, and that one is made in
+/// the walker's entry filter, which owns neither the walk nor its results.
+type SymlinkLog = Arc<Mutex<Vec<LoggedLink>>>;
+
+/// Add one link to the log.
+///
+/// A poisoned lock is taken anyway: the only things that write through it are
+/// this function and the filter closure, neither of which can panic while
+/// holding it, and a walk that went quiet about its links would be the failure
+/// the list exists to prevent.
+fn log_symlink(log: &SymlinkLog, path: &Path, disposition: SymlinkDisposition, visited: bool) {
+    log.lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .push(LoggedLink {
+            entry: SymlinkEntry {
+                path: path.to_path_buf(),
+                disposition,
+            },
+            visited,
+        });
+}
+
+/// The recorded links, sorted bytewise by path and owned.
+fn drain_symlinks(log: &SymlinkLog) -> Vec<LoggedLink> {
+    let mut links =
+        std::mem::take(&mut *log.lock().unwrap_or_else(|poisoned| poisoned.into_inner()));
+    links.sort_by(|a, b| {
+        a.entry
+            .path
+            .as_os_str()
+            .as_encoded_bytes()
+            .cmp(b.entry.path.as_os_str().as_encoded_bytes())
+    });
+    links
+}
+
+/// The path an iterator error is about.
+///
+/// `ignore::Error` tags errors with a depth and a path by wrapping them, and
+/// publishes no accessor for the path - only for the depth. The variants are
+/// public, so this unwraps them by hand.
+fn error_path(error: &ignore::Error) -> Option<&Path> {
+    match error {
+        ignore::Error::WithPath { path, .. } => Some(path),
+        ignore::Error::WithDepth { err, .. } | ignore::Error::WithLineNumber { err, .. } => {
+            error_path(err)
+        }
+        ignore::Error::Loop { child, .. } => Some(child),
+        _ => None,
+    }
+}
+
+/// Whether an iterator error is the walker refusing to descend into a cycle.
+fn is_loop_error(error: &ignore::Error) -> bool {
+    match error {
+        ignore::Error::Loop { .. } => true,
+        ignore::Error::WithPath { err, .. }
+        | ignore::Error::WithDepth { err, .. }
+        | ignore::Error::WithLineNumber { err, .. } => is_loop_error(err),
+        _ => false,
+    }
+}
+
+/// Record a link the walk failed on, so failing to walk it is not the same as
+/// there being nothing there.
+///
+/// Following resolves a link before the walker's filter can see it, so a broken
+/// one and a cyclic one never reach the filter at all: they arrive as iterator
+/// errors, which every walk here otherwise discards. Discarding them is what
+/// made a dangling `.env` invisible under `follow_symlinks`, which is the same
+/// silence in a smaller room.
+///
+/// Errors about anything that is not a link keep the old treatment - a
+/// directory that became unreadable mid-walk is not a link, and the entries
+/// under it are reported by the ignore counts as unseen.
+fn log_failed_link(log: &SymlinkLog, error: &ignore::Error, resolved_root: &Path) {
+    let Some(path) = error_path(error) else {
+        return;
+    };
+    if !fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_symlink()) {
+        return;
+    }
+    // The walk could not read it, so `Followed` is not a verdict available
+    // here: a link that resolves inside the root and still failed is
+    // unresolvable as far as this scan is concerned.
+    let disposition = match is_loop_error(error) {
+        true => SymlinkDisposition::Cycle,
+        false => match classify_symlink(path, resolved_root, false) {
+            SymlinkDisposition::InsideRoot => SymlinkDisposition::Unresolvable,
+            other => other,
+        },
+    };
+    log_symlink(log, path, disposition, false);
+}
+
+/// What resolving a link says about where its target is.
+///
+/// Resolution is [`Path::canonicalize`], which resolves every link in the path
+/// and not just the last one, so a target reached through a second link inside
+/// the root is inside the root. The root is resolved the same way ([`resolve`]),
+/// so a scan root that is itself reached through a link does not make every
+/// entry under it look external.
+///
+/// A link that does not resolve is not assumed harmless: a missing target is
+/// [`SymlinkDisposition::Broken`] and everything else - a cycle, a directory
+/// the process may not traverse - is [`SymlinkDisposition::Unresolvable`].
+/// Both mean the same thing to a reader, which is that nothing was read.
+fn classify_symlink(link: &Path, resolved_root: &Path, follow: bool) -> SymlinkDisposition {
+    match link.canonicalize() {
+        Ok(target) if target.starts_with(resolved_root) => match follow {
+            true => SymlinkDisposition::Followed,
+            false => SymlinkDisposition::InsideRoot,
+        },
+        Ok(_) => SymlinkDisposition::OutsideRoot,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => SymlinkDisposition::Broken,
+        Err(_) => SymlinkDisposition::Unresolvable,
+    }
 }
 
 /// Walk root directory using the ignore crate, with the default
@@ -288,8 +630,9 @@ pub fn collect_files(root: &Path) -> Vec<PathBuf> {
 /// checkout sees. This knob does not widen where ignore files are read from -
 /// that is `respect_parent_ignores`, which is off by default.
 pub fn collect_files_with(root: &Path, opts: &IgnoreOptions) -> Vec<PathBuf> {
+    let (builder, _links) = walker(root, &WalkOptions::new(opts));
     let mut files = Vec::new();
-    for entry in walker(root, opts, &[]).build().flatten() {
+    for entry in builder.build().flatten() {
         if entry.file_type().is_some_and(|ft| ft.is_file()) {
             files.push(entry.path().to_path_buf());
         }
@@ -335,6 +678,83 @@ pub fn collect_files_counted(root: &Path, opts: &IgnoreOptions) -> WalkResult {
     collect_files_counted_in_project(root, opts, &[])
 }
 
+/// As [`collect_files_counted_in_project`], under an explicit [`WalkOptions`] -
+/// the only entry point that can be told to follow links.
+///
+/// The other three are this one with [`WalkOptions::follow_symlinks`] off,
+/// which is the shipped default. They stay because a caller that has no opinion
+/// about links should not have to express one.
+pub fn collect_files_counted_with(root: &Path, options: &WalkOptions) -> WalkResult {
+    let (builder, links) = walker(root, options);
+    let mut files = Vec::new();
+    // What the walk saw in each directory it entered, so entries are compared
+    // against the walk's own record rather than against a second, differently
+    // configured walk that could disagree with it. A directory the walk entered
+    // has a record even when nothing inside it survived, which is what makes
+    // "everything here was excluded" countable.
+    let mut visited: HashMap<PathBuf, Tally> = HashMap::new();
+    let resolved_root = resolve(root);
+
+    for result in builder.build() {
+        // A walk error is still not a scan failure - the tree can move
+        // underneath a walk, and a directory that cannot be read is reported by
+        // the ignore counts. A link the walk could not follow is the exception:
+        // it is a named path nothing was read from, and it is recorded as one.
+        let entry = match result {
+            Ok(entry) => entry,
+            Err(error) => {
+                log_failed_link(&links, &error, &resolved_root);
+                continue;
+            }
+        };
+        let path = entry.path();
+        // A followed link is a link on one side of the count and, because
+        // `file_type` resolves it, a directory on the other. `read_dir` does
+        // not resolve, so the walk must not either: the link is tallied in its
+        // parent as the link it is, and the directory record below is keyed on
+        // the link's own path, which is the path its children were walked
+        // under.
+        let is_link = entry.path_is_symlink();
+        let is_dir = entry.file_type().is_some_and(|kind| kind.is_dir());
+        if is_dir {
+            visited.entry(path.to_path_buf()).or_default();
+        } else if entry.file_type().is_some_and(|kind| kind.is_file()) {
+            files.push(path.to_path_buf());
+        }
+        // The root is visited at depth 0; its parent is outside the scan and
+        // has no place in the record.
+        if entry.depth() > 0
+            && let Some(parent) = path.parent()
+        {
+            visited
+                .entry(parent.to_path_buf())
+                .or_default()
+                .add(is_dir && !is_link);
+        }
+    }
+
+    let links = drain_symlinks(&links);
+    // A link the walk never got an entry for is absent from its record and
+    // present in `read_dir`, which would make it look like an ignore rule's
+    // doing. It is the walker's own doing, and it is already reported by name.
+    // With following off there is nothing here: a link is visited like any
+    // other entry and cancels out on both sides, which is what keeps the counts
+    // identical to the ones 1.3.0 reported.
+    let unvisited: HashSet<&Path> = links
+        .iter()
+        .filter(|link| !link.visited)
+        .map(|link| link.entry.path.as_path())
+        .collect();
+    let ignored = count_ignored(options.ignore, &visited, &unvisited);
+
+    sort_paths(&mut files);
+    WalkResult {
+        files,
+        ignored,
+        symlinks: links.into_iter().map(|link| link.entry).collect(),
+    }
+}
+
 /// As [`collect_files_counted`], and it also reads the ignore files in
 /// `project_dirs` - directories above the scan root that the loaded config
 /// declares part of the same project, outermost first.
@@ -356,36 +776,7 @@ pub fn collect_files_counted_in_project(
     opts: &IgnoreOptions,
     project_dirs: &[PathBuf],
 ) -> WalkResult {
-    let mut files = Vec::new();
-    // What the walk saw in each directory it entered, so entries are compared
-    // against the walk's own record rather than against a second, differently
-    // configured walk that could disagree with it. A directory the walk entered
-    // has a record even when nothing inside it survived, which is what makes
-    // "everything here was excluded" countable.
-    let mut visited: HashMap<PathBuf, Tally> = HashMap::new();
-
-    for entry in walker(root, opts, project_dirs).build().flatten() {
-        let path = entry.path();
-        let is_dir = entry.file_type().is_some_and(|kind| kind.is_dir());
-        if is_dir {
-            visited.entry(path.to_path_buf()).or_default();
-        } else if entry.file_type().is_some_and(|kind| kind.is_file()) {
-            files.push(path.to_path_buf());
-        }
-        // The root is visited at depth 0; its parent is outside the scan and
-        // has no place in the record.
-        if entry.depth() > 0
-            && let Some(parent) = path.parent()
-        {
-            visited.entry(parent.to_path_buf()).or_default().add(is_dir);
-        }
-    }
-
-    sort_paths(&mut files);
-    WalkResult {
-        files,
-        ignored: count_ignored(opts, &visited),
-    }
+    collect_files_counted_with(root, &WalkOptions::new(opts).in_project(project_dirs))
 }
 
 /// Entries of one directory, split the way [`Ignored`] splits them: directories,
@@ -421,7 +812,11 @@ impl Tally {
 /// the walk saw and that is gone by the time the directory is read back would
 /// otherwise make a count negative. Over-reporting what the scan did not look at
 /// is the safe direction, and zero is as far down as that goes.
-fn count_ignored(opts: &IgnoreOptions, visited: &HashMap<PathBuf, Tally>) -> Ignored {
+fn count_ignored(
+    opts: &IgnoreOptions,
+    visited: &HashMap<PathBuf, Tally>,
+    unvisited_links: &HashSet<&Path>,
+) -> Ignored {
     if !opts.consults_any_source() {
         return Ignored::default();
     }
@@ -434,8 +829,12 @@ fn count_ignored(opts: &IgnoreOptions, visited: &HashMap<PathBuf, Tally>) -> Ign
         let mut present = Tally::default();
         for entry in entries.flatten() {
             // Excluded by the walker as policy, not by any ignore rule, so it
-            // is absent from both tallies rather than counted in one.
-            if is_excluded_name(&entry.file_name()) {
+            // is absent from both tallies rather than counted in one. A link
+            // the walk got no entry for is the same case: reported by path in
+            // `WalkResult::symlinks`, and not an ignore rule's doing.
+            if is_excluded_name(&entry.file_name())
+                || unvisited_links.contains(entry.path().as_path())
+            {
                 continue;
             }
             present.add(entry.file_type().is_ok_and(|kind| kind.is_dir()));
@@ -563,16 +962,33 @@ fn resolve(path: &Path) -> PathBuf {
 }
 
 /// The one walker configuration, so a counted walk and an uncounted one cannot
-/// drift apart in what they consider a file.
+/// drift apart in what they consider a file, and the log every symbolic link it
+/// meets is written to.
 ///
-/// `project_dirs` are directories above the scan root whose ignore files are in
-/// scope for this walk, outermost first - see
+/// `options.project_dirs` are directories above the scan root whose ignore
+/// files are in scope for this walk, outermost first - see
 /// [`Config::project_ignore_dirs`](crate::config::Config::project_ignore_dirs),
 /// which is the only thing that produces a non-empty list. They are applied by
 /// [`ProjectIgnores`] rather than handed to the `ignore` crate, which cannot
 /// root them where they came from.
-fn walker(root: &Path, opts: &IgnoreOptions, project_dirs: &[PathBuf]) -> ignore::WalkBuilder {
-    let project = ProjectIgnores::build(root, opts, project_dirs);
+///
+/// Links are recorded in the entry filter rather than in the caller's loop, and
+/// the reason is that the filter is the only place both decisions can be made
+/// together: whether the report mentions a link, and whether the walk descends
+/// through it. It is also the only place that sees a link the walk is about to
+/// refuse - a refused entry is never yielded, so a loop over the results could
+/// not report one. The `ignore` crate applies its ignore matchers before this
+/// filter runs, so a link an ignore rule already excluded is not recorded here:
+/// that exclusion is counted in [`Ignored`], and saying it twice would make one
+/// omission look like two.
+fn walker(root: &Path, options: &WalkOptions) -> (ignore::WalkBuilder, SymlinkLog) {
+    let opts = options.ignore;
+    let project = ProjectIgnores::build(root, opts, options.project_dirs);
+    let log: SymlinkLog = SymlinkLog::default();
+    let recorder = Arc::clone(&log);
+    let resolved_root = resolve(root);
+    let follow = options.follow_symlinks;
+
     let mut builder = ignore::WalkBuilder::new(root);
     builder
         .hidden(false)
@@ -582,6 +998,7 @@ fn walker(root: &Path, opts: &IgnoreOptions, project_dirs: &[PathBuf]) -> ignore
         .git_global(opts.respect_global_gitignore)
         .git_exclude(opts.respect_git_exclude)
         .require_git(false)
+        .follow_links(follow)
         .filter_entry(move |entry| {
             if is_excluded_name(entry.file_name()) {
                 return false;
@@ -591,18 +1008,37 @@ fn walker(root: &Path, opts: &IgnoreOptions, project_dirs: &[PathBuf]) -> ignore
             // its children are matched against the same pattern through their
             // parents, so an excluded root is an empty walk and a count of what
             // was left out.
+            //
+            // A scan root that is itself a link is walked for the same reason,
+            // and it is not recorded: the caller named it, the walker descends
+            // into it, and "the scan root's target was not scanned" would be
+            // false as well as noise.
             if entry.depth() == 0 {
                 return true;
             }
-            match &project {
-                Some(project) => !project.excludes(
+            if let Some(project) = &project
+                && project.excludes(
                     entry.path(),
                     entry.file_type().is_some_and(|kind| kind.is_dir()),
-                ),
-                None => true,
+                )
+            {
+                return false;
             }
+            if !entry.path_is_symlink() {
+                return true;
+            }
+            let disposition = classify_symlink(entry.path(), &resolved_root, follow);
+            // With following off nothing is refused: the link is visited like
+            // any other entry, contributes to the ignore counts as it always
+            // did, and drops out of the results because it is neither a file
+            // nor a directory. With following on, a target outside the root -
+            // or one that will not resolve - is refused here, before the walk
+            // can read a file the scan has no claim to.
+            let visited = !follow || disposition.target_was_scanned();
+            log_symlink(&recorder, entry.path(), disposition, visited);
+            visited
         });
-    builder
+    (builder, log)
 }
 
 fn sort_paths(paths: &mut [PathBuf]) {
@@ -1586,6 +2022,360 @@ mod tests {
         );
         assert_eq!(walked.files.len(), 4, "{:?}", walked.files);
         assert!(walked.ignored.is_empty(), "{:?}", walked.ignored);
+    }
+
+    // Symbolic links: what the walk says about the files behind them.
+    //
+    // Unix only, because the fixtures need a link and creating one on Windows
+    // needs a privilege the test runner may not have. The walker's behavior is
+    // not conditional - `path_is_symlink` and `canonicalize` are as available
+    // there - so what is missing on Windows is the fixture, not the code.
+
+    /// Every recorded link under `options`, as `(path relative to root,
+    /// disposition)`, in the order the walk reports them.
+    #[cfg(unix)]
+    fn links(root: &Path, options: &WalkOptions) -> Vec<(String, SymlinkDisposition)> {
+        collect_files_counted_with(root, options)
+            .symlinks
+            .into_iter()
+            .map(|link| {
+                (
+                    link.path
+                        .strip_prefix(root)
+                        .unwrap_or(&link.path)
+                        .to_string_lossy()
+                        .replace('\\', "/"),
+                    link.disposition,
+                )
+            })
+            .collect()
+    }
+
+    /// Paths relative to `root`, forward-slashed, under `options`.
+    #[cfg(unix)]
+    fn walked_names(root: &Path, options: &WalkOptions) -> Vec<String> {
+        collect_files_counted_with(root, options)
+            .files
+            .iter()
+            .map(|path| {
+                path.strip_prefix(root)
+                    .unwrap_or(path)
+                    .to_string_lossy()
+                    .replace('\\', "/")
+            })
+            .collect()
+    }
+
+    /// The shipped defect: `.env -> ../vault/prod.env` with a live key behind
+    /// it was scanned by nobody and reported by nothing.
+    ///
+    /// The file is still not read - following out of the tree is not the fix -
+    /// but the report now says so, and says it in wording that does not read
+    /// like bookkeeping.
+    #[cfg(unix)]
+    #[test]
+    fn a_link_out_of_the_root_is_recorded_and_its_target_is_not_scanned() {
+        let outside = tempfile::tempdir().unwrap();
+        let vault = outside.path().join("vault");
+        fs::create_dir(&vault).unwrap();
+        fs::write(vault.join("prod.env"), "AWS_SECRET=AKIAIOSFODNN7EXAMPLE\n").unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(vault.join("prod.env"), dir.path().join(".env")).unwrap();
+        fs::write(dir.path().join("main.rs"), "fn main() {}").unwrap();
+
+        let options = IgnoreOptions::default();
+        let walked = collect_files_counted_with(dir.path(), &WalkOptions::new(&options));
+
+        assert_eq!(
+            walked.files,
+            vec![dir.path().join("main.rs")],
+            "the target must not be read through the link"
+        );
+        assert_eq!(
+            links(dir.path(), &WalkOptions::new(&options)),
+            vec![(".env".to_string(), SymlinkDisposition::OutsideRoot)]
+        );
+        assert!(!SymlinkDisposition::OutsideRoot.target_was_scanned());
+        assert_eq!(
+            SymlinkDisposition::OutsideRoot.reason(),
+            "symlink to a path outside the scan root; its target was not scanned"
+        );
+        // The link is not an ignore rule's doing, and it is not counted as one.
+        assert!(walked.ignored.is_empty(), "{:?}", walked.ignored);
+    }
+
+    /// A link into the tree costs the scan nothing: the walk reaches the target
+    /// on its own path. It is still recorded, and recorded as the informational
+    /// case, because a reader has to be able to tell the two apart at a glance.
+    #[cfg(unix)]
+    #[test]
+    fn a_link_inside_the_root_is_informational_and_its_target_is_scanned_once() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir(dir.path().join("real")).unwrap();
+        fs::write(dir.path().join("real/a.txt"), "password = needle\n").unwrap();
+        std::os::unix::fs::symlink(dir.path().join("real/a.txt"), dir.path().join("alias.txt"))
+            .unwrap();
+
+        let options = IgnoreOptions::default();
+        let walk_options = WalkOptions::new(&options);
+        let names = walked_names(dir.path(), &walk_options);
+
+        assert_eq!(
+            names,
+            vec!["real/a.txt".to_string()],
+            "the target is scanned once, by its own path, and not again through the link"
+        );
+        assert_eq!(
+            links(dir.path(), &walk_options),
+            vec![("alias.txt".to_string(), SymlinkDisposition::InsideRoot)]
+        );
+        assert!(SymlinkDisposition::InsideRoot.target_was_scanned());
+    }
+
+    /// A link to a directory inside the root is the same case, and the walk
+    /// enumerates the directory once - through its own path, not through both.
+    #[cfg(unix)]
+    #[test]
+    fn a_link_to_an_in_root_directory_does_not_duplicate_its_contents() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir(dir.path().join("real")).unwrap();
+        fs::write(dir.path().join("real/a.txt"), "a").unwrap();
+        fs::write(dir.path().join("real/b.txt"), "b").unwrap();
+        std::os::unix::fs::symlink(dir.path().join("real"), dir.path().join("alias")).unwrap();
+
+        let options = IgnoreOptions::default();
+        let walk_options = WalkOptions::new(&options);
+
+        assert_eq!(
+            walked_names(dir.path(), &walk_options),
+            vec!["real/a.txt".to_string(), "real/b.txt".to_string()]
+        );
+        assert_eq!(
+            links(dir.path(), &walk_options),
+            vec![("alias".to_string(), SymlinkDisposition::InsideRoot)]
+        );
+    }
+
+    /// A link to nothing is a link to nothing, and the report says which.
+    #[cfg(unix)]
+    #[test]
+    fn a_broken_link_is_recorded() {
+        let dir = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(dir.path().join("gone.env"), dir.path().join(".env")).unwrap();
+        fs::write(dir.path().join("main.rs"), "fn main() {}").unwrap();
+
+        let options = IgnoreOptions::default();
+        let walk_options = WalkOptions::new(&options);
+
+        assert_eq!(
+            links(dir.path(), &walk_options),
+            vec![(".env".to_string(), SymlinkDisposition::Broken)]
+        );
+        assert_eq!(
+            walked_names(dir.path(), &walk_options),
+            vec!["main.rs".to_string()]
+        );
+    }
+
+    /// A cycle terminates under both policies, and is refused rather than
+    /// entered under the one that follows links.
+    ///
+    /// Two shapes, because they fail in different places: a pair of links
+    /// pointing at each other never resolves, and a link to its own parent
+    /// resolves fine and would walk forever if the descent were not bounded.
+    #[cfg(unix)]
+    #[test]
+    fn a_link_cycle_terminates() {
+        let dir = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(dir.path().join("b"), dir.path().join("a")).unwrap();
+        std::os::unix::fs::symlink(dir.path().join("a"), dir.path().join("b")).unwrap();
+        std::os::unix::fs::symlink(dir.path(), dir.path().join("self")).unwrap();
+        fs::write(dir.path().join("main.rs"), "fn main() {}").unwrap();
+
+        let options = IgnoreOptions::default();
+        for follow in [false, true] {
+            let walk_options = WalkOptions::new(&options).follow_symlinks(follow);
+            let walked = collect_files_counted_with(dir.path(), &walk_options);
+
+            // Under `follow` the walker refuses the descent before it yields
+            // the link, so the record comes from the failure rather than from
+            // the filter, and it says which failure it was.
+            let expected_self = match follow {
+                true => SymlinkDisposition::Cycle,
+                false => SymlinkDisposition::InsideRoot,
+            };
+            assert_eq!(
+                links(dir.path(), &walk_options),
+                vec![
+                    ("a".to_string(), SymlinkDisposition::Unresolvable),
+                    ("b".to_string(), SymlinkDisposition::Unresolvable),
+                    ("self".to_string(), expected_self),
+                ],
+                "follow_symlinks({follow})"
+            );
+            // The walk ends, and it ends having read the one real file. Under
+            // `follow` the cycle through `self` is caught by the walker's
+            // ancestor check, which stops the descent rather than the scan.
+            assert!(
+                walked.files.iter().any(|path| path.ends_with("main.rs")),
+                "follow_symlinks({follow}): {:?}",
+                walked.files
+            );
+        }
+    }
+
+    /// With following on, an in-root target is reachable through the link and
+    /// an out-of-root one is still refused. A scan stays a function of the tree
+    /// it was pointed at whatever the caller asks for.
+    #[cfg(unix)]
+    #[test]
+    fn following_reaches_an_in_root_target_and_still_refuses_an_out_of_root_one() {
+        let outside = tempfile::tempdir().unwrap();
+        fs::write(outside.path().join("prod.env"), "AWS_SECRET=live\n").unwrap();
+        let outside_dir = outside.path().join("vault");
+        fs::create_dir(&outside_dir).unwrap();
+        fs::write(outside_dir.join("keys.txt"), "AWS_SECRET=live\n").unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir(dir.path().join("real")).unwrap();
+        fs::write(dir.path().join("real/a.txt"), "a").unwrap();
+        std::os::unix::fs::symlink(dir.path().join("real"), dir.path().join("alias")).unwrap();
+        std::os::unix::fs::symlink(outside.path().join("prod.env"), dir.path().join(".env"))
+            .unwrap();
+        std::os::unix::fs::symlink(&outside_dir, dir.path().join("vault")).unwrap();
+
+        let options = IgnoreOptions::default();
+        let walk_options = WalkOptions::new(&options).follow_symlinks(true);
+        let names = walked_names(dir.path(), &walk_options);
+
+        assert_eq!(
+            names,
+            vec!["alias/a.txt".to_string(), "real/a.txt".to_string()],
+            "the in-root target is reachable through the link, and nothing outside the root is"
+        );
+        assert_eq!(
+            links(dir.path(), &walk_options),
+            vec![
+                (".env".to_string(), SymlinkDisposition::OutsideRoot),
+                ("alias".to_string(), SymlinkDisposition::Followed),
+                ("vault".to_string(), SymlinkDisposition::OutsideRoot),
+            ]
+        );
+        // A refused link is the walker's own decision, reported by path. It is
+        // not an ignore rule's doing and must not be counted as one.
+        let walked = collect_files_counted_with(dir.path(), &walk_options);
+        assert!(walked.ignored.is_empty(), "{:?}", walked.ignored);
+    }
+
+    /// A link an ignore rule already excluded is counted there and recorded
+    /// nowhere else: one omission, said once.
+    #[cfg(unix)]
+    #[test]
+    fn an_ignored_link_is_counted_and_not_recorded_twice() {
+        let outside = tempfile::tempdir().unwrap();
+        fs::write(outside.path().join("prod.env"), "AWS_SECRET=live\n").unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join(".gitignore"), ".env\n").unwrap();
+        std::os::unix::fs::symlink(outside.path().join("prod.env"), dir.path().join(".env"))
+            .unwrap();
+
+        let options = IgnoreOptions::default();
+        let walked = collect_files_counted_with(dir.path(), &WalkOptions::new(&options));
+
+        assert!(walked.symlinks.is_empty(), "{:?}", walked.symlinks);
+        assert_eq!(
+            walked.ignored,
+            Ignored {
+                files: 1,
+                directories: 0
+            }
+        );
+    }
+
+    /// The link list is a property of the tree, not of the run.
+    ///
+    /// Worker count does not appear here because it cannot: the walk is one
+    /// thread and the workers are the scan's, downstream of it. What the walk
+    /// owes them is a list that is already sorted and already complete before
+    /// the first worker starts, which is what this asserts.
+    #[cfg(unix)]
+    #[test]
+    fn link_records_are_the_same_on_every_walk() {
+        let outside = tempfile::tempdir().unwrap();
+        fs::write(outside.path().join("prod.env"), "AWS_SECRET=live\n").unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("src/nested")).unwrap();
+        fs::write(dir.path().join("src/nested/a.txt"), "a").unwrap();
+        for name in ["z-link", "a-link", "m-link"] {
+            std::os::unix::fs::symlink(
+                outside.path().join("prod.env"),
+                dir.path().join(format!("src/{name}")),
+            )
+            .unwrap();
+        }
+        std::os::unix::fs::symlink(dir.path().join("src"), dir.path().join("alias")).unwrap();
+        std::os::unix::fs::symlink(dir.path().join("gone"), dir.path().join("dangling")).unwrap();
+
+        let options = IgnoreOptions::default();
+        for follow in [false, true] {
+            let walk_options = WalkOptions::new(&options).follow_symlinks(follow);
+            let first = links(dir.path(), &walk_options);
+            assert_eq!(
+                first
+                    .iter()
+                    .map(|(path, _)| path.as_str())
+                    .collect::<Vec<_>>(),
+                match follow {
+                    // Under `follow` the walk enters `alias`, so the three
+                    // links inside `src` are met a second time under the path
+                    // they were reached by. One record per link encountered,
+                    // and the same records every time.
+                    true => vec![
+                        "alias",
+                        "alias/a-link",
+                        "alias/m-link",
+                        "alias/z-link",
+                        "dangling",
+                        "src/a-link",
+                        "src/m-link",
+                        "src/z-link",
+                    ],
+                    false => vec![
+                        "alias",
+                        "dangling",
+                        "src/a-link",
+                        "src/m-link",
+                        "src/z-link",
+                    ],
+                },
+                "follow_symlinks({follow})"
+            );
+            for _ in 0..5 {
+                assert_eq!(links(dir.path(), &walk_options), first, "follow({follow})");
+            }
+        }
+    }
+
+    /// Recording links changed nothing about which files a default walk reads.
+    #[cfg(unix)]
+    #[test]
+    fn links_do_not_change_the_files_a_default_walk_reads() {
+        let outside = tempfile::tempdir().unwrap();
+        fs::write(outside.path().join("prod.env"), "AWS_SECRET=live\n").unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("main.rs"), "fn main() {}").unwrap();
+        std::os::unix::fs::symlink(outside.path().join("prod.env"), dir.path().join(".env"))
+            .unwrap();
+
+        let options = IgnoreOptions::default();
+        assert_eq!(
+            collect_files_counted_with(dir.path(), &WalkOptions::new(&options)).files,
+            collect_files_with(dir.path(), &options)
+        );
     }
 
     /// Walk order is a property of the sort, not of the ignore policy.

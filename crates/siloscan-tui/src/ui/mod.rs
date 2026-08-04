@@ -1330,7 +1330,7 @@ mod tests {
             &mut state,
             key(KeyCode::Char('r')),
             None,
-            siloscan_core::walk::IgnoreOptions::default(),
+            crate::app::WalkPolicy::default(),
             &tx,
         );
         assert_eq!(state.status, crate::state::READ_ONLY_RESCAN);

@@ -23,9 +23,8 @@ use siloscan_core::baseline;
 use siloscan_core::config::{self, Config};
 use siloscan_core::default_pack;
 use siloscan_core::rules::{self, CompiledPayload, CompiledRule, RuleSet};
-use siloscan_core::walk::IgnoreOptions;
 
-use app::AppEvent;
+use app::{AppEvent, WalkPolicy};
 use state::{AppState, READ_ONLY_RESCAN, Screen};
 
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
@@ -60,6 +59,10 @@ Options:
                        Also honor PATH/.git/info/exclude
       --respect-global-gitignore
                        Also honor git's global core.excludesFile
+      --follow-symlinks
+                       Follow symlinks whose target is inside the scan root.
+                       Targets outside it are never followed. A file behind a
+                       followed link is reported under both paths
   -h, --help           Print help
   -V, --version        Print version
 ";
@@ -72,11 +75,12 @@ struct Args {
     config: Option<PathBuf>,
     /// A report to open instead of scanning. Mutually exclusive with `path`.
     report: Option<PathBuf>,
-    /// Which ignore sources the walk consults. Defaults to the self-contained
-    /// policy: ignore files inside the scan root count, nothing above or
-    /// outside it does. The `--respect-*` flags each re-admit one out-of-root
-    /// source, which is the only way back to the pre-1.1.2 behavior.
-    ignore: IgnoreOptions,
+    /// What this session's walk reads. Defaults to the self-contained policy:
+    /// ignore files inside the scan root count, nothing above or outside it
+    /// does, and symlinks are not followed. The `--respect-*` flags each
+    /// re-admit one out-of-root source, which is the only way back to the
+    /// pre-1.1.2 behavior.
+    walk: WalkPolicy,
     help: bool,
     version: bool,
 }
@@ -104,7 +108,7 @@ fn main() {
         Ok(terminal) => terminal,
         Err(e) => fail(&format!("error: terminal setup failed: {e}")),
     };
-    let result = run(&mut terminal, &mut state, config, args.ignore);
+    let result = run(&mut terminal, &mut state, config, args.walk);
     let restored = term::restore();
 
     if let Err(e) = result {
@@ -175,12 +179,12 @@ fn run(
     terminal: &mut term::Tui,
     state: &mut AppState,
     config: Option<Arc<Config>>,
-    ignore: IgnoreOptions,
+    walk: WalkPolicy,
 ) -> io::Result<()> {
     let (tx, rx): (Sender<AppEvent>, Receiver<AppEvent>) = mpsc::channel();
     // A snapshot is already loaded and never scans; the channel stays empty.
     if state.snapshot.is_none() {
-        start_scan(state, config.clone(), ignore, &tx);
+        start_scan(state, config.clone(), walk, &tx);
     }
 
     while !state.should_quit {
@@ -190,7 +194,7 @@ fn run(
         if event::poll(POLL_INTERVAL)? {
             match event::read()? {
                 Event::Key(key) if key.kind == KeyEventKind::Press => {
-                    on_key(state, key, config.clone(), ignore, &tx)
+                    on_key(state, key, config.clone(), walk, &tx)
                 }
                 Event::Mouse(mouse) => ui::handle_mouse(state, mouse),
                 // Resize needs no bookkeeping: the next draw re-lays out.
@@ -219,7 +223,7 @@ fn on_key(
     state: &mut AppState,
     key: KeyEvent,
     config: Option<Arc<Config>>,
-    ignore: IgnoreOptions,
+    walk: WalkPolicy,
     tx: &Sender<AppEvent>,
 ) {
     if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
@@ -237,7 +241,7 @@ fn on_key(
         KeyCode::Char('r') => {
             if !state.refuse_if_snapshot(READ_ONLY_RESCAN) && !state.scan_running {
                 reload_baseline(state);
-                start_scan(state, config, ignore, tx);
+                start_scan(state, config, walk, tx);
             }
         }
         KeyCode::Char('1') => state.screen = Screen::Dashboard,
@@ -251,7 +255,7 @@ fn on_key(
 fn start_scan(
     state: &mut AppState,
     config: Option<Arc<Config>>,
-    ignore: IgnoreOptions,
+    walk: WalkPolicy,
     tx: &Sender<AppEvent>,
 ) {
     state.begin_scan();
@@ -260,7 +264,7 @@ fn start_scan(
         Arc::clone(&state.rules),
         state.baseline.clone(),
         config,
-        ignore,
+        walk,
         tx.clone(),
     );
 }
@@ -291,13 +295,14 @@ fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<Args, String> {
             // Each of these sets one field, and no two set the same field in
             // opposite directions, so the flags are order-independent.
             "--no-ignore" => {
-                args.ignore.respect_gitignore = false;
-                args.ignore.respect_dot_ignore = false;
+                args.walk.ignore.respect_gitignore = false;
+                args.walk.ignore.respect_dot_ignore = false;
             }
-            "--no-gitignore" => args.ignore.respect_gitignore = false,
-            "--respect-parent-ignores" => args.ignore.respect_parent_ignores = true,
-            "--respect-git-exclude" => args.ignore.respect_git_exclude = true,
-            "--respect-global-gitignore" => args.ignore.respect_global_gitignore = true,
+            "--no-gitignore" => args.walk.ignore.respect_gitignore = false,
+            "--respect-parent-ignores" => args.walk.ignore.respect_parent_ignores = true,
+            "--respect-git-exclude" => args.walk.ignore.respect_git_exclude = true,
+            "--respect-global-gitignore" => args.walk.ignore.respect_global_gitignore = true,
+            "--follow-symlinks" => args.walk.follow_symlinks = true,
             "--report" => {
                 let file = argv
                     .next()
@@ -343,8 +348,8 @@ fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<Args, String> {
     // report built under whatever policy wrote it while the command line
     // claimed another, which is the silent disagreement these flags exist to
     // end.
-    if args.report.is_some() && args.ignore != IgnoreOptions::default() {
-        return Err("--report does not scan, so ignore options cannot apply to it".to_string());
+    if args.report.is_some() && args.walk != WalkPolicy::default() {
+        return Err("--report does not scan, so walk options cannot apply to it".to_string());
     }
 
     Ok(args)
@@ -484,6 +489,7 @@ fn fail(message: &str) -> ! {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use siloscan_core::walk::IgnoreOptions;
 
     fn parse(argv: &[&str]) -> Result<Args, String> {
         parse_args(argv.iter().map(|arg| (*arg).to_string()))
@@ -561,12 +567,12 @@ mod tests {
     /// repository's `.gitignore` allows, with nothing on screen saying so.
     #[test]
     fn parses_the_ignore_flags() {
-        assert_eq!(parse(&[]).unwrap().ignore, IgnoreOptions::default());
+        assert_eq!(parse(&[]).unwrap().walk.ignore, IgnoreOptions::default());
 
-        let all = parse(&["--no-ignore"]).unwrap().ignore;
+        let all = parse(&["--no-ignore"]).unwrap().walk.ignore;
         assert_eq!(all, IgnoreOptions::all_files());
 
-        let no_git = parse(&["--no-gitignore"]).unwrap().ignore;
+        let no_git = parse(&["--no-gitignore"]).unwrap().walk.ignore;
         assert!(!no_git.respect_gitignore);
         assert!(no_git.respect_dot_ignore, "only gitignore was named");
 
@@ -576,6 +582,7 @@ mod tests {
             "--respect-global-gitignore",
         ])
         .unwrap()
+        .walk
         .ignore;
         assert!(legacy.respect_parent_ignores);
         assert!(legacy.respect_git_exclude);
@@ -586,11 +593,30 @@ mod tests {
         assert_eq!(
             parse(&["--no-ignore", "--respect-parent-ignores"])
                 .unwrap()
+                .walk
                 .ignore,
             parse(&["--respect-parent-ignores", "--no-ignore"])
                 .unwrap()
+                .walk
                 .ignore
         );
+    }
+
+    /// The TUI and the CLI have to be able to scan the same set of files, so a
+    /// flag that decides which files those are cannot exist on only one of them:
+    /// a session that cannot be told to follow a link reports a tree the CLI
+    /// would report differently, with nothing on screen saying why.
+    #[test]
+    fn parses_the_follow_symlinks_flag() {
+        assert!(
+            !parse(&[]).unwrap().walk.follow_symlinks,
+            "not following links is the default on both front ends"
+        );
+        assert!(parse(&["--follow-symlinks"]).unwrap().walk.follow_symlinks);
+        // It is a walk option like the ignore flags, so a snapshot refuses it
+        // for the same reason: there is no walk for it to apply to.
+        let err = parse(&["--report", "r.json", "--follow-symlinks"]).unwrap_err();
+        assert!(err.contains("--report"), "{err}");
     }
 
     /// A snapshot never walks anything, so an ignore flag beside `--report` is

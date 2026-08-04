@@ -20,8 +20,51 @@ pub struct SarifRoot {
 #[derive(Debug, Serialize)]
 pub struct SarifRun {
     pub tool: SarifTool,
+    /// Present only on a run that has something to notify about, which today
+    /// means a run that produced scan warnings. Absent otherwise, so a document
+    /// this release would have written without the array is byte for byte the
+    /// document it writes now.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub invocations: Option<Vec<SarifInvocation>>,
     pub results: Vec<SarifResult>,
     pub properties: SarifRunProperties,
+}
+
+/// One `invocation` object (SARIF 2.1.0 section 3.20). `executionSuccessful` is
+/// the only required property; it is true because a scan that failed never
+/// reaches a report at all.
+///
+/// This exists to carry [`ScanReport::warnings`]. Those already reach stderr and
+/// the JSON report, and SARIF is the format a CI gate actually ingests, so
+/// without them the one consumer that decides whether a build proceeds is the
+/// one consumer that cannot see that the scan narrowed what it looked at.
+///
+/// `toolExecutionNotifications` is the spec's own place for "a condition
+/// encountered while the tool ran", as opposed to a result about the scanned
+/// code, so the warnings go there rather than into the property bag beside
+/// `siloscan/skipped`. A run-level property would have been a private extension
+/// that only siloscan's own readers understand; this is a field every conformant
+/// consumer already knows how to render.
+#[derive(Debug, Serialize)]
+pub struct SarifInvocation {
+    #[serde(rename = "executionSuccessful")]
+    pub execution_successful: bool,
+    #[serde(rename = "toolExecutionNotifications")]
+    pub tool_execution_notifications: Vec<SarifNotification>,
+}
+
+/// One `notification` object (SARIF 2.1.0 section 3.58). `message` is the only
+/// required property; `level` is stated rather than left to its default so a
+/// consumer does not have to know what the default is.
+///
+/// The level is always `warning`. These are conditions the scan chose to
+/// continue past - a coverage report that landed on none of the scanned files,
+/// say - and `error` is reserved for a run whose results cannot be trusted,
+/// which some consumers treat as a failed upload.
+#[derive(Debug, Serialize)]
+pub struct SarifNotification {
+    pub level: &'static str,
+    pub message: SarifMessage,
 }
 
 /// Run-level property bag. Carries the scan-wide metric totals only:
@@ -69,6 +112,20 @@ pub struct SarifRunProperties {
     /// deliberately does not pay for.
     #[serde(rename = "siloscan/ignored", skip_serializing_if = "nothing_ignored")]
     pub ignored: Ignored,
+    /// The `--min-severity` threshold the results were filtered at, absent when
+    /// the run reported everything it found.
+    ///
+    /// Same reason as the two above: a filtered document and a clean one are
+    /// otherwise the same document, and the consumer deciding whether a build
+    /// proceeds cannot tell that results were withheld. Nothing about the scan
+    /// changed - the threshold decides what is printed, never what is found, so
+    /// the exit code and every surviving `partialFingerprints` entry are what
+    /// they would have been without it.
+    #[serde(
+        rename = "siloscan/minSeverity",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub min_severity: Option<Severity>,
 }
 
 /// Whether an [`Ignored`] has nothing to report, in the shape
@@ -231,7 +288,16 @@ fn sarif_column(finding: &Finding) -> u64 {
 /// ran under; `anchor` is recorded at run level to name that convention. Result
 /// URIs are that same path percent-encoded ([`encode_uri_reference`]), which is
 /// a change of spelling and not of meaning.
-pub fn to_sarif(report: &ScanReport, rules: &RuleSet, anchor: Anchor) -> String {
+///
+/// `min_severity` is the threshold the caller already filtered the report at, or
+/// `None` when it filtered nothing. It is recorded, not applied: this function
+/// drops no result.
+pub fn to_sarif(
+    report: &ScanReport,
+    rules: &RuleSet,
+    anchor: Anchor,
+    min_severity: Option<Severity>,
+) -> String {
     // Collect unique rule ids from report.findings
     let mut rule_ids_in_findings: std::collections::HashSet<&str> =
         std::collections::HashSet::new();
@@ -312,6 +378,22 @@ pub fn to_sarif(report: &ScanReport, rules: &RuleSet, anchor: Anchor) -> String 
                     rules: sarif_rules,
                 },
             },
+            invocations: match report.warnings.is_empty() {
+                true => None,
+                false => Some(vec![SarifInvocation {
+                    execution_successful: true,
+                    tool_execution_notifications: report
+                        .warnings
+                        .iter()
+                        .map(|warning| SarifNotification {
+                            level: "warning",
+                            message: SarifMessage {
+                                text: warning.clone(),
+                            },
+                        })
+                        .collect(),
+                }]),
+            },
             results,
             properties: SarifRunProperties {
                 // Totals only, never the per-file map.
@@ -328,6 +410,7 @@ pub fn to_sarif(report: &ScanReport, rules: &RuleSet, anchor: Anchor) -> String 
                     false => None,
                 },
                 ignored: report.ignored,
+                min_severity,
             },
         }],
     };
@@ -376,6 +459,7 @@ mod tests {
             graph: Default::default(),
             boundary_edges: Vec::new(),
             metrics,
+            warnings: Vec::new(),
         }
     }
 
@@ -397,7 +481,7 @@ mod tests {
     fn to_sarif_includes_schema_version() {
         let report = report(vec![], Metrics::default());
 
-        let sarif = to_sarif(&report, &no_rules(), Anchor::ScanRoot);
+        let sarif = to_sarif(&report, &no_rules(), Anchor::ScanRoot, None);
         assert!(sarif.contains("https://json.schemastore.org/sarif-2.1.0.json"));
         assert!(sarif.contains("\"version\": \"2.1.0\""));
     }
@@ -406,7 +490,7 @@ mod tests {
     fn to_sarif_includes_tool_metadata() {
         let report = report(vec![], Metrics::default());
 
-        let sarif = to_sarif(&report, &no_rules(), Anchor::ScanRoot);
+        let sarif = to_sarif(&report, &no_rules(), Anchor::ScanRoot, None);
         assert!(sarif.contains("\"name\": \"siloscan\""));
         assert!(sarif.contains("https://github.com/RandomCodeSpace/siloscan"));
     }
@@ -426,7 +510,7 @@ mod tests {
         };
         let report = report(vec![finding], Metrics::default());
 
-        let sarif = to_sarif(&report, &no_rules(), Anchor::ScanRoot);
+        let sarif = to_sarif(&report, &no_rules(), Anchor::ScanRoot, None);
         assert!(sarif.contains("test.rule"));
         assert!(sarif.contains("test message"));
         assert!(sarif.contains("src/main.rs"));
@@ -453,7 +537,7 @@ mod tests {
 
         let report = report(vec![], metrics);
 
-        let sarif = to_sarif(&report, &no_rules(), Anchor::ScanRoot);
+        let sarif = to_sarif(&report, &no_rules(), Anchor::ScanRoot, None);
         let parsed: serde_json::Value = serde_json::from_str(&sarif).expect("sarif is valid json");
         let properties = &parsed["runs"][0]["properties"];
         assert_eq!(
@@ -499,7 +583,7 @@ mod tests {
             },
         ];
 
-        let sarif = to_sarif(&report, &no_rules(), Anchor::ScanRoot);
+        let sarif = to_sarif(&report, &no_rules(), Anchor::ScanRoot, None);
         let parsed: serde_json::Value = serde_json::from_str(&sarif).expect("sarif is valid json");
         let properties = &parsed["runs"][0]["properties"];
 
@@ -542,7 +626,7 @@ mod tests {
             .collect();
         report.skipped.sort_by(|a, b| a.path.cmp(&b.path));
 
-        let sarif = to_sarif(&report, &no_rules(), Anchor::ScanRoot);
+        let sarif = to_sarif(&report, &no_rules(), Anchor::ScanRoot, None);
         let parsed: serde_json::Value = serde_json::from_str(&sarif).expect("sarif is valid json");
         let properties = &parsed["runs"][0]["properties"];
 
@@ -560,14 +644,17 @@ mod tests {
             kept[MAX_SARIF_SKIPPED - 1]["path"],
             format!("assets/{:05}.png", MAX_SARIF_SKIPPED - 1)
         );
-        assert_eq!(to_sarif(&report, &no_rules(), Anchor::ScanRoot), sarif);
+        assert_eq!(
+            to_sarif(&report, &no_rules(), Anchor::ScanRoot, None),
+            sarif
+        );
     }
 
     #[test]
     fn a_scan_that_skipped_nothing_omits_the_key() {
         let report = report(vec![], Metrics::default());
 
-        let sarif = to_sarif(&report, &no_rules(), Anchor::ScanRoot);
+        let sarif = to_sarif(&report, &no_rules(), Anchor::ScanRoot, None);
         let parsed: serde_json::Value = serde_json::from_str(&sarif).expect("sarif is valid json");
         let properties = parsed["runs"][0]["properties"]
             .as_object()
@@ -580,6 +667,79 @@ mod tests {
         assert!(
             !properties.contains_key("siloscan/ignored"),
             "a scan that ignored nothing must not announce a count: {sarif}"
+        );
+        assert!(
+            !properties.contains_key("siloscan/minSeverity"),
+            "a run that withheld nothing must not announce a threshold: {sarif}"
+        );
+        assert!(
+            parsed["runs"][0]
+                .as_object()
+                .expect("run is an object")
+                .get("invocations")
+                .is_none(),
+            "a run with no warnings must not carry an invocations array: {sarif}"
+        );
+    }
+
+    /// A filtered document and a clean one are otherwise the same document, and
+    /// SARIF is what decides whether a build proceeds. Recorded, never applied:
+    /// the threshold does not drop a result here.
+    #[test]
+    fn a_filtered_run_records_the_threshold_it_was_filtered_at() {
+        let report = report(vec![], Metrics::default());
+
+        let sarif = to_sarif(
+            &report,
+            &no_rules(),
+            Anchor::ScanRoot,
+            Some(Severity::Warning),
+        );
+        let parsed: serde_json::Value = serde_json::from_str(&sarif).expect("sarif is valid json");
+        assert_eq!(
+            parsed["runs"][0]["properties"]["siloscan/minSeverity"],
+            serde_json::json!("warning"),
+            "{sarif}"
+        );
+    }
+
+    /// The warnings reach stderr and the JSON report already. SARIF is the
+    /// format CI ingests, so it is the one place their absence actually costs
+    /// something: a coverage gate that measured nothing, reported as a pass.
+    ///
+    /// They go in `invocations[].toolExecutionNotifications` - the spec's place
+    /// for a condition met while the tool ran, as against a result about the
+    /// scanned code - rather than in a `siloscan/` property only this tool's own
+    /// readers would understand.
+    #[test]
+    fn scan_warnings_are_reported_as_tool_execution_notifications() {
+        let mut report = report(vec![], Metrics::default());
+        report.warnings = vec![
+            "coverage report names no scanned file".to_string(),
+            "second warning".to_string(),
+        ];
+
+        let sarif = to_sarif(&report, &no_rules(), Anchor::ScanRoot, None);
+        let parsed: serde_json::Value = serde_json::from_str(&sarif).expect("sarif is valid json");
+        let invocations = parsed["runs"][0]["invocations"]
+            .as_array()
+            .expect("invocations is an array");
+        assert_eq!(invocations.len(), 1, "{sarif}");
+        assert_eq!(
+            invocations[0]["executionSuccessful"],
+            serde_json::json!(true),
+            "a scan that produced a report ran successfully: {sarif}"
+        );
+        assert_eq!(
+            invocations[0]["toolExecutionNotifications"],
+            serde_json::json!([
+                {
+                    "level": "warning",
+                    "message": { "text": "coverage report names no scanned file" }
+                },
+                { "level": "warning", "message": { "text": "second warning" } },
+            ]),
+            "warnings must arrive in the scanner's order: {sarif}"
         );
     }
 
@@ -594,7 +754,7 @@ mod tests {
             directories: 1,
         };
 
-        let sarif = to_sarif(&report, &no_rules(), Anchor::ScanRoot);
+        let sarif = to_sarif(&report, &no_rules(), Anchor::ScanRoot, None);
         let parsed: serde_json::Value = serde_json::from_str(&sarif).expect("sarif is valid json");
         let properties = &parsed["runs"][0]["properties"];
 
@@ -609,7 +769,10 @@ mod tests {
             serde_json::json!({ "files": 3, "directories": 1 }),
             "{sarif}"
         );
-        assert_eq!(to_sarif(&report, &no_rules(), Anchor::ScanRoot), sarif);
+        assert_eq!(
+            to_sarif(&report, &no_rules(), Anchor::ScanRoot, None),
+            sarif
+        );
     }
 
     #[test]
@@ -665,7 +828,7 @@ rules:
             ..Default::default()
         };
 
-        let sarif = to_sarif(&report, &rules, Anchor::ScanRoot);
+        let sarif = to_sarif(&report, &rules, Anchor::ScanRoot, None);
         // Check that rules appear in sorted order (a.rule before z.rule)
         let a_pos = sarif.find("\"id\": \"a.rule\"").unwrap();
         let z_pos = sarif.find("\"id\": \"z.rule\"").unwrap();
@@ -722,6 +885,7 @@ rules:
             &with_findings(vec![block, other.clone()]),
             &rules,
             Anchor::ScanRoot,
+            None,
         );
         let parsed: serde_json::Value = serde_json::from_str(&sarif).expect("sarif is valid json");
         let driver_rules = parsed["runs"][0]["tool"]["driver"]["rules"]
@@ -743,7 +907,7 @@ rules:
         );
 
         // Without a block finding the descriptor stays out.
-        let sarif = to_sarif(&with_findings(vec![other]), &rules, Anchor::ScanRoot);
+        let sarif = to_sarif(&with_findings(vec![other]), &rules, Anchor::ScanRoot, None);
         assert!(!sarif.contains(DUPLICATE_BLOCK_RULE_ID), "{sarif}");
     }
 
@@ -762,7 +926,7 @@ rules:
         };
         let report = report(vec![finding], Metrics::default());
 
-        let sarif = to_sarif(&report, &no_rules(), Anchor::ScanRoot);
+        let sarif = to_sarif(&report, &no_rules(), Anchor::ScanRoot, None);
         // Verify that we have exactly one result
         let results_count = sarif.matches("\"ruleId\"").count();
         assert_eq!(results_count, 1, "should have exactly one result");
@@ -783,8 +947,8 @@ rules:
         };
         let report = report(vec![finding], Metrics::default());
 
-        let sarif1 = to_sarif(&report, &no_rules(), Anchor::ScanRoot);
-        let sarif2 = to_sarif(&report, &no_rules(), Anchor::ScanRoot);
+        let sarif1 = to_sarif(&report, &no_rules(), Anchor::ScanRoot, None);
+        let sarif2 = to_sarif(&report, &no_rules(), Anchor::ScanRoot, None);
         assert_eq!(sarif1, sarif2, "output should be byte-stable");
     }
 
@@ -803,7 +967,7 @@ rules:
         };
         let report = report(vec![finding], Metrics::default());
 
-        let sarif = to_sarif(&report, &no_rules(), Anchor::Config);
+        let sarif = to_sarif(&report, &no_rules(), Anchor::Config, None);
         let parsed: serde_json::Value = serde_json::from_str(&sarif).expect("sarif is valid json");
         let run = &parsed["runs"][0];
         assert_eq!(run["properties"]["siloscan/anchor"], "config");
@@ -874,7 +1038,7 @@ rules:
             ..Default::default()
         };
 
-        let sarif = to_sarif(&report, &rules, Anchor::ScanRoot);
+        let sarif = to_sarif(&report, &rules, Anchor::ScanRoot, None);
         // Verify error maps to "error"
         assert!(sarif.contains("\"id\": \"test.error\""));
         let error_section = sarif.split("\"id\": \"test.error\"").nth(1).unwrap();
@@ -958,7 +1122,7 @@ rules:
         };
         let report = report(vec![finding], Metrics::default());
 
-        let sarif = to_sarif(&report, &no_rules(), Anchor::ScanRoot);
+        let sarif = to_sarif(&report, &no_rules(), Anchor::ScanRoot, None);
         let parsed: serde_json::Value = serde_json::from_str(&sarif).expect("sarif is valid json");
         let uri =
             parsed["runs"][0]["results"][0]["locations"][0]["physicalLocation"]["artifactLocation"]
@@ -997,7 +1161,7 @@ rules:
         };
         let report = report(vec![finding], Metrics::default());
 
-        let sarif = to_sarif(&report, &no_rules(), Anchor::ScanRoot);
+        let sarif = to_sarif(&report, &no_rules(), Anchor::ScanRoot, None);
         let parsed: serde_json::Value = serde_json::from_str(&sarif).expect("sarif is valid json");
         let region = &parsed["runs"][0]["results"][0]["locations"][0]["physicalLocation"]["region"];
         assert_eq!(region["startLine"], serde_json::json!(2));
@@ -1025,7 +1189,7 @@ rules:
         };
         let report = report(vec![finding], Metrics::default());
 
-        let sarif = to_sarif(&report, &no_rules(), Anchor::ScanRoot);
+        let sarif = to_sarif(&report, &no_rules(), Anchor::ScanRoot, None);
         let parsed: serde_json::Value = serde_json::from_str(&sarif).expect("sarif is valid json");
         assert_eq!(
             parsed["runs"][0]["results"][0]["locations"][0]["physicalLocation"]["region"]["startColumn"],
@@ -1061,7 +1225,7 @@ rules:
         };
         let report = report(vec![finding], Metrics::default());
 
-        let sarif = to_sarif(&report, &no_rules(), Anchor::ScanRoot);
+        let sarif = to_sarif(&report, &no_rules(), Anchor::ScanRoot, None);
         let parsed: serde_json::Value = serde_json::from_str(&sarif).expect("sarif is valid json");
         let location = &parsed["runs"][0]["results"][0]["locations"][0]["physicalLocation"];
         assert_eq!(

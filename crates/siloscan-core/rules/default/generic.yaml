@@ -1,0 +1,157 @@
+# Generic high-entropy rules. Hand-written, not derived from gitleaks: the
+# gitleaks generic-api-key rule is not translatable within the regex crate's
+# program size limit, and these cover the same ground with narrower patterns.
+#
+# Served to the scanner appended to secrets.yaml (see src/default_pack.rs), but
+# a complete rule document on its own so it loads and tests standalone.
+version: 1
+rules:
+  - id: secrets.generic-credentialed-url
+    severity: error
+    message: 'Detected credentials embedded in a URL, exposing the account they authenticate to anyone who can read the source.'
+    secret:
+      pattern: '(?i)\b[a-z][a-z0-9+.-]{1,15}://([^\s:@/?#''"\x60<>\\]{1,64}):([^\s:@/?#''"\x60<>\\]{6,128})@[a-z0-9._-]{1,255}'
+      group: 2
+      entropy: 3.0
+      keywords:
+        - '://'
+      allowlist:
+        patterns:
+          - '^\$'
+          - '\$\{'
+          - '\{\{'
+          - '%\(?[a-zA-Z_]'
+          - '^\[[^]]+]$'
+        stopwords:
+          - 'pass'
+          - 'word'
+          - 'secret'
+          - 'token'
+          - 'credential'
+          - 'changeme'
+          - 'changeit'
+          - 'example'
+          - 'sample'
+          - 'dummy'
+          - 'placeholder'
+          - 'redacted'
+          - 'xxx'
+          - 'your'
+          - 'mysql'
+          - 'postgres'
+          - 'admin'
+          - 'root'
+          - 'test'
+          - '%20'
+  - id: secrets.aws-secret-access-key
+    severity: error
+    message: 'Identified an AWS secret access key, which pairs with an access key id to grant API access to the account.'
+    secret:
+      pattern: '(?i)[\w.-]{0,50}?(?:aws[ \t\w.-]{0,10}secret|secret[_.-]?access[_.-]?key)(?:[ \t\w.-]{0,20})[\s''"]{0,3}(?:=|:{1,3}=|:|=>)[\x60''"\s=]{0,5}([A-Za-z0-9/+]{40})(?:[\x60''"\s;]|\\[nr]|$)'
+      group: 1
+      entropy: 4.2
+      keywords:
+        - 'secret'
+      allowlist:
+        stopwords:
+          - 'example'
+          - 'sample'
+          - 'redacted'
+          - 'placeholder'
+          - 'abcdefghij'
+          - '0123456789'
+          - 'qwerty'
+  - id: secrets.generic-secret-assignment
+    severity: warning
+    message: 'Detected a high-entropy value assigned to a secret-like identifier, which is how a hardcoded credential usually looks.'
+    secret:
+      pattern: '(?i)[\w.-]{0,50}?(?:pass(?:wd|word)?|secret|token|api[_.-]?key|access[_.-]?key|private[_.-]?key|signing[_.-]?key|encryption[_.-]?key|master[_.-]?key|client[_.-]?secret|auth[_.-](?:token|key|secret|pass|header)|authorization|credentials?|creds)(?:[ \t]{0,20}|[_.-][\w.-]{0,20}[ \t]{0,5})(?::[ \t]{0,5}[\w&:<>,\[\] ]{1,40})?[\s''"]{0,3}(?:=|:{1,3}=|:|=>)[\x60''"\s=]{0,5}([A-Za-z0-9!#$%^&*_+=/.~-]{20,128})(?:[\x60''"\s;]|\\[nr]|$)'
+      group: 1
+      entropy: 3.7
+      keywords:
+        - 'password'
+        - 'passwd'
+        - 'secret'
+        - 'token'
+        - 'api_key'
+        - 'apikey'
+        - 'api-key'
+        - 'access_key'
+        - 'accesskey'
+        - 'access-key'
+        - 'private_key'
+        - 'privatekey'
+        - 'private-key'
+        - 'signing_key'
+        - 'signingkey'
+        - 'encryption_key'
+        - 'encryptionkey'
+        - 'master_key'
+        - 'masterkey'
+        - 'authorization'
+        - 'auth_'
+        - 'auth-'
+        - 'auth.'
+        - 'credential'
+        - 'creds'
+      allowlist:
+        patterns:
+          # A value that already carries a specific rule's shape is that rule's
+          # finding. Reported here as well, one credential would be two findings
+          # under two ids, and would be counted twice by anything gating on the
+          # report. The prefixes are read off the patterns the pack's own rules
+          # match on, not from memory; the two-character and bare-word markers
+          # some of those rules use (`ey`, `su`, `SK`, `EAA`) are deliberately
+          # left out, because a prefix that short claims values that are not
+          # theirs and would cost a real detection here.
+          - '^(?:AGE-SECRET-KEY-1|ABIA|ACCA|AIza|AKIA|AQVN|ASIA|ATATT3|CLOJARS_|EZAK|EZTK|FLWPUBK_|FLWSECK_|GR1348941|HRKU-|NRAK-|NRII-|NRJS-|PMAK-|SG\.)'
+          - '^(?:dnkey-|do[opr]_v1_|dp\.pt\.|dt0c01\.|duffel_(?:live|test)_|fio-u-|fm2_|fo1_|gh[oprsu]_|github_pat_|glagent-|glc_|glcbt-|gldt-|glffct-|glft-|glimt-|gloas-|glpat-|glptt-|glrt-|glsa_|glsoat-|hf_|hvs\.|ico-|lin_api_|npm_|ntn_|ops_eyJ)'
+          - '^(?:pnu_|pplx-|pscale_(?:oauth|pw|tkn)_|pul-|rdme_|(?:rk|sk)_(?:live|prod|test)_|rubygems_|sgp_|shippo_(?:live|test)_|shp(?:at|ca|pa|ss)_|sk-ant-(?:admin01|api03)-|sm_(?:aat|pat|sat)_|sntryu_|sq0atp-|sq[apu]_|tfp_|xapp-|xkeysib-|xox[abepr]-|xoxe\.)'
+          # The 40-character shape `secrets.aws-secret-access-key` and
+          # `secrets.sourcegraph-access-token` both match on, for the same
+          # reason: whichever of them fires, this rule firing beside it says
+          # nothing the first one did not.
+          - '^[A-Za-z0-9/+]{40}$'
+          - '^\$'
+          - '\$\{'
+          - '\{\{'
+          - '^%'
+          - '=[^=]'
+          - '^[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+$'
+          - '^(?:sha1|sha256|sha512|md5|base64)[-:]'
+          - '^\.{0,2}/'
+          - '^[^0-9]*$'
+          - '^(?:[A-Z]{1,4}|[A-Z][a-z]+|[a-z]{3,})(?:[0-9]{0,5}(?:[A-Z][a-z]+|[A-Z]{2,4}|[a-z]{3,}))*[0-9]{0,5}$'
+          - '^(?:[A-Za-z][A-Za-z0-9]{0,23}|[0-9]{1,10})(?:[_.\-/](?:[A-Za-z][A-Za-z0-9]{0,23}|[0-9]{1,10})){1,8}$'
+        stopwords:
+          - 'example'
+          - 'sample'
+          - 'dummy'
+          - 'placeholder'
+          - 'redacted'
+          - 'changeme'
+          - 'changeit'
+          - 'xxxx'
+          - 'your'
+          - 'password'
+          - 'passwd'
+          - 'secret'
+          - 'token'
+          - 'apikey'
+          - 'api_key'
+          - 'credential'
+          - 'notreal'
+          - 'fake'
+          - 'invalid'
+          - 'deadbeef'
+          - 'abcdefghij'
+          - '0123456789'
+          - 'qwerty'
+          - 'foobar'
+          - 'lorem'
+          - 'todo'
+          - 'undefined'
+          - 'localhost'
+          - 'process.env'
+          - 'os.environ'
+          - 'getenv'

@@ -209,14 +209,41 @@ fn ast_fixture() -> (TempDir, TempDir) {
     (rules_dir(AST_DBG_RULE), ast_src())
 }
 
-/// Every cache entry under the scan root's cache directory, sorted. Empty when
-/// the directory does not exist.
+/// A cache directory for one test, standing in for the user's own.
+///
+/// Every invocation in this file is pointed at one of these, and none of them
+/// is inside a scanned tree. Two reasons, both of which bit the 1.3.0 suite.
+/// `cargo test` must not read or write the developer's real `~/.cache/siloscan`,
+/// where one run left 103 directories behind. And a test that asserts what a
+/// cold run does needs a cache that is actually cold, rather than one an earlier
+/// run of the suite already filled.
+fn cache_home() -> TempDir {
+    tempfile::tempdir().expect("temp dir should be creatable")
+}
+
+/// The binary, with its cache pointed at `cache` rather than at the user's.
+///
+/// The environment and not `--cache-dir`, so that it applies to every
+/// invocation uniformly - subcommands, `--help`, and the runs that exist to
+/// check how a bad command line is rejected, none of which should have to grow
+/// an argument to be isolated. `--cache-dir` has its own tests.
+fn bin(cache: &Path) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_siloscan"));
+    // One per platform, per `cache::default_cache_base`. Setting both keeps
+    // this helper correct on either without a `cfg`.
+    command
+        .env("XDG_CACHE_HOME", cache)
+        .env("LOCALAPPDATA", cache);
+    command
+}
+
+/// Every cache entry under `cache`, sorted. Empty when nothing was written.
 ///
 /// The prune stamp is not an entry and is filtered out: it is bookkeeping about
 /// which build last swept the directory, and it appears or not depending on
 /// whether the run had a directory to write it into. Tests that care about it
 /// look for it by name.
-fn cache_entries(src: &Path) -> Vec<PathBuf> {
+fn cache_entries(cache: &Path) -> Vec<PathBuf> {
     fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
         let Ok(entries) = fs::read_dir(dir) else {
             return;
@@ -232,7 +259,7 @@ fn cache_entries(src: &Path) -> Vec<PathBuf> {
     }
 
     let mut out = Vec::new();
-    walk(&src.join(".siloscan/cache"), &mut out);
+    walk(cache, &mut out);
     out.sort();
     out
 }
@@ -256,8 +283,18 @@ fn coverage_src() -> TempDir {
     ])
 }
 
+/// A scan of `src` under `rules`, against a cache of its own that goes away
+/// with the call.
+///
+/// A caller that needs two runs to share a cache - anything asserting what a
+/// warm run does - uses [`run_cached`] and holds the directory itself.
 fn run(rules: &Path, src: &Path, extra: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_siloscan"))
+    run_cached(cache_home().path(), rules, src, extra)
+}
+
+/// [`run`] against a cache directory the caller owns and can outlive the run.
+fn run_cached(cache: &Path, rules: &Path, src: &Path, extra: &[&str]) -> Output {
+    bin(cache)
         .arg(src)
         .arg("--rules")
         .arg(rules)
@@ -267,7 +304,7 @@ fn run(rules: &Path, src: &Path, extra: &[&str]) -> Output {
 }
 
 fn run_args(args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_siloscan"))
+    bin(cache_home().path())
         .args(args)
         .output()
         .expect("siloscan binary should run")
@@ -276,7 +313,7 @@ fn run_args(args: &[&str]) -> Output {
 /// [`run_args`] with the process started inside `cwd`, so a test can tell a scan
 /// of the named tree from a scan of the working directory.
 fn run_args_in(cwd: &Path, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_siloscan"))
+    bin(cache_home().path())
         .current_dir(cwd)
         .args(args)
         .output()
@@ -426,7 +463,7 @@ fn inline_ignore_line_suppresses_and_is_counted() {
         lines,
         vec![
             "s.rs:2:9 error sup.hit needle found",
-            "1 findings (0 baselined, 1 suppressed)",
+            "1 finding (0 baselined, 1 suppressed)",
         ]
     );
 }
@@ -601,12 +638,18 @@ fn ast_rule_reports_the_report_capture_position() {
 #[test]
 fn warm_cache_reproduces_the_cold_output_byte_for_byte() {
     let (rules, src) = ast_fixture();
-    assert!(cache_entries(src.path()).is_empty());
+    let cache = cache_home();
+    assert!(cache_entries(cache.path()).is_empty());
 
-    let cold = run(rules.path(), src.path(), &["--no-default-rules"]);
+    let cold = run_cached(
+        cache.path(),
+        rules.path(),
+        src.path(),
+        &["--no-default-rules"],
+    );
     assert_eq!(cold.status.code(), Some(1), "{}", stderr(&cold));
 
-    let entries = cache_entries(src.path());
+    let entries = cache_entries(cache.path());
     assert!(!entries.is_empty(), "cold run should populate the cache");
     assert!(
         entries
@@ -615,11 +658,16 @@ fn warm_cache_reproduces_the_cold_output_byte_for_byte() {
         "unexpected cache files: {entries:?}"
     );
 
-    let warm = run(rules.path(), src.path(), &["--no-default-rules"]);
+    let warm = run_cached(
+        cache.path(),
+        rules.path(),
+        src.path(),
+        &["--no-default-rules"],
+    );
     assert_eq!(warm.status.code(), cold.status.code());
     assert_eq!(warm.stdout, cold.stdout);
     // A warm run reads what it already wrote, so the entry set is unchanged.
-    assert_eq!(cache_entries(src.path()), entries);
+    assert_eq!(cache_entries(cache.path()), entries);
 }
 
 #[test]
@@ -627,9 +675,17 @@ fn no_cache_produces_identical_output_and_writes_no_entries() {
     let rules = rules_dir(AST_DBG_RULE);
     let cached_src = ast_src();
     let uncached_src = ast_src();
+    let cached_cache = cache_home();
+    let uncached_cache = cache_home();
 
-    let cached = run(rules.path(), cached_src.path(), &["--no-default-rules"]);
-    let uncached = run(
+    let cached = run_cached(
+        cached_cache.path(),
+        rules.path(),
+        cached_src.path(),
+        &["--no-default-rules"],
+    );
+    let uncached = run_cached(
+        uncached_cache.path(),
         rules.path(),
         uncached_src.path(),
         &["--no-default-rules", "--no-cache"],
@@ -637,21 +693,30 @@ fn no_cache_produces_identical_output_and_writes_no_entries() {
 
     assert_eq!(uncached.status.code(), cached.status.code());
     assert_eq!(uncached.stdout, cached.stdout);
-    assert!(!cache_entries(cached_src.path()).is_empty());
-    assert!(cache_entries(uncached_src.path()).is_empty());
-    assert!(!uncached_src.path().join(".siloscan/cache").exists());
+    assert!(!cache_entries(cached_cache.path()).is_empty());
+    assert!(cache_entries(uncached_cache.path()).is_empty());
+    // Nor anywhere in the scanned tree: the cache left the tree in 1.4.0, and a
+    // scan must not put state back into the input it was given.
+    assert!(!uncached_src.path().join(".siloscan").exists());
+    assert!(!cached_src.path().join(".siloscan").exists());
 }
 
 #[test]
 fn editing_a_scanned_file_invalidates_its_cached_entry() {
     let (rules, src) = ast_fixture();
+    let cache = cache_home();
 
-    let first = run(rules.path(), src.path(), &["--no-default-rules"]);
+    let first = run_cached(
+        cache.path(),
+        rules.path(),
+        src.path(),
+        &["--no-default-rules"],
+    );
     assert_eq!(
         report_lines(&stdout(&first)),
         vec!["src/main.rs:3:5 error ast.dbg leftover dbg"]
     );
-    let before = cache_entries(src.path());
+    let before = cache_entries(cache.path());
 
     write(
         src.path(),
@@ -659,14 +724,19 @@ fn editing_a_scanned_file_invalidates_its_cached_entry() {
         "fn main() {\n    let x = 1;\n    let y = 2;\n    dbg!(x + y);\n}\n",
     );
 
-    let second = run(rules.path(), src.path(), &["--no-default-rules"]);
+    let second = run_cached(
+        cache.path(),
+        rules.path(),
+        src.path(),
+        &["--no-default-rules"],
+    );
     assert_eq!(second.status.code(), Some(1), "{}", stderr(&second));
     assert_eq!(
         report_lines(&stdout(&second)),
         vec!["src/main.rs:4:5 error ast.dbg leftover dbg"]
     );
     assert!(
-        cache_entries(src.path()).len() > before.len(),
+        cache_entries(cache.path()).len() > before.len(),
         "edited content should be a miss and add an entry"
     );
 }
@@ -798,7 +868,7 @@ fn single_file_src() -> TempDir {
 /// Same arguments as [`run`], with the process started inside `cwd` so the scan
 /// path may be relative to it.
 fn run_in(cwd: &Path, rules: &Path, scan_path: &str, extra: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_siloscan"))
+    bin(cache_home().path())
         .current_dir(cwd)
         .arg(scan_path)
         .arg("--rules")
@@ -826,12 +896,16 @@ fn a_single_file_scan_root_reports_the_file_by_name() {
     );
 
     // The same file named relative to the directory holding it: same report,
-    // same exit code, and no `.siloscan` below the file.
+    // same exit code, and nothing written beside or below the file. Joining
+    // `.siloscan` onto a file names a directory below a file, which is the
+    // failure that made `siloscan app.js` exit 2 before it had scanned
+    // anything; since 1.4.0 no state directory is created either way.
     let relative = run_in(src.path(), rules.path(), "app.js", &["--no-default-rules"]);
 
     assert_eq!(relative.status.code(), Some(1), "{}", stderr(&relative));
     assert_eq!(stdout(&relative), stdout(&absolute));
-    assert!(src.path().join(".siloscan/cache").is_dir());
+    assert!(!src.path().join(".siloscan").exists());
+    assert!(!src.path().join("app.js/.siloscan").exists());
 }
 
 #[test]
@@ -875,7 +949,7 @@ fn a_baseline_taken_on_a_file_root_lands_beside_it_and_is_honoured() {
     ]);
 
     assert_eq!(baseline.status.code(), Some(0), "{}", stderr(&baseline));
-    assert_eq!(stdout(&baseline).trim(), "baseline written: 1 entries");
+    assert_eq!(stdout(&baseline).trim(), "baseline written: 1 entry");
     assert!(src.path().join(".siloscan/baseline.json").is_file());
 
     let rescan = run(rules.path(), &file, &["--no-default-rules"]);
@@ -896,7 +970,8 @@ fn closed_stdout_keeps_the_exit_code_contract() {
     let body = "needle\n".repeat(20_000);
     let src = src_dir(&[("big.rs", body.as_str())]);
 
-    let mut child = Command::new(env!("CARGO_BIN_EXE_siloscan"))
+    let cache = cache_home();
+    let mut child = bin(cache.path())
         .arg(src.path())
         .arg("--rules")
         .arg(rules.path())
@@ -936,23 +1011,40 @@ fn hidden_files_are_scanned_and_vcs_internals_are_not() {
     );
 }
 
-/// The state directory the first run creates - `.siloscan/cache` and the
-/// `.gitignore` beside it - is scan input to nobody, so a warm run reports
-/// exactly what the cold one did. Hidden files are in the tree because they are
-/// what made the state directory visible to the walker in the first place.
+/// A warm run reports exactly what the cold one did, and a scan leaves nothing
+/// in the tree it scanned.
+///
+/// Hidden files are in the tree because they are what made the old in-tree state
+/// directory visible to the walker: before 1.4.0 the first run wrote
+/// `.siloscan/cache` into the scan root, and this test existed to prove the
+/// second run did not then scan it. The cache now lives in the user's own cache
+/// directory, so the stronger statement holds - there is no state directory in
+/// the tree at all - and that is what is asserted. The warm/cold identity is
+/// still the point, so both runs share one cache and the second is genuinely
+/// warm.
 #[test]
 fn a_warm_run_over_a_hidden_tree_is_byte_identical_to_the_cold_one() {
     let rules = rules_dir(MATCHING_RULE);
     let src = src_dir(&[(".env", "SECRET=needle\n"), ("src/a.rs", "let x = 1;\n")]);
+    let cache = cache_home();
 
-    let cold = run(
+    let cold = run_cached(
+        cache.path(),
         rules.path(),
         src.path(),
         &["--no-default-rules", "--format", "json"],
     );
-    assert!(src.path().join(".siloscan/cache").is_dir());
+    assert!(
+        !src.path().join(".siloscan").exists(),
+        "a scan must write nothing into the tree it was given"
+    );
+    assert!(
+        !cache_entries(cache.path()).is_empty(),
+        "the cold run should have filled the cache, or the warm run below is not warm"
+    );
 
-    let warm = run(
+    let warm = run_cached(
+        cache.path(),
         rules.path(),
         src.path(),
         &["--no-default-rules", "--format", "json"],
@@ -1095,7 +1187,7 @@ fn baseline_writes_into_the_tree_it_was_given_and_not_the_working_directory() {
     );
 
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
-    assert_eq!(stdout(&output).trim(), "baseline written: 1 entries");
+    assert_eq!(stdout(&output).trim(), "baseline written: 1 entry");
     assert!(src.path().join(".siloscan/baseline.json").is_file());
     assert!(!elsewhere.path().join(".siloscan/baseline.json").exists());
 }
@@ -1425,4 +1517,165 @@ fn the_json_report_counts_what_the_walk_ignored() {
     );
     // Additive: the schema minor does not move for an appended field.
     assert_eq!(report["schema_version"].as_str(), Some("1.2"));
+}
+
+/// A link out of the scan root reaches the report as a path nothing was read
+/// through, and its target stays unread. End to end because this is the whole
+/// promise: where the scanner does not look, it says so.
+#[cfg(unix)]
+#[test]
+fn a_link_out_of_the_scan_root_is_reported_and_never_followed() {
+    let rules = rules_dir(MATCHING_RULE);
+    let outside = src_dir(&[("secret.rs", "needle\n")]);
+    let src = src_dir(&[("a.rs", "clean\n")]);
+    std::os::unix::fs::symlink(outside.path().join("secret.rs"), src.path().join("link.rs"))
+        .unwrap();
+
+    let output = run(
+        rules.path(),
+        src.path(),
+        &["--no-default-rules", "--format", "json"],
+    );
+
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let report: Value = siloscan_core::serde_json::from_str(&stdout(&output)).unwrap();
+    assert_eq!(
+        report["findings"].as_array().unwrap().len(),
+        0,
+        "the target is outside the scan root and must not have been read"
+    );
+    let skipped = report["skipped"].as_array().unwrap();
+    let entry = skipped
+        .iter()
+        .find(|entry| entry["path"] == "link.rs")
+        .unwrap_or_else(|| panic!("link.rs must be reported as unread: {skipped:?}"));
+    assert!(
+        entry["reason"]
+            .as_str()
+            .unwrap()
+            .contains("outside the scan root"),
+        "{entry:?}"
+    );
+
+    // And with --follow-symlinks, which widens nothing past the root.
+    let followed = run(
+        rules.path(),
+        src.path(),
+        &[
+            "--no-default-rules",
+            "--format",
+            "json",
+            "--follow-symlinks",
+        ],
+    );
+    assert_eq!(followed.status.code(), Some(0), "{}", stderr(&followed));
+    let report: Value = siloscan_core::serde_json::from_str(&stdout(&followed)).unwrap();
+    assert_eq!(report["findings"].as_array().unwrap().len(), 0);
+}
+
+/// `--follow-symlinks` reads an in-root target through the link as well as on
+/// its own path, so the finding is reported under both. Off, only the real path
+/// is reported and nothing is listed as missed.
+#[cfg(unix)]
+#[test]
+fn follow_symlinks_reports_an_in_root_target_under_both_paths() {
+    let rules = rules_dir(MATCHING_RULE);
+    let src = src_dir(&[("src/a.rs", "needle\n")]);
+    std::os::unix::fs::symlink(src.path().join("src/a.rs"), src.path().join("alias.rs")).unwrap();
+
+    let default = run(rules.path(), src.path(), &["--no-default-rules"]);
+    assert_eq!(default.status.code(), Some(1), "{}", stderr(&default));
+    assert_eq!(
+        report_lines(&stdout(&default)),
+        vec!["src/a.rs:1:1 error test.needle needle found"],
+        "the target is reached on its own path, and the link costs no coverage"
+    );
+
+    let followed = run(
+        rules.path(),
+        src.path(),
+        &["--no-default-rules", "--follow-symlinks"],
+    );
+    assert_eq!(followed.status.code(), Some(1), "{}", stderr(&followed));
+    assert_eq!(
+        report_lines(&stdout(&followed)),
+        vec![
+            "alias.rs:1:1 error test.needle needle found",
+            "src/a.rs:1:1 error test.needle needle found",
+        ],
+        "a followed link reports its target twice, under both paths"
+    );
+}
+
+/// `--cache-dir` puts the cache where the user said, and nowhere else. The
+/// entries have to be usable: a second run against the same directory must be
+/// warm and must report exactly what the cold one did.
+#[test]
+fn cache_dir_places_the_cache_where_it_was_told_and_stays_deterministic() {
+    let (rules, src) = ast_fixture();
+    let named = cache_home();
+    let default = cache_home();
+
+    let cold = run_cached(
+        default.path(),
+        rules.path(),
+        src.path(),
+        &[
+            "--no-default-rules",
+            "--cache-dir",
+            named.path().to_str().unwrap(),
+        ],
+    );
+    assert_eq!(cold.status.code(), Some(1), "{}", stderr(&cold));
+
+    assert!(
+        !cache_entries(named.path()).is_empty(),
+        "--cache-dir must be where the entries land"
+    );
+    assert!(
+        cache_entries(default.path()).is_empty(),
+        "and the default location must be left alone"
+    );
+
+    let warm = run_cached(
+        default.path(),
+        rules.path(),
+        src.path(),
+        &[
+            "--no-default-rules",
+            "--cache-dir",
+            named.path().to_str().unwrap(),
+        ],
+    );
+    assert_eq!(warm.status.code(), cold.status.code());
+    assert_eq!(warm.stdout, cold.stdout, "a warm cache must move nothing");
+}
+
+/// `cache prune` has to be able to reach a cache that `--cache-dir` created,
+/// or the flag makes entries the tool can no longer clean up.
+#[test]
+fn cache_prune_accepts_the_same_cache_dir_a_scan_used() {
+    let (rules, src) = ast_fixture();
+    let named = cache_home();
+
+    run_cached(
+        named.path(),
+        rules.path(),
+        src.path(),
+        &["--no-default-rules"],
+    );
+    // Written through the environment above; pruned through the flag here, so
+    // the two ways of naming a cache have to agree on the location.
+    assert!(!cache_entries(named.path()).is_empty());
+
+    let pruned = run_args(&[
+        "cache",
+        "prune",
+        path_str(&src),
+        "--cache-dir",
+        named.path().to_str().unwrap(),
+    ]);
+    assert_eq!(pruned.status.code(), Some(0), "{}", stderr(&pruned));
+    // This build wrote the entries, so none of them is stale and none goes.
+    assert_eq!(stdout(&pruned).trim(), "pruned 0 cache entries");
 }

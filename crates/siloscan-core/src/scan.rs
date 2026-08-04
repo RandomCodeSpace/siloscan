@@ -67,6 +67,17 @@ pub struct ScanReport {
     pub boundary_edges: Vec<(String, String, String)>,
     /// Size and duplication metrics for every text file that was scanned.
     pub metrics: Metrics,
+    /// What the scan narrowed, and why, in the caller's own words to print.
+    ///
+    /// A gate that cannot evaluate fails the scan; this is the one case that is
+    /// deliberately not a failure and so has to be said out loud instead - a
+    /// coverage report that lands on none of the files a subdirectory scan
+    /// walked (see the coverage arm of [`run_with_workers`]). Silence there
+    /// would be a coverage gate that measured nothing and reported a pass.
+    ///
+    /// Scanner-generated wording plus a report path, in a fixed order, so two
+    /// runs of the same tree produce the same list.
+    pub warnings: Vec<String>,
 }
 
 /// Optional inputs to a scan. Defaults to no baseline, cache, config or
@@ -121,6 +132,16 @@ pub struct ScanOptions<'a> {
     /// different scan, and the decision has to be visible where the scan is
     /// asked for.
     pub ignore: walk::IgnoreOptions,
+    /// Follow symbolic links whose target is under the scan root. Default
+    /// `false`, which is the shipped behaviour.
+    ///
+    /// Like `ignore`, this decides which files the scan reads, so it is the
+    /// caller's. See [`walk::WalkOptions::follow_symlinks`] for what it does:
+    /// off, an in-root target is still reached on its own path; on, it is
+    /// additionally read through the link and so reported under both paths. A
+    /// target outside the scan root is refused either way, and turning this on
+    /// cannot widen a scan past its own root.
+    pub follow_symlinks: bool,
 }
 
 /// The path convention a scan reports under.
@@ -469,6 +490,7 @@ fn run_with_workers(
     let mut findings: Vec<Finding> = Vec::new();
     let mut suppressed: Vec<Finding> = Vec::new();
     let mut skipped: Vec<SkippedFile> = Vec::new();
+    let mut warnings: Vec<String> = Vec::new();
     let mut graph = crate::graph::Graph::default();
     // Anchored path -> the file it came from, for every scannable file. Every
     // key below is anchored the same way, because they all come from the one
@@ -484,16 +506,53 @@ fn run_with_workers(
     // The walk counts what it excluded as it goes. Reported whatever the scan
     // finds: a tree whose one credential sits behind a `.gitignore` line must
     // not be reportable as a tree with nothing in it.
+    let project_dirs = options
+        .config
+        .map(|config| config.project_ignore_dirs(root))
+        .unwrap_or_default();
     let walk::WalkResult {
-        files,
+        mut files,
         ignored: ignored_entries,
-    } = walk::collect_files_counted_in_project(
+        mut symlinks,
+    } = walk::collect_files_counted_with(
         root,
-        &options.ignore,
-        &options
-            .config
-            .map(|config| config.project_ignore_dirs(root))
-            .unwrap_or_default(),
+        &walk::WalkOptions::new(&options.ignore)
+            .in_project(&project_dirs)
+            .follow_symlinks(options.follow_symlinks),
+    );
+
+    // The cache is not content under review, and when it lands under the scan
+    // root it is also not a stable part of the tree: a cold run writes entries a
+    // warm run would then walk, read and report, which is the one thing this
+    // scanner promises its output does not depend on. Dropped here rather than
+    // counted in `ignored`, for the same reason the walker's own `.git` and
+    // `.siloscan` exclusions are not counted - an entry that exists only because
+    // a scan already ran must not put a number in a report.
+    if let Some(excluded) = options.cache.and_then(|cache| cache.exclusion_under(root)) {
+        files.retain(|path| !path.starts_with(&excluded));
+        symlinks.retain(|entry| !entry.path.starts_with(&excluded));
+    }
+
+    // A link whose target this scan never opened is a named path nothing was
+    // reported for, which is exactly what `skipped` is: the report saying where
+    // it did not look. Merged in before the per-file outcomes so the sort below
+    // orders links and skipped files together.
+    //
+    // Only the unread ones. `SymlinkDisposition::target_was_scanned` is true for
+    // a link into the scan root, a followed link and a self-containing directory
+    // link, and in all three the file behind the link was read - on its own path
+    // or, under `follow_symlinks`, through the link as well. Listing those as
+    // skipped would claim the scan missed a file it read, and would bury the
+    // links that actually cost coverage in a list of ones that did not. The walk
+    // still records them all for a library caller that wants the full picture.
+    skipped.extend(
+        symlinks
+            .iter()
+            .filter(|entry| !entry.disposition.target_was_scanned())
+            .map(|entry| SkippedFile {
+                path: anchoring.relative(root, &entry.path),
+                reason: entry.disposition.reason().to_string(),
+            }),
     );
     let files_total = files.len();
     on_progress(Progress {
@@ -605,19 +664,57 @@ fn run_with_workers(
         // nothing, which is the missing-report hole with a file in the way of
         // seeing it. It can only be checked here, once the walk has said what
         // the scanned paths are.
-        crate::coverage::require_resolved(&rules.rules, coverage, &resolved)?;
-        whole_tree.extend(crate::coverage::scan_coverage(
-            &rules.rules,
-            &resolved,
-            &paths,
-        ));
+        //
+        // The rule: a report matching nothing fails the scan, except when both
+        // of the following hold, where it is a warning and the coverage rules do
+        // not evaluate.
+        //
+        // One, the scan root is a strict subdirectory of the config root. A
+        // whole-project report legitimately covers files a one-module scan never
+        // walked, and the module job is the one that was green yesterday; a
+        // full-project scan has no such excuse and still fails.
+        //
+        // Two, the report named files of its own. `resolved` being empty says
+        // only that nothing lined up, and there are two ways to get there: a
+        // report about a tree this scan is a part of, which is the case above,
+        // and a report that measured nothing at all - an empty lcov, a run
+        // truncated before it wrote a record, a `--coverage-report` pointed at
+        // the wrong file that still parsed. The second is a broken input, it
+        // looks exactly the same from a subdirectory as from the root, and
+        // excusing it would turn the missing-report hole back on for every
+        // module job. So it fails wherever the scan root is.
+        //
+        // What is left is narrow: the report parsed, it named files, a coverage
+        // rule was loaded, the scan root is below the config root, and the
+        // warning says the gate did not run. Nothing here lets a subdirectory
+        // scan report a coverage pass it did not measure - it reports that it
+        // did not measure one.
+        match crate::coverage::require_resolved(&rules.rules, coverage, &resolved) {
+            Ok(()) => whole_tree.extend(crate::coverage::scan_coverage(
+                &rules.rules,
+                &resolved,
+                &paths,
+            )),
+            Err(error)
+                if !coverage.files.is_empty() && scan_root_below_config(root, options.config) =>
+            {
+                warnings.push(format!(
+                    "{error}; the scan root is below the directory holding {}, so coverage rules \
+                     did not evaluate for this scan",
+                    crate::config::CONFIG_NAME
+                ));
+            }
+            Err(error) => return Err(error),
+        }
     }
 
     // Metrics are cross-file, so they are computed here rather than per file,
     // and they are never stored in or read from the per-file cache: a warm
     // cache must produce the same numbers as a cold one.
     let (metrics, duplication) = measure(contents, file_metrics, options.config);
-    whole_tree.extend(duplicate_block_findings(&duplication));
+    if report_duplicate_blocks(rules, options.config) {
+        whole_tree.extend(duplicate_block_findings(&duplication));
+    }
     whole_tree.extend(duplication_gates(
         rules,
         &metrics,
@@ -653,7 +750,57 @@ fn run_with_workers(
         graph,
         boundary_edges,
         metrics,
+        warnings,
     })
+}
+
+/// True when the scan root sits strictly below the directory holding the config
+/// the scan loaded.
+///
+/// The comparison is the one [`require_config_root`] makes, minus the equal
+/// case: a config that is not on disk has no directory to measure from and is
+/// not below anything, and a scan of the config root itself is the whole
+/// project rather than a part of it. Both sides are canonicalised, so `.`, `..`
+/// and symlinks in either argument do not decide the answer, and a single-file
+/// scan root is measured by the directory holding it.
+fn scan_root_below_config(root: &Path, config: Option<&crate::config::Config>) -> bool {
+    let Some(config) = config else {
+        return false;
+    };
+    let dir = config.config_root();
+    if dir.as_os_str().is_empty() {
+        return false;
+    }
+
+    let canonical = |path: &Path| path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let base = canonical(dir);
+    let scanned = canonical(measured_from(root));
+    scanned != base && scanned.starts_with(&base)
+}
+
+/// Whether a scan emits one `metrics.duplicate-block` info finding per copy of
+/// every duplicated block.
+///
+/// The rule: only when the run asked for them, either by `[duplication]
+/// report_blocks = true` in `siloscan.toml` or by loading a duplication rule -
+/// gating on duplication is asking where the duplication is.
+///
+/// Off by default because those findings are per copy of every block and so
+/// dominate a report on any real tree: 46,891 of 47,102 findings on one Rust
+/// codebase, a SARIF file too large for GitHub code scanning to ingest, and
+/// every secret in the run buried under them. Nothing is lost by the default -
+/// duplication is measured and reported either way, in
+/// `metrics.files[*].duplicated_lines`, the totals and the density - and
+/// nothing changes when it is turned back on: the same findings with the same
+/// fingerprints an existing baseline already covers.
+fn report_duplicate_blocks(rules: &RuleSet, config: Option<&crate::config::Config>) -> bool {
+    if config.is_some_and(|config| config.duplication.report_blocks) {
+        return true;
+    }
+    rules
+        .rules
+        .iter()
+        .any(|rule| matches!(rule.payload, CompiledPayload::Duplication { .. }))
 }
 
 /// Fill the duplication counts into the per-file metrics and roll them up.
@@ -699,6 +846,9 @@ const MAX_LISTED_COPIES: usize = 10;
 /// id. The matched text names the block, so every copy of one block shares it
 /// and the occurrence index separates two copies that live in the same file;
 /// the message names the other copies and stays out of the fingerprint.
+///
+/// Called only when [`report_duplicate_blocks`] says the run asked for these.
+/// The measurement behind them happens either way.
 fn duplicate_block_findings(duplication: &DuplicationResult) -> Vec<Finding> {
     let mut occurrences: HashMap<(String, String), u32> = HashMap::new();
     let mut findings = Vec::new();
@@ -1434,15 +1584,37 @@ rules:
         fs::write(path, body).unwrap();
     }
 
+    /// A cache base for one test, standing in for the user's cache directory.
+    ///
+    /// Tests take a base explicitly rather than letting [`crate::cache::Cache::open`]
+    /// find the real one: `cargo test` must not write into the developer's
+    /// `~/.cache/siloscan`, and a test that did would also read whatever an
+    /// earlier run left there, which is a cache-state dependency in the one
+    /// suite that exists to prove there is none.
+    ///
+    /// It is a parameter and not a per-cache tempdir because two caches in one
+    /// test are often required to share a directory: separate bases would make
+    /// `a_cache_entry_from_one_convention_never_serves_the_other` pass because
+    /// the two caches were in different places, not because the scope
+    /// discriminator kept them apart.
+    fn cache_base() -> tempfile::TempDir {
+        tempdir()
+    }
+
     /// A cache for the default, scan-root-anchored convention.
-    fn cache_for(root: &Path, rules: &RuleSet) -> crate::cache::Cache {
-        crate::cache::Cache::open(root, rules, &crate::cache::PathScope::ScanRoot)
+    fn cache_for(base: &Path, root: &Path, rules: &RuleSet) -> crate::cache::Cache {
+        crate::cache::Cache::open_in(base, root, rules, &crate::cache::PathScope::ScanRoot)
     }
 
     /// A cache for the convention `anchoring` describes.
-    fn cache_anchored(root: &Path, rules: &RuleSet, anchoring: &Anchoring) -> crate::cache::Cache {
+    fn cache_anchored(
+        base: &Path,
+        root: &Path,
+        rules: &RuleSet,
+        anchoring: &Anchoring,
+    ) -> crate::cache::Cache {
         let scope = crate::cache::PathScope::new(anchoring.anchor(), anchoring.prefix());
-        crate::cache::Cache::open(root, rules, &scope)
+        crate::cache::Cache::open_in(base, root, rules, &scope)
     }
 
     /// The walk policy is a scan input, so `ScanOptions::ignore` has to reach
@@ -1604,9 +1776,10 @@ rules:
         assert_eq!(counted(8), expected);
     }
 
-    /// Nothing about the count may move with cache state: the cache lives in
-    /// `.siloscan`, which the walker excludes as policy and never counts, and
-    /// the walk runs before any entry is looked up.
+    /// Nothing about the count may move with cache state: the cache lives
+    /// outside the scanned tree, and the walk runs before any entry is looked
+    /// up. See [`a_cache_under_the_scan_root_is_kept_out_of_the_walk`] for the
+    /// layouts where "outside the tree" is not enough on its own.
     #[test]
     fn the_ignored_count_is_the_same_cold_and_warm() {
         let dir = tempdir();
@@ -1616,7 +1789,8 @@ rules:
         write(dir.path(), "src/main.rs", b"needle\n");
 
         let rules = ruleset();
-        let cache = cache_for(dir.path(), &rules);
+        let cache_home = cache_base();
+        let cache = cache_for(cache_home.path(), dir.path(), &rules);
         let cold = cached_scan(dir.path(), &rules, &cache);
         let warm = cached_scan(dir.path(), &rules, &cache);
 
@@ -1626,9 +1800,78 @@ rules:
         };
         assert_eq!(cold.ignored, expected);
         assert_eq!(warm.ignored, expected);
-        // The cache directory now exists in the scanned tree, and it is neither
-        // scanned nor counted.
-        assert!(dir.path().join(".siloscan").exists());
+        // The cold run filled the cache, so the warm run above is genuinely
+        // warm - and it filled it outside the scanned tree, which is why the
+        // two counts can be equal at all. A cache written into the tree would
+        // appear in the second walk and not the first.
+        assert!(!cache_entry_paths(cache_home.path()).is_empty());
+        assert!(!dir.path().join(".siloscan").exists());
+        assert_eq!(
+            serde_json::to_string(&cold).unwrap(),
+            serde_json::to_string(&warm).unwrap()
+        );
+    }
+
+    /// The cache is out of the scanned tree by location policy, but a scan root
+    /// can be put above it: `siloscan ~`, `siloscan /`, any root above
+    /// `XDG_CACHE_HOME`, or a `--cache-dir` inside the root, which is the shape
+    /// this test uses because it needs no environment. The cold run writes
+    /// entries and a salt; without the exclusion the warm run walks them, and
+    /// the two reports stop being the same report.
+    #[test]
+    fn a_cache_under_the_scan_root_is_kept_out_of_the_walk() {
+        let dir = tempdir();
+        write(dir.path(), "src/a.rs", b"needle\n");
+
+        let rules = ruleset();
+        let inside = dir.path().join("cache");
+        let cache = cache_for(&inside, dir.path(), &rules);
+        let cold = cached_scan(dir.path(), &rules, &cache);
+        let warm = cached_scan(dir.path(), &rules, &cache);
+
+        // The cold run really did fill the cache inside the tree, so the warm
+        // run had something to walk and did not.
+        assert!(!cache_entry_paths(&inside).is_empty());
+        assert_eq!(
+            cold.metrics.files.keys().collect::<Vec<_>>(),
+            vec!["src/a.rs"]
+        );
+        assert_eq!(
+            serde_json::to_string(&cold).unwrap(),
+            serde_json::to_string(&warm).unwrap()
+        );
+        // The salt is the sharpest case: a scan that reads it is reporting on
+        // its own authentication secret.
+        assert!(
+            warm.metrics
+                .files
+                .keys()
+                .all(|path| !path.contains(".salt")),
+            "{:?}",
+            warm.metrics.files.keys().collect::<Vec<_>>()
+        );
+    }
+
+    /// Only the directory the cache actually occupies. A `--cache-dir` names a
+    /// directory this crate does not own, so it does not get to declare the
+    /// user's other files there unscannable - that would be a scanned tree
+    /// silently shrinking, which is the thing the exclusion exists to prevent.
+    #[test]
+    fn the_exclusion_covers_the_cache_and_not_the_directory_holding_it() {
+        let dir = tempdir();
+        write(dir.path(), "src/a.rs", b"needle\n");
+        write(dir.path(), "src/kept.rs", b"needle\n");
+
+        let rules = ruleset();
+        // The cache is put inside the source directory on purpose.
+        let cache = cache_for(&dir.path().join("src"), dir.path(), &rules);
+        let cold = cached_scan(dir.path(), &rules, &cache);
+        let warm = cached_scan(dir.path(), &rules, &cache);
+
+        assert_eq!(
+            warm.metrics.files.keys().collect::<Vec<_>>(),
+            vec!["src/a.rs", "src/kept.rs"]
+        );
         assert_eq!(
             serde_json::to_string(&cold).unwrap(),
             serde_json::to_string(&warm).unwrap()
@@ -1984,7 +2227,8 @@ rules:
         write(dir.path(), "src/b.rs", b"needle needle\n");
 
         let rules = ruleset();
-        let cache = cache_for(dir.path(), &rules);
+        let cache_home = cache_base();
+        let cache = cache_for(cache_home.path(), dir.path(), &rules);
         let cold = cached_scan(dir.path(), &rules, &cache);
         let warm = cached_scan(dir.path(), &rules, &cache);
 
@@ -2006,13 +2250,19 @@ rules:
     /// three reports have to be byte-identical, and all three have to name the
     /// credential.
     ///
-    /// The third run is the one that matters. A cache lives inside the scanned
-    /// tree, so a repository can commit entries into it; an entry saying
-    /// `findings: []` for a file holding a credential is the cheapest possible
-    /// way to make a scanner report a clean tree. The entry is authenticated
-    /// under a salt the repository cannot know, so a rewritten one fails to
-    /// authenticate, misses, and the file is scanned for real. "Cannot be read"
-    /// resolves to "scan it", never to "it was clean".
+    /// The third run is the one that matters. An entry saying `findings: []`
+    /// for a file holding a credential is the cheapest possible way to make a
+    /// scanner report a clean tree, so the scan may not believe one it cannot
+    /// authenticate. The entry is authenticated under a salt the writer of a
+    /// forged entry does not have, so a rewritten one fails to authenticate,
+    /// misses, and the file is scanned for real. "Cannot be read" resolves to
+    /// "scan it", never to "it was clean".
+    ///
+    /// Moving the cache out of the scanned tree in 1.4.0 removed the cheapest
+    /// route to a forged entry - a repository could previously commit one - but
+    /// it did not remove the requirement. The cache is still a file on a disk
+    /// that other things can write to, and an entry that is merely corrupt has
+    /// to resolve the same way a hostile one does. This test is what says so.
     #[test]
     fn no_cache_state_can_change_what_a_scan_reports() {
         let dir = tempdir();
@@ -2024,12 +2274,13 @@ rules:
             sources: vec![("secret".to_string(), SECRET_RULES.to_string())],
         };
 
-        let cache = cache_for(dir.path(), &rules);
+        let cache_home = cache_base();
+        let cache = cache_for(cache_home.path(), dir.path(), &rules);
         let cold = cached_scan(dir.path(), &rules, &cache);
         let warm = cached_scan(dir.path(), &rules, &cache);
 
         // The cold run populated the cache, or the run below proves nothing.
-        let entries = cache_entry_paths(dir.path());
+        let entries = cache_entry_paths(cache_home.path());
         assert!(!entries.is_empty(), "the cold run wrote no cache entries");
 
         // Every entry now claims its file is clean. At least one of them said
@@ -2067,7 +2318,12 @@ rules:
     }
 
     /// Every cache entry file under a scan root, sorted.
-    fn cache_entry_paths(root: &Path) -> Vec<std::path::PathBuf> {
+    /// Every cache entry written under `base`, sorted.
+    ///
+    /// `base` is the cache directory the test gave the cache, not the scan root:
+    /// since 1.4.0 the cache is in the user's own cache directory and there is
+    /// nothing to find under the scanned tree.
+    fn cache_entry_paths(base: &Path) -> Vec<std::path::PathBuf> {
         fn walk(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
             let Ok(entries) = std::fs::read_dir(dir) else {
                 return;
@@ -2083,7 +2339,7 @@ rules:
         }
 
         let mut out = Vec::new();
-        walk(&root.join(crate::cache::CACHE_DIR), &mut out);
+        walk(base, &mut out);
         out.sort();
         out
     }
@@ -2094,7 +2350,8 @@ rules:
         write(dir.path(), "a.rs", b"needle\n");
 
         let rules = ruleset();
-        let cache = cache_for(dir.path(), &rules);
+        let cache_home = cache_base();
+        let cache = cache_for(cache_home.path(), dir.path(), &rules);
         assert_eq!(cached_scan(dir.path(), &rules, &cache).findings.len(), 1);
 
         write(
@@ -2114,7 +2371,8 @@ rules:
         write(dir.path(), "src/b.rs", b"needle\n");
 
         let rules = ruleset();
-        let cache = cache_for(dir.path(), &rules);
+        let cache_home = cache_base();
+        let cache = cache_for(cache_home.path(), dir.path(), &rules);
         cached_scan(dir.path(), &rules, &cache);
         let report = cached_scan(dir.path(), &rules, &cache);
 
@@ -2143,7 +2401,8 @@ rules:
             .sources
             .push(("ast".to_string(), AST_RULES.to_string()));
 
-        let cache = cache_for(dir.path(), &rules);
+        let cache_home = cache_base();
+        let cache = cache_for(cache_home.path(), dir.path(), &rules);
         let cold = cached_scan(dir.path(), &rules, &cache);
         let warm = cached_scan(dir.path(), &rules, &cache);
 
@@ -2475,6 +2734,222 @@ db = ["src/db/**"]
         );
     }
 
+    fn coverage_ruleset() -> RuleSet {
+        RuleSet {
+            rules: load_str(COVERAGE_RULES, "coverage").unwrap(),
+            sources: vec![("coverage".to_string(), COVERAGE_RULES.to_string())],
+        }
+    }
+
+    /// A coverage report of another checkout: it parsed, it names a file, and
+    /// the file is one no scan of the fixture tree will ever walk.
+    fn foreign_coverage() -> crate::coverage::CoverageReport {
+        crate::coverage::CoverageReport {
+            files: std::collections::BTreeMap::from([(
+                "elsewhere/other.rs".to_string(),
+                crate::coverage::FileCoverage {
+                    lines_total: 10,
+                    lines_covered: 1,
+                },
+            )]),
+            source: "coverage/lcov.info".to_string(),
+        }
+    }
+
+    /// A repository whose config sits at the root and whose sources sit one
+    /// directory down, which is the shape a per-module CI job scans.
+    fn module_tree(root: &Path) {
+        git_root(root);
+        write(root, "siloscan.toml", b"");
+        write(root, "modules/api/src/a.rs", b"let x = 1;\n");
+    }
+
+    /// The subdirectory CI job that a coverage report of the whole repository
+    /// legitimately misses. It was green yesterday and has to stay green: the
+    /// gate says out loud that it did not evaluate, and the exit code is left
+    /// to whatever else the scan found.
+    #[test]
+    fn a_subdirectory_scan_warns_when_the_coverage_report_matches_nothing() {
+        let dir = tempdir();
+        module_tree(dir.path());
+
+        let config = root_config(dir.path());
+        let coverage = foreign_coverage();
+        let options = ScanOptions {
+            config: Some(&config),
+            coverage: Some(&coverage),
+            ..ScanOptions::default()
+        };
+        let report = scan_opts(
+            &dir.path().join("modules/api"),
+            &coverage_ruleset(),
+            &options,
+            &mut |_| {},
+        )
+        .expect("a module scan is not refused for a report of the whole repository");
+
+        assert_eq!(report.warnings.len(), 1, "{:?}", report.warnings);
+        let warning = &report.warnings[0];
+        assert!(warning.contains("cov.min"), "{warning}");
+        assert!(warning.contains("coverage/lcov.info"), "{warning}");
+        assert!(warning.contains("did not evaluate"), "{warning}");
+        // The rules did not evaluate, so they reported neither a violation nor
+        // a pass.
+        assert!(
+            report.findings.iter().all(|f| f.rule_id != "cov.min"),
+            "{:?}",
+            report.findings
+        );
+    }
+
+    /// The other side of the same rule. A whole-project scan has no module to
+    /// blame, so a report landing on nothing is still a gate that cannot
+    /// evaluate, and that is exit 2.
+    #[test]
+    fn a_full_project_scan_with_a_non_matching_coverage_report_is_an_error() {
+        let dir = tempdir();
+        module_tree(dir.path());
+
+        let config = root_config(dir.path());
+        let coverage = foreign_coverage();
+        let options = ScanOptions {
+            config: Some(&config),
+            coverage: Some(&coverage),
+            ..ScanOptions::default()
+        };
+        let err = scan_opts(dir.path(), &coverage_ruleset(), &options, &mut |_| {}).unwrap_err();
+        assert!(err.contains("matches none of the scanned files"), "{err}");
+
+        // And with no config at all there is no config root to be below, so the
+        // scan root cannot be a subdirectory of one and the refusal stands.
+        let options = ScanOptions {
+            coverage: Some(&coverage),
+            ..ScanOptions::default()
+        };
+        assert!(
+            scan_opts(
+                &dir.path().join("modules/api"),
+                &coverage_ruleset(),
+                &options,
+                &mut |_| {},
+            )
+            .is_err()
+        );
+    }
+
+    /// The exception is for a report of a wider tree, not for a report of no
+    /// tree. An empty report - an lcov with no records, a run truncated before
+    /// it wrote one, a `--coverage-report` pointed at a file that parsed and
+    /// measured nothing - is a broken input, it looks the same from a
+    /// subdirectory as from the root, and excusing it would reopen the
+    /// missing-report hole for every module job. Exit 2, wherever the scan root
+    /// is.
+    #[test]
+    fn a_subdirectory_scan_with_an_empty_coverage_report_is_still_an_error() {
+        let dir = tempdir();
+        module_tree(dir.path());
+
+        let config = root_config(dir.path());
+        let coverage = crate::coverage::CoverageReport {
+            files: std::collections::BTreeMap::new(),
+            source: "coverage/lcov.info".to_string(),
+        };
+        let options = ScanOptions {
+            config: Some(&config),
+            coverage: Some(&coverage),
+            ..ScanOptions::default()
+        };
+
+        // The scan root is a strict subdirectory of the config root, which is
+        // the whole of the other condition - so this is the empty report and
+        // nothing else deciding the outcome.
+        assert!(scan_root_below_config(
+            &dir.path().join("modules/api"),
+            Some(&config)
+        ));
+        let err = scan_opts(
+            &dir.path().join("modules/api"),
+            &coverage_ruleset(),
+            &options,
+            &mut |_| {},
+        )
+        .unwrap_err();
+        assert!(err.contains("matches none of the scanned files"), "{err}");
+    }
+
+    /// The warning is for a report that lands on nothing, not for a report that
+    /// lands on something: a subdirectory scan whose report does match still
+    /// evaluates its coverage rules and still fails them.
+    #[test]
+    fn a_subdirectory_scan_whose_report_matches_still_evaluates() {
+        let dir = tempdir();
+        module_tree(dir.path());
+
+        let config = root_config(dir.path());
+        let coverage = crate::coverage::CoverageReport {
+            files: std::collections::BTreeMap::from([(
+                "a.rs".to_string(),
+                crate::coverage::FileCoverage {
+                    lines_total: 10,
+                    lines_covered: 1,
+                },
+            )]),
+            source: String::new(),
+        };
+        let options = ScanOptions {
+            config: Some(&config),
+            coverage: Some(&coverage),
+            ..ScanOptions::default()
+        };
+        let report = scan_opts(
+            &dir.path().join("modules/api/src"),
+            &coverage_ruleset(),
+            &options,
+            &mut |_| {},
+        )
+        .unwrap();
+
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+        assert_eq!(report.findings.len(), 1);
+        assert_eq!(report.findings[0].rule_id, "cov.min");
+    }
+
+    /// A scan that narrowed nothing says nothing, and the field is part of the
+    /// report's determinism: a warning list that depended on the worker count
+    /// or on a warm cache would be a scan describing itself differently twice.
+    #[test]
+    fn an_ordinary_scan_reports_no_warnings() {
+        let dir = tempdir();
+        duplicated_tree(dir.path());
+
+        assert!(scan(dir.path(), &ruleset(), None).warnings.is_empty());
+    }
+
+    #[test]
+    fn the_scan_root_is_below_the_config_only_when_it_is_strictly_below() {
+        let dir = tempdir();
+        module_tree(dir.path());
+        let config = root_config(dir.path());
+
+        assert!(scan_root_below_config(
+            &dir.path().join("modules/api"),
+            Some(&config)
+        ));
+        // A single-file root is measured by the directory holding it.
+        assert!(scan_root_below_config(
+            &dir.path().join("modules/api/src/a.rs"),
+            Some(&config)
+        ));
+        // The config root itself is the whole project, not a part of it.
+        assert!(!scan_root_below_config(dir.path(), Some(&config)));
+        // No config, and a config that never came from disk, are below nothing.
+        assert!(!scan_root_below_config(&dir.path().join("modules"), None));
+        assert!(!scan_root_below_config(
+            &dir.path().join("modules"),
+            Some(&crate::config::Config::default())
+        ));
+    }
+
     const DUPLICATION_RULES: &str = r#"
 version: 1
 rules:
@@ -2502,6 +2977,38 @@ rules:
             .sources
             .push(("duplication".to_string(), DUPLICATION_RULES.to_string()));
         rules
+    }
+
+    /// A config whose only setting is the key that asks for duplicate-block
+    /// findings.
+    fn report_blocks_config() -> crate::config::Config {
+        crate::config::Config {
+            duplication: crate::config::DuplicationConfig {
+                report_blocks: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    /// A scan that reports duplicate blocks, for the tests that are about what
+    /// those findings look like rather than about whether they are emitted.
+    fn scan_blocks(root: &Path, rules: &RuleSet) -> ScanReport {
+        let config = report_blocks_config();
+        let options = ScanOptions {
+            config: Some(&config),
+            ..ScanOptions::default()
+        };
+        scan_opts(root, rules, &options, &mut |_| {}).expect("rules compile")
+    }
+
+    /// Every duplicate-block finding in a report, in report order.
+    fn blocks_of(report: &ScanReport) -> Vec<&Finding> {
+        report
+            .findings
+            .iter()
+            .filter(|f| f.rule_id == crate::metrics::DUPLICATE_BLOCK_RULE_ID)
+            .collect()
     }
 
     /// Two files sharing a twelve-line block, plus a file that shares nothing.
@@ -2539,18 +3046,73 @@ rules:
         assert!((totals.duplication_density - 24.0 / 27.0 * 100.0).abs() < 1e-9);
     }
 
+    /// The default: the numbers stay, the per-block findings stop.
+    ///
+    /// This is the whole of the adoption fix. On a real tree those findings
+    /// outnumber everything else by orders of magnitude, so a default that
+    /// emits them is a report nobody reads and a SARIF file nobody can ingest -
+    /// but the duplication a reader acts on is a number, and the numbers are
+    /// measured and reported here exactly as before.
     #[test]
-    fn duplicate_blocks_are_reported_as_info_findings() {
+    fn duplicate_blocks_are_not_reported_by_default() {
         let dir = tempdir();
         duplicated_tree(dir.path());
 
         let report = scan(dir.path(), &ruleset(), None);
 
-        let blocks: Vec<&Finding> = report
-            .findings
-            .iter()
-            .filter(|f| f.rule_id == crate::metrics::DUPLICATE_BLOCK_RULE_ID)
-            .collect();
+        assert!(blocks_of(&report).is_empty(), "{:?}", report.findings);
+        assert!(
+            report
+                .suppressed
+                .iter()
+                .chain(&report.baselined)
+                .all(|f| f.rule_id != crate::metrics::DUPLICATE_BLOCK_RULE_ID),
+            "not emitted at all, rather than emitted and hidden"
+        );
+
+        // The measurement is untouched: same counts, same totals, same density
+        // as the run that reports every block.
+        assert_eq!(report.metrics.files["src/a.rs"].duplicated_lines, 12);
+        assert_eq!(report.metrics.files["src/b.rs"].duplicated_lines, 12);
+        assert_eq!(report.metrics.totals.duplicated_lines, 24);
+        let asked = scan_blocks(dir.path(), &ruleset());
+        assert_eq!(report.metrics.totals, asked.metrics.totals);
+        assert_eq!(report.metrics.files, asked.metrics.files);
+    }
+
+    /// Loading a duplication rule is asking where the duplication is, so the
+    /// locations come back without a config key. The default pack carries no
+    /// duplication rule, so this cannot undo the default above by accident.
+    #[test]
+    fn a_duplication_rule_brings_the_block_findings_back() {
+        let dir = tempdir();
+        duplicated_tree(dir.path());
+
+        assert!(
+            !report_duplicate_blocks(&ruleset(), None),
+            "a regex-only rule set asks for nothing"
+        );
+        assert!(report_duplicate_blocks(&duplication_ruleset(), None));
+        assert!(report_duplicate_blocks(&silo_duplication_rules(), None));
+        assert!(report_duplicate_blocks(
+            &ruleset(),
+            Some(&report_blocks_config())
+        ));
+
+        let report = scan(dir.path(), &duplication_ruleset(), None);
+        assert_eq!(blocks_of(&report).len(), 2);
+    }
+
+    /// Turning them back on reproduces 1.3.0 byte for byte, fingerprints
+    /// included, so a baseline written against that release keeps working.
+    #[test]
+    fn duplicate_blocks_are_reported_as_info_findings() {
+        let dir = tempdir();
+        duplicated_tree(dir.path());
+
+        let report = scan_blocks(dir.path(), &ruleset());
+
+        let blocks = blocks_of(&report);
         assert_eq!(blocks.len(), 2, "one finding per copy");
 
         // Copies sort with every other finding: a.rs before b.rs.
@@ -2593,13 +3155,9 @@ rules:
             write(dir.path(), &format!("src/f{index:02}.rs"), block.as_bytes());
         }
 
-        let report = scan(dir.path(), &ruleset(), None);
+        let report = scan_blocks(dir.path(), &ruleset());
 
-        let blocks: Vec<&Finding> = report
-            .findings
-            .iter()
-            .filter(|f| f.rule_id == crate::metrics::DUPLICATE_BLOCK_RULE_ID)
-            .collect();
+        let blocks = blocks_of(&report);
         assert_eq!(blocks.len(), 15, "one finding per copy");
 
         let message = &blocks[0].message;
@@ -2621,13 +3179,9 @@ rules:
         let content: String = (0..20).map(|_| "call(same);\n".to_string()).collect();
         write(dir.path(), "src/a.rs", content.as_bytes());
 
-        let report = scan(dir.path(), &ruleset(), None);
+        let report = scan_blocks(dir.path(), &ruleset());
 
-        let blocks: Vec<&Finding> = report
-            .findings
-            .iter()
-            .filter(|f| f.rule_id == crate::metrics::DUPLICATE_BLOCK_RULE_ID)
-            .collect();
+        let blocks = blocks_of(&report);
         assert_eq!(blocks.len(), 2);
         assert_eq!(blocks[0].matched, blocks[1].matched);
         assert_eq!(blocks[0].path, blocks[1].path);
@@ -2654,14 +3208,9 @@ rules:
         );
         write(dir.path(), "src/b.rs", block.as_bytes());
 
-        let report = scan(dir.path(), &ruleset(), None);
+        let report = scan_blocks(dir.path(), &ruleset());
 
-        let reported: Vec<&str> = report
-            .findings
-            .iter()
-            .filter(|f| f.rule_id == crate::metrics::DUPLICATE_BLOCK_RULE_ID)
-            .map(|f| f.path.as_str())
-            .collect();
+        let reported: Vec<&str> = blocks_of(&report).iter().map(|f| f.path.as_str()).collect();
         assert_eq!(reported, vec!["src/b.rs"]);
         assert_eq!(report.suppressed.len(), 1);
         assert_eq!(report.suppressed[0].path, "src/a.rs");
@@ -2715,7 +3264,10 @@ rules:
         assert_eq!(default.metrics.totals.duplicated_lines, 0);
 
         let config = crate::config::Config {
-            duplication: crate::config::DuplicationConfig { min_lines: 4 },
+            duplication: crate::config::DuplicationConfig {
+                min_lines: 4,
+                report_blocks: true,
+            },
             ..Default::default()
         };
         let options = ScanOptions {
@@ -2725,14 +3277,7 @@ rules:
         let report = scan_opts(dir.path(), &ruleset(), &options, &mut |_| {}).unwrap();
 
         assert_eq!(report.metrics.totals.duplicated_lines, 8);
-        assert_eq!(
-            report
-                .findings
-                .iter()
-                .filter(|f| f.rule_id == crate::metrics::DUPLICATE_BLOCK_RULE_ID)
-                .count(),
-            2
-        );
+        assert_eq!(blocks_of(&report).len(), 2);
     }
 
     const SILO_DUPLICATION_RULES: &str = r#"
@@ -2860,7 +3405,8 @@ rules:
         duplicated_tree(dir.path());
 
         let rules = duplication_ruleset();
-        let cache = cache_for(dir.path(), &rules);
+        let cache_home = cache_base();
+        let cache = cache_for(cache_home.path(), dir.path(), &rules);
         let report = |workers, cache: Option<&crate::cache::Cache>| {
             let options = ScanOptions {
                 cache,
@@ -3181,7 +3727,8 @@ rules:
         let anchoring = Anchoring::resolve(&root, Some(&config)).expect("anchoring resolves");
         assert_eq!(anchoring.prefix(), "modules/api");
 
-        let cache = cache_anchored(&root, &rules, &anchoring);
+        let cache_home = cache_base();
+        let cache = cache_anchored(cache_home.path(), &root, &rules, &anchoring);
         let json = |workers, cache: Option<&crate::cache::Cache>| {
             let options = ScanOptions {
                 cache,
@@ -3197,7 +3744,7 @@ rules:
                 &mut |_| {},
                 workers,
             );
-            crate::output::to_json(&report, &rules, anchoring.anchor())
+            crate::output::to_json(&report, &rules, anchoring.anchor(), None)
         };
 
         // Cold cache first, so the warm run below reads what it wrote.
@@ -3231,11 +3778,15 @@ rules:
         // Fill the cache under config anchoring, then scan the same tree under
         // scan-root anchoring with a cache bound to that convention.
         let anchored = Anchoring::resolve(&root, Some(&config)).unwrap();
-        let warm = cache_anchored(&root, &rules, &anchored);
+        // One base for both caches. The point of this test is that the scope
+        // discriminator keeps the two conventions' entries apart inside a single
+        // cache directory; giving each its own directory would prove nothing.
+        let cache_home = cache_base();
+        let warm = cache_anchored(cache_home.path(), &root, &rules, &anchored);
         let filled = run(Some(&warm), &anchored);
         assert!(!filled.findings.is_empty());
 
-        let plain_cache = cache_for(&root, &rules);
+        let plain_cache = cache_for(cache_home.path(), &root, &rules);
         let plain = run(Some(&plain_cache), &Anchoring::default());
         let no_cache = run(None, &Anchoring::default());
 
@@ -3327,8 +3878,8 @@ rules:
             .expect("empty config");
 
         assert_eq!(
-            crate::output::to_json(&bare, &rules, anchor),
-            crate::output::to_json(&loaded, &rules, anchor),
+            crate::output::to_json(&bare, &rules, anchor, None),
+            crate::output::to_json(&loaded, &rules, anchor, None),
             "an empty config must change nothing at all"
         );
 
@@ -3676,7 +4227,7 @@ rules:
         assert_eq!(paths, ["src/api/a.js", "src/api/blob.bin", "src/api/z.js"]);
 
         let json = |workers| {
-            crate::output::to_json(&run(workers), &rules, crate::config::Anchor::ScanRoot)
+            crate::output::to_json(&run(workers), &rules, crate::config::Anchor::ScanRoot, None)
         };
         let single = json(1);
         assert_eq!(single, json(8));
@@ -3691,7 +4242,8 @@ rules:
         write(dir.path(), "src/a.rs", GATED_SOURCE.as_bytes());
 
         let rules = ast_ruleset();
-        let cache = cache_for(dir.path(), &rules);
+        let cache_home = cache_base();
+        let cache = cache_for(cache_home.path(), dir.path(), &rules);
         let json = |cap: u64, cache: Option<&crate::cache::Cache>| {
             let config = limits_config(cap);
             let options = ScanOptions {
@@ -3708,7 +4260,7 @@ rules:
                 &mut |_| {},
                 1,
             );
-            crate::output::to_json(&report, &rules, crate::config::Anchor::ScanRoot)
+            crate::output::to_json(&report, &rules, crate::config::Anchor::ScanRoot, None)
         };
 
         let size = GATED_SOURCE.len() as u64;
@@ -3832,5 +4384,209 @@ rules:
         .expect_err("the rule cannot compile");
 
         assert_eq!(one, many);
+    }
+
+    /// A link out of the scan root is the security-relevant case: its target is
+    /// a file the scan never opened, sitting somewhere the scan root does not
+    /// control. It has to appear in `skipped`, because that is the report saying
+    /// where it did not look, and the target must not be read.
+    #[cfg(unix)]
+    #[test]
+    fn a_link_out_of_the_scan_root_is_reported_and_its_target_is_not_read() {
+        let outside = tempdir();
+        write(outside.path(), "secret.rs", b"let needle = 1;\n");
+
+        let dir = tempdir();
+        write(dir.path(), "src/a.rs", b"let clean = 1;\n");
+        std::os::unix::fs::symlink(outside.path().join("secret.rs"), dir.path().join("link.rs"))
+            .unwrap();
+
+        let report = scan(dir.path(), &ruleset(), None);
+
+        // The target holds a match. Nothing may report it.
+        assert!(
+            report.findings.is_empty(),
+            "a file outside the scan root was read: {:?}",
+            identities(&report.findings)
+        );
+        let entry = report
+            .skipped
+            .iter()
+            .find(|skipped| skipped.path == "link.rs")
+            .expect("the link must be reported as a path nothing was read through");
+        assert_eq!(
+            entry.reason,
+            walk::SymlinkDisposition::OutsideRoot.reason(),
+            "the report has to say why, not just that"
+        );
+    }
+
+    /// The other half of the same rule, and the one that keeps the list worth
+    /// reading: a link whose target is inside the root costs no coverage,
+    /// because the target is walked on its own path. Listing it as skipped would
+    /// claim the scan missed a file it read, and would bury the links that do
+    /// cost coverage under ones that do not.
+    #[cfg(unix)]
+    #[test]
+    fn a_link_inside_the_scan_root_is_not_reported_as_skipped() {
+        let dir = tempdir();
+        write(dir.path(), "src/a.rs", b"let needle = 1;\n");
+        std::os::unix::fs::symlink(dir.path().join("src/a.rs"), dir.path().join("alias.rs"))
+            .unwrap();
+
+        let report = scan(dir.path(), &ruleset(), None);
+
+        assert!(
+            report.skipped.is_empty(),
+            "nothing was missed, so nothing may be listed as missed: {:?}",
+            report.skipped
+        );
+        // The target is still scanned, once, on its own path.
+        assert_eq!(
+            report
+                .findings
+                .iter()
+                .filter(|finding| finding.path == "src/a.rs")
+                .count(),
+            1
+        );
+    }
+
+    /// `follow_symlinks` reads an in-root target through the link as well as on
+    /// its own path, so the file is reported under both. That double report is
+    /// what following means, and it is why the flag is off by default.
+    #[cfg(unix)]
+    #[test]
+    fn following_links_reads_an_in_root_target_under_both_paths() {
+        let dir = tempdir();
+        write(dir.path(), "src/a.rs", b"let needle = 1;\n");
+        std::os::unix::fs::symlink(dir.path().join("src/a.rs"), dir.path().join("alias.rs"))
+            .unwrap();
+
+        let options = ScanOptions {
+            follow_symlinks: true,
+            ..ScanOptions::default()
+        };
+        let report = run_with_workers(
+            dir.path(),
+            &ruleset(),
+            &options,
+            None,
+            &Anchoring::default(),
+            &mut |_| {},
+            1,
+        );
+
+        let paths: Vec<&str> = report
+            .findings
+            .iter()
+            .map(|finding| finding.path.as_str())
+            .collect();
+        assert!(paths.contains(&"alias.rs"), "{paths:?}");
+        assert!(paths.contains(&"src/a.rs"), "{paths:?}");
+    }
+
+    /// Following links may not become a way out of the scan root. This is the
+    /// property the whole flag hangs on: a scan that reads files above its own
+    /// root stops being a statement about the tree under review.
+    #[cfg(unix)]
+    #[test]
+    fn following_links_still_refuses_a_target_outside_the_scan_root() {
+        let outside = tempdir();
+        write(outside.path(), "secret.rs", b"let needle = 1;\n");
+
+        let dir = tempdir();
+        write(dir.path(), "src/a.rs", b"let clean = 1;\n");
+        std::os::unix::fs::symlink(outside.path().join("secret.rs"), dir.path().join("link.rs"))
+            .unwrap();
+
+        let options = ScanOptions {
+            follow_symlinks: true,
+            ..ScanOptions::default()
+        };
+        let report = run_with_workers(
+            dir.path(),
+            &ruleset(),
+            &options,
+            None,
+            &Anchoring::default(),
+            &mut |_| {},
+            1,
+        );
+
+        assert!(
+            report.findings.is_empty(),
+            "--follow-symlinks must not reach outside the scan root: {:?}",
+            identities(&report.findings)
+        );
+        assert!(
+            report
+                .skipped
+                .iter()
+                .any(|skipped| skipped.path == "link.rs"),
+            "the refusal still has to be reported: {:?}",
+            report.skipped
+        );
+    }
+
+    /// A broken link names a path nothing was read from, whatever the reason, so
+    /// it is reported the same way a refused one is.
+    #[cfg(unix)]
+    #[test]
+    fn a_broken_link_is_reported_as_unread() {
+        let dir = tempdir();
+        write(dir.path(), "src/a.rs", b"let clean = 1;\n");
+        std::os::unix::fs::symlink(dir.path().join("gone.rs"), dir.path().join("dangling.rs"))
+            .unwrap();
+
+        let report = scan(dir.path(), &ruleset(), None);
+
+        let entry = report
+            .skipped
+            .iter()
+            .find(|skipped| skipped.path == "dangling.rs")
+            .expect("a broken link is a path nothing was read from");
+        assert_eq!(entry.reason, walk::SymlinkDisposition::Broken.reason());
+    }
+
+    /// The skipped list stays sorted and identical whatever the worker count,
+    /// with links merged into it. Determinism is the property every baseline
+    /// depends on, and links are the newest thing that could break it.
+    #[cfg(unix)]
+    #[test]
+    fn reported_links_are_identical_across_worker_counts() {
+        let outside = tempdir();
+        write(outside.path(), "secret.rs", b"let x = 1;\n");
+
+        let dir = tempdir();
+        for name in ["a", "b", "c", "d"] {
+            write(dir.path(), &format!("src/{name}.rs"), b"let clean = 1;\n");
+            std::os::unix::fs::symlink(
+                outside.path().join("secret.rs"),
+                dir.path().join(format!("link_{name}.rs")),
+            )
+            .unwrap();
+        }
+
+        let run = |workers| {
+            let report = run_with_workers(
+                dir.path(),
+                &ruleset(),
+                &ScanOptions::default(),
+                None,
+                &Anchoring::default(),
+                &mut |_| {},
+                workers,
+            );
+            serde_json::to_string(&report.skipped).unwrap()
+        };
+
+        let one = run(1);
+        assert_eq!(one, run(8));
+        assert_eq!(one, run(3));
+        // Non-vacuous: all four links are in there.
+        for name in ["a", "b", "c", "d"] {
+            assert!(one.contains(&format!("link_{name}.rs")), "{one}");
+        }
     }
 }
