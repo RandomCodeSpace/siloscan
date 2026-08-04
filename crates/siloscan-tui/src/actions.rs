@@ -14,7 +14,7 @@ use siloscan_core::findings::Finding;
 use siloscan_core::lang;
 use siloscan_core::serde_json;
 
-use crate::state::{AppState, Status};
+use crate::state::{AppState, READ_ONLY_BASELINE, READ_ONLY_SUPPRESS, Status};
 
 /// Baseline schema version this build writes. Matches `siloscan_core::baseline`.
 const BASELINE_VERSION: u32 = 1;
@@ -40,7 +40,13 @@ pub fn comment_prefix(language: &str) -> Option<&'static str> {
 /// the merged baseline file immediately. A write failure is reported in the
 /// status line and leaves the in-memory state accepted, so the next accept
 /// retries the whole queue.
+///
+/// A snapshot session has no repository behind it, so the verdict is refused
+/// with its reason and nothing - state or disk - is touched.
 pub fn accept_baseline(state: &mut AppState, row_idx: usize) {
+    if state.refuse_if_snapshot(READ_ONLY_BASELINE) {
+        return;
+    }
     let Some(row) = state.rows.get_mut(row_idx) else {
         return;
     };
@@ -106,7 +112,16 @@ fn entry(finding: &Finding) -> BaselineEntry {
 /// and mark the row suppressed in memory. The file is rewritten only when the
 /// line actually changes, and not at all when the language is unknown: writing
 /// a bare marker would corrupt the source.
+///
+/// A snapshot names paths that need not exist here, so the edit is refused with
+/// its reason rather than attempted against whatever happens to be on disk.
 pub fn insert_suppression(state: &mut AppState, row_idx: usize) -> io::Result<()> {
+    if state.is_snapshot() {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            READ_ONLY_SUPPRESS,
+        ));
+    }
     let Some(row) = state.rows.get(row_idx) else {
         return Err(io::Error::new(
             io::ErrorKind::NotFound,
@@ -445,6 +460,31 @@ mod tests {
         assert!(insert_suppression(&mut state, 9).is_err());
         assert!(insert_suppression(&mut state, 0).is_err());
         assert_eq!(state.rows[0].status, Status::New);
+    }
+
+    #[test]
+    fn a_snapshot_refuses_both_writes_and_changes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("src")).unwrap();
+        let file = dir.path().join("src/a.rs");
+        fs::write(&file, "let needle = 2;\n").unwrap();
+
+        let mut state = state(
+            dir.path(),
+            vec![row(finding("a.one", "src/a.rs", 1, "aa"), Status::New)],
+        );
+        state.snapshot = Some("report.json".to_string());
+
+        accept_baseline(&mut state, 0);
+        assert_eq!(state.status, READ_ONLY_BASELINE);
+        assert_eq!(state.rows[0].status, Status::New);
+        assert!(state.dirty_baseline.is_empty());
+        assert!(baseline::load(dir.path()).unwrap().is_none());
+
+        let err = insert_suppression(&mut state, 0).unwrap_err();
+        assert!(err.to_string().contains(READ_ONLY_SUPPRESS), "{err}");
+        assert_eq!(state.rows[0].status, Status::New);
+        assert_eq!(fs::read_to_string(&file).unwrap(), "let needle = 2;\n");
     }
 
     #[test]

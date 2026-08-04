@@ -14,29 +14,43 @@ output, byte for byte.
 
 ## Features
 
-- **Four rule domains**: `regex:` and `secret:` rules work on any text file in
-  any language; `ast:` (tree-sitter structural queries) and `boundary:`
-  (architecture rules) cover ten tier-1 languages: Rust, Python, JavaScript,
-  TypeScript, Go, Java, C, C++, C#, Ruby. `coverage:` rules gate on parsed
-  test-coverage reports (lcov / cobertura).
+- **Six rule domains**: `regex:`, `secret:` and `duplication:` (code duplication
+  gates) rules work on any text file in any language; `ast:` (tree-sitter
+  structural queries) and `boundary:` (architecture rules) cover ten tier-1
+  languages: Rust, Python, JavaScript, TypeScript, Go, Java, C, C++, C#, Ruby.
+  `coverage:` rules gate on parsed test-coverage reports (lcov / cobertura).
 - **Batteries included**: a default secrets ruleset (derived from the MIT
   gitleaks rules, see NOTICE) is embedded in the binary; `--no-default-rules`
   opts out.
 - **Brownfield-ready**: `siloscan baseline` records existing findings as
   accepted debt; from then on only new findings fail the build. Inline
-  `siloscan-ignore` comments handle per-site exceptions.
+  `siloscan-ignore` comments handle per-site exceptions. Baseline fingerprints
+  are stable across module and repository scans via the `anchor` config.
+- **Size and duplication metrics**: per-file line counts, code-line counts
+  (tier-1 languages only), and duplicated-line counts; scan-wide totals.
+  Deterministic metrics embedded in JSON reports.
+- **Duplication detection**: language-agnostic normalized-line rolling-window
+  matching; configurable minimum block size; reported as duplicate-block
+  findings with 12-hex SHA-256 block identity. Block findings respect baselines
+  and suppression like any finding.
 - **Architecture boundaries**: declare named silos in `siloscan.toml`; boundary
   rules flag direct cross-silo imports, resolved against the scanned tree.
-- **Interactive TUI**: `siloscan-tui` - dashboard charts, filterable triage
-  board with code context, a ratchet console for per-finding debt decisions,
-  and a silo dependency matrix. Mouse and keyboard.
+- **Multi-module support**: root config can include module-level configs; each
+  module's silos, source roots and rules are merged and rebased to the root's
+  convention. Enables per-module configuration without duplicate roots.
+- **Interactive TUI**: `siloscan-tui` - dashboard with KPI cards and silo
+  severity matrix, filterable triage board with code context, ratchet console
+  for per-finding debt decisions, and silo dependency matrix. Snapshot mode
+  loads JSON reports read-only. Mouse and keyboard.
 - **Deterministic**: canonical finding order (path, line, column, rule id);
-  warm and cold cache runs produce byte-identical output.
+  warm and cold cache runs produce byte-identical output. Metrics and duplication
+  blocks sort consistently.
 - **Offline**: static binaries. Nothing is fetched, ever.
 - **Ignore-aware**: respects `.gitignore` and `.ignore`, skips binaries and
   non-UTF-8 files.
 - **Stable finding identity**: SHA-256 fingerprints survive unrelated line
-  drift and feed baselines and SARIF `partialFingerprints`.
+  drift and feed baselines and SARIF `partialFingerprints`. Duplication block
+  identity is the normalized-line hash.
 
 ## Install
 
@@ -62,6 +76,7 @@ siloscan baseline .                 # accept current findings as debt
 siloscan test ./rules/fixtures      # verify rules against annotated fixtures
 siloscan . --coverage-report cov.lcov
 siloscan-tui .                      # interactive triage
+siloscan-tui --report report.json   # load snapshot (read-only)
 ```
 
 Exit codes: `0` clean, `1` new findings at or above the `--fail-on` threshold
@@ -111,6 +126,13 @@ rules:
     message: "coverage below threshold"
     coverage:
       min: 80
+
+  - id: quality.too-much-duplication
+    severity: warning
+    message: "duplication density exceeds threshold"
+    duplication:
+      max_percent: 20           # 0 < max_percent <= 100
+      scope: scan               # scan | file | silo
 ```
 
 ```toml
@@ -118,6 +140,16 @@ rules:
 [silos]
 core = ["crates/core/**"]
 web  = ["crates/web/**"]
+
+# Optional: metrics configuration
+[duplication]
+min_lines = 10                # min_lines >= 2 (default 10)
+
+# Optional: path anchoring
+anchor = "config"             # "scan-root" (default) or "config"
+
+# Optional: multi-module config (root-only)
+include = ["modules/api/siloscan.toml"]
 ```
 
 Unknown keys, duplicate ids, invalid patterns, and unknown silo names are load
@@ -133,14 +165,80 @@ print(diagnostics)
 
 `siloscan baseline .` writes `.siloscan/baseline.json` (check it in). Only an
 explicit re-baseline updates it; the ratchet only tightens. The TUI's ratchet
-console makes these decisions per finding.
+console makes these decisions per finding. Fingerprints remain stable across
+module and repository scans when `anchor = "config"` is set.
+
+## JSON report format
+
+The `--format json` output includes a machine-readable findings array and
+schema metadata:
+
+```json
+{
+  "version": "1.1.0",
+  "schema_version": "1.1",
+  "anchor": "scan-root",
+  "findings": [
+    {
+      "rule_id": "metrics.duplicate-block",
+      "severity": "info",
+      "message": "10 duplicated lines (block abc123456789)",
+      "path": "src/main.rs",
+      "line": 42,
+      "column": 1,
+      "matched": "10 duplicated lines (block abc123456789)",
+      "fingerprint": "sha256-abc..."
+    }
+  ],
+  "baselined": [],
+  "suppressed": [],
+  "skipped": [],
+  "metrics": {
+    "files": {
+      "src/main.rs": {
+        "lines": 150,
+        "code_lines": 120,
+        "duplicated_lines": 10
+      }
+    },
+    "totals": {
+      "lines": 500,
+      "code_lines": 400,
+      "duplicated_lines": 30,
+      "duplication_density": 6.0
+    }
+  }
+}
+```
+
+The `schema_version` field declares the report contract version. It is
+additive-only: a consumer unknown to version X but supporting version Y >= X
+can read the report. Absent `code_lines` indicates a non-tier-1 language.
+Duplicate-block findings carry the 12-hex normalized-block hash in the matched
+text. The `anchor` key names the path convention all findings, skipped files,
+and metrics keys use.
+
+## Known trade-offs
+
+- **Memory cost of duplication detection**: file contents are held in memory
+  during the cross-file normalized-line pass. Very large trees may require
+  proportional memory.
+- **Duplication block filtering**: findings respect ignore files (`gitignore`,
+  `.ignore`) and inline suppression like any rule, but have no dedicated
+  path-filter configuration separate from rule paths. A duplication rule with
+  `paths.exclude` filters its blocks before they are reported, not per-block
+  location.
+- **Duplication scope and silos**: `scope: silo` requires silos to be declared
+  in the config. Without a config, or with a config defining no silos, the scan
+  refuses to run with an error naming the rule rather than reporting a passing
+  gate.
 
 ## Architecture
 
-Cargo workspace: `siloscan-core` (library: walker, loader, four engines,
-semantic graph, cache, baseline, outputs), `siloscan` (CLI, also built as
-`ss`), `siloscan-tui` (ratatui interface). Grammars sit behind per-language
-cargo features (`lang-all` by default). The incremental cache
+Cargo workspace: `siloscan-core` (library: walker, loader, six engines,
+semantic graph, cache, baseline, metrics, outputs), `siloscan` (CLI, also
+built as `ss`), `siloscan-tui` (ratatui interface). Grammars sit behind
+per-language cargo features (`lang-all` by default). The incremental cache
 (`.siloscan/cache/`, content-hash keyed) keeps rescans fast; `--no-cache`
 bypasses it.
 

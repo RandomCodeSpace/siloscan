@@ -1,5 +1,7 @@
 //! Terminal-free application state. Everything here is plain data plus pure
-//! queries, so it can be unit-tested without a backend.
+//! queries, so it can be unit-tested without a backend. The module card types
+//! come from `ui::dashboard`, which derives them; they are plain data too, and
+//! nothing here renders.
 
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet};
@@ -7,9 +9,21 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use siloscan_core::baseline::Baseline;
+use siloscan_core::config::Anchor;
 use siloscan_core::findings::Finding;
+use siloscan_core::metrics::Metrics;
 use siloscan_core::rules::{RuleSet, Severity};
 use siloscan_core::scan::Progress;
+
+use crate::ui::dashboard::{SiloCard, SiloGroup};
+
+/// Why a rescan is refused against a loaded report.
+pub const READ_ONLY_RESCAN: &str = "snapshot is read-only: rescan needs a live scan";
+/// Why the ratchet cannot accept a finding into the baseline from a snapshot.
+pub const READ_ONLY_BASELINE: &str = "snapshot is read-only: the baseline needs a live scan";
+/// Why an inline suppression cannot be written from a snapshot.
+pub const READ_ONLY_SUPPRESS: &str =
+    "snapshot is read-only: inline suppression needs the scanned files";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum Screen {
@@ -94,6 +108,8 @@ pub struct Filters {
     pub rules: BTreeSet<String>,
     pub severities: BTreeSet<Severity>,
     pub statuses: BTreeSet<Status>,
+    /// Report-relative paths a module card handed over. Empty means every path.
+    pub paths: BTreeSet<String>,
     pub text: String,
 }
 
@@ -102,6 +118,7 @@ impl Filters {
         self.rules.is_empty()
             && self.severities.is_empty()
             && self.statuses.is_empty()
+            && self.paths.is_empty()
             && self.text.is_empty()
     }
 
@@ -117,6 +134,9 @@ impl Filters {
             return false;
         }
         if !self.statuses.is_empty() && !self.statuses.contains(&status) {
+            return false;
+        }
+        if !self.paths.is_empty() && !self.paths.contains(&finding.path) {
             return false;
         }
         if self.text.is_empty() {
@@ -209,6 +229,24 @@ pub struct AppState {
     pub dirty_baseline: Vec<Finding>,
     /// Boundary violations as (from silo, to silo, index into `rows`).
     pub boundary_edges: Vec<(String, String, usize)>,
+    /// Size and duplication of the last report, live or loaded.
+    pub metrics: Metrics,
+    /// Silo membership behind the module cards. Same order and length as
+    /// `silo_cards`: index `i` of one describes index `i` of the other.
+    pub silo_groups: Vec<SiloGroup>,
+    /// Module cards, derived from `metrics` and `rows`.
+    pub silo_cards: Vec<SiloCard>,
+    /// First module card shown; the row scrolls rather than shrinking cards.
+    pub silo_offset: usize,
+    /// Keyboard selection in the module card row, indexing `silo_cards`.
+    pub selected_silo: Option<usize>,
+    /// File name of the report this session was opened from. `None` in live
+    /// mode, and the flag every live-only action is gated on.
+    pub snapshot: Option<String>,
+    /// Path convention the loaded report used. Config-anchored paths do not
+    /// resolve against the working directory, so the banner says so; nothing
+    /// else reads it. Meaningless while `snapshot` is `None`.
+    pub snapshot_anchor: Anchor,
     /// True while the filter text box owns the keyboard.
     pub input_mode: bool,
     /// Status bar message.
@@ -232,6 +270,13 @@ impl AppState {
             baseline,
             dirty_baseline: Vec::new(),
             boundary_edges: Vec::new(),
+            metrics: Metrics::default(),
+            silo_groups: Vec::new(),
+            silo_cards: Vec::new(),
+            silo_offset: 0,
+            selected_silo: None,
+            snapshot: None,
+            snapshot_anchor: Anchor::default(),
             input_mode: false,
             status: String::new(),
             should_quit: false,
@@ -241,6 +286,40 @@ impl AppState {
     /// Every key goes to the filter text box while this holds.
     pub fn captures_input(&self) -> bool {
         self.input_mode
+    }
+
+    /// True when the findings came from a report file rather than a scan. Every
+    /// write the TUI can perform is refused in that mode.
+    pub fn is_snapshot(&self) -> bool {
+        self.snapshot.is_some()
+    }
+
+    /// Gate for a live-only action: reports `reason` in the status line and
+    /// returns true when the action must not run. Live sessions are untouched.
+    pub fn refuse_if_snapshot(&mut self, reason: &str) -> bool {
+        if self.is_snapshot() {
+            self.status = reason.to_string();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Move the module card selection. The first move from nothing selects the
+    /// first card; the selection is clamped to the cards that exist.
+    pub fn select_silo(&mut self, delta: isize) {
+        if self.silo_cards.is_empty() {
+            self.selected_silo = None;
+            return;
+        }
+        let last = self.silo_cards.len() - 1;
+        let next = match self.selected_silo {
+            None if delta < 0 => last,
+            None => 0,
+            Some(current) if delta >= 0 => current.saturating_add(delta as usize).min(last),
+            Some(current) => current.saturating_sub(delta.unsigned_abs()),
+        };
+        self.selected_silo = Some(next);
     }
 
     /// Arm the state for a scan that is about to be spawned.
@@ -603,6 +682,70 @@ mod tests {
         assert!(!filters.matches(&miss, Status::New));
         // Right path and severity, wrong status.
         assert!(!filters.matches(&hit, Status::Baselined));
+    }
+
+    #[test]
+    fn path_axis_filters_alone() {
+        let filters = Filters {
+            paths: BTreeSet::from(["src/a.rs".to_string()]),
+            ..Filters::default()
+        };
+        assert!(!filters.is_empty());
+
+        let f = finding("r", Severity::Info, "src/a.rs", 1, "m");
+        assert!(filters.matches(&f, Status::New));
+        let other = finding("r", Severity::Info, "src/b.rs", 1, "m");
+        assert!(!filters.matches(&other, Status::New));
+
+        let mut cleared = filters;
+        cleared.clear();
+        assert!(cleared.paths.is_empty());
+        assert!(cleared.matches(&other, Status::New));
+    }
+
+    #[test]
+    fn a_snapshot_refuses_live_only_actions_with_a_reason() {
+        let mut state = sample();
+        assert!(!state.is_snapshot());
+        assert!(!state.refuse_if_snapshot(READ_ONLY_RESCAN));
+        assert!(state.status.is_empty());
+
+        state.snapshot = Some("report.json".to_string());
+        assert!(state.is_snapshot());
+        assert!(state.refuse_if_snapshot(READ_ONLY_BASELINE));
+        assert_eq!(state.status, READ_ONLY_BASELINE);
+    }
+
+    #[test]
+    fn silo_selection_clamps_to_the_cards_that_exist() {
+        let mut state = sample();
+        state.select_silo(1);
+        assert_eq!(state.selected_silo, None, "no cards, no selection");
+
+        state.silo_cards = ["api", "core"]
+            .into_iter()
+            .map(|name| SiloCard {
+                name: name.to_string(),
+                error_count: 0,
+                warning_count: 0,
+                info_count: 0,
+                loc: 0,
+                duplication_percent: 0.0,
+            })
+            .collect();
+
+        state.select_silo(1);
+        assert_eq!(
+            state.selected_silo,
+            Some(0),
+            "the first move lands on card 0"
+        );
+        state.select_silo(1);
+        state.select_silo(1);
+        assert_eq!(state.selected_silo, Some(1), "clamped to the last card");
+        state.select_silo(-1);
+        state.select_silo(-1);
+        assert_eq!(state.selected_silo, Some(0), "clamped to the first card");
     }
 
     #[test]
