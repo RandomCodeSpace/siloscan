@@ -32,7 +32,7 @@ pub fn scan_file(
 
             let matched = span.as_str();
             let occurrence = occurrences.next(rule.id.as_str(), matched);
-            let (line, column) = lines.position(span.start());
+            let at = lines.position(span.start());
 
             hits.push((
                 span.start(),
@@ -41,8 +41,9 @@ pub fn scan_file(
                     severity: rule.severity,
                     message: rule.message.clone(),
                     path: path_rel.to_string(),
-                    line,
-                    column,
+                    line: at.line,
+                    column: at.column,
+                    column_utf16: at.column_utf16,
                     matched: matched.to_string(),
                     fingerprint: fingerprint(&rule.id, path_rel, matched, occurrence),
                 },

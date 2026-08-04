@@ -574,6 +574,7 @@ mod tests {
             path: path.to_string(),
             line,
             column: 1,
+            column_utf16: 1,
             matched: "needle".to_string(),
             fingerprint: format!("{rule_id}:{path}:{line}"),
         }

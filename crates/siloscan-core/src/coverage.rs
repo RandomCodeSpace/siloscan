@@ -34,6 +34,20 @@ impl FileCoverage {
 pub struct CoverageReport {
     /// Path as written in the report, normalized to forward slashes.
     pub files: BTreeMap<String, FileCoverage>,
+    /// Where the report was read from, for errors that have to name it. Empty
+    /// for a report a caller built rather than parsed.
+    pub source: String,
+}
+
+impl CoverageReport {
+    /// How to refer to this report in a message.
+    fn describe(&self) -> &str {
+        if self.source.is_empty() {
+            "the supplied coverage report"
+        } else {
+            &self.source
+        }
+    }
 }
 
 /// Parse a coverage report, detecting its format from the content: lcov when an
@@ -41,15 +55,22 @@ pub struct CoverageReport {
 /// `<coverage>`.
 pub fn parse(path: &Path) -> Result<CoverageReport, String> {
     let src = fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let source = path.display().to_string();
 
     if src.lines().any(|line| line.trim_start().starts_with("SF:")) {
-        return Ok(parse_lcov(&src));
+        return Ok(CoverageReport {
+            source,
+            ..parse_lcov(&src)
+        });
     }
 
     if let Ok(doc) = roxmltree::Document::parse(&src)
         && doc.root_element().has_tag_name("coverage")
     {
-        return Ok(parse_cobertura(&doc));
+        return Ok(CoverageReport {
+            source,
+            ..parse_cobertura(&doc)
+        });
     }
 
     Err(format!(
@@ -91,6 +112,7 @@ fn finish(files: BTreeMap<String, Accumulator>) -> CoverageReport {
             .into_iter()
             .map(|(path, acc)| (path, acc.finish()))
             .collect(),
+        source: String::new(),
     }
 }
 
@@ -256,6 +278,72 @@ pub fn resolve(report: &CoverageReport, scan_paths: &[String]) -> BTreeMap<Strin
     resolved
 }
 
+/// Refuse a run that loaded a coverage rule with no coverage report to
+/// evaluate it against, naming the rule.
+///
+/// Without a report a coverage rule cannot measure anything, so it reports
+/// nothing and the run exits clean - a gate that never fails is
+/// indistinguishable from a gate that passes. A rule that cannot be evaluated
+/// is a setup error, the same way a boundary rule loaded without configured
+/// silos is, and it is refused on the same exit-2 path rather than counted as a
+/// pass.
+pub fn require_report(
+    rules: &[CompiledRule],
+    report: Option<&CoverageReport>,
+) -> Result<(), String> {
+    if report.is_some() {
+        return Ok(());
+    }
+    let Some(rule) = first_coverage_rule(rules) else {
+        return Ok(());
+    };
+    Err(format!(
+        "rule {}: coverage rules need a coverage report (--coverage-report)",
+        rule.id
+    ))
+}
+
+/// Refuse a run whose coverage report resolves onto none of the scanned files,
+/// naming the rule and the report.
+///
+/// [`require_report`] establishes that a report was passed; this establishes
+/// that it is a report of *this* tree. One written from another checkout, with
+/// a path prefix [`resolve`] cannot reconcile, or simply stale, produces an
+/// empty mapping - and an empty mapping is a coverage rule that measures
+/// nothing, reports nothing, and exits clean. That is the missing-report hole
+/// with a file in the way of seeing it, so it is refused on the same exit-2
+/// path.
+///
+/// Only a mapping that is empty *entirely* is refused. A report that covers
+/// some scanned files and not others is the normal case - files with no
+/// coverage data are not violations, by design - and nothing here interferes
+/// with it.
+pub fn require_resolved(
+    rules: &[CompiledRule],
+    report: &CoverageReport,
+    resolved: &BTreeMap<String, FileCoverage>,
+) -> Result<(), String> {
+    if !resolved.is_empty() {
+        return Ok(());
+    }
+    let Some(rule) = first_coverage_rule(rules) else {
+        return Ok(());
+    };
+    Err(format!(
+        "rule {}: coverage report {} matches none of the scanned files (wrong path prefix, or a \
+         report of another tree)",
+        rule.id,
+        report.describe()
+    ))
+}
+
+/// The first coverage rule in the set, which is the one an error names.
+fn first_coverage_rule(rules: &[CompiledRule]) -> Option<&CompiledRule> {
+    rules
+        .iter()
+        .find(|rule| matches!(rule.payload, CompiledPayload::Coverage { .. }))
+}
+
 /// Run every coverage rule over the scanned tree. Findings are returned in
 /// canonical order: path, then rule id. A finding's fingerprint is derived from
 /// the rule and the path alone, so it is stable while coverage moves and the
@@ -294,7 +382,9 @@ pub fn scan_coverage(
                 message: rule.message.clone(),
                 path: path.clone(),
                 line: 1,
+                // A coverage finding is about a whole file, not a span in it.
                 column: 1,
+                column_utf16: 1,
                 matched,
                 // The measured value is deliberately out of the fingerprint:
                 // it moves on every test run, and a fingerprint that moves
@@ -473,6 +563,7 @@ rules:
                 ("src/exact.rs".to_string(), cov(1, 2)),
                 ("/home/u/repo/src/abs.rs".to_string(), cov(3, 4)),
             ]),
+            source: String::new(),
         };
         let scanned = vec!["src/exact.rs".to_string(), "src/abs.rs".to_string()];
 
@@ -486,6 +577,7 @@ rules:
     fn resolve_matches_reports_relative_to_a_source_root() {
         let report = CoverageReport {
             files: BTreeMap::from([("app/main.py".to_string(), cov(1, 2))]),
+            source: String::new(),
         };
         let scanned = vec!["backend/app/main.py".to_string()];
 
@@ -496,6 +588,7 @@ rules:
     fn resolve_drops_report_entries_matching_several_scanned_paths() {
         let report = CoverageReport {
             files: BTreeMap::from([("/build/lib/util.rs".to_string(), cov(1, 2))]),
+            source: String::new(),
         };
         let scanned = vec!["a/lib/util.rs".to_string(), "b/lib/util.rs".to_string()];
 
@@ -509,6 +602,7 @@ rules:
                 ("/build/one/src/a.rs".to_string(), cov(1, 2)),
                 ("/build/two/src/a.rs".to_string(), cov(2, 2)),
             ]),
+            source: String::new(),
         };
         let scanned = vec!["src/a.rs".to_string()];
 
@@ -519,6 +613,7 @@ rules:
     fn resolve_drops_unmatched_report_entries() {
         let report = CoverageReport {
             files: BTreeMap::from([("/build/src/gone.rs".to_string(), cov(1, 2))]),
+            source: String::new(),
         };
         assert!(resolve(&report, &["src/kept.rs".to_string()]).is_empty());
     }
@@ -527,6 +622,7 @@ rules:
     fn resolve_does_not_suffix_match_partial_segments() {
         let report = CoverageReport {
             files: BTreeMap::from([("/build/src/main.rs".to_string(), cov(1, 2))]),
+            source: String::new(),
         };
         assert!(resolve(&report, &["ain.rs".to_string()]).is_empty());
     }
@@ -685,6 +781,95 @@ rules:
                 ("src/b.rs", "cov.strict"),
             ]
         );
+    }
+
+    #[test]
+    fn a_coverage_rule_without_a_report_is_refused_by_name() {
+        let compiled = rules(COVERAGE_RULE);
+        let err = require_report(&compiled, None).unwrap_err();
+
+        assert!(err.contains("cov.min"), "{err}");
+        assert!(err.contains("coverage report"), "{err}");
+    }
+
+    #[test]
+    fn a_coverage_rule_with_a_report_is_accepted() {
+        let compiled = rules(COVERAGE_RULE);
+        let report = CoverageReport::default();
+
+        assert_eq!(require_report(&compiled, Some(&report)), Ok(()));
+    }
+
+    /// A report is not evidence on its own: one that resolves onto nothing
+    /// leaves the gate measuring nothing, which is the case `require_report`
+    /// exists to refuse with a file in the way of seeing it.
+    #[test]
+    fn a_coverage_report_matching_no_scanned_file_is_refused_by_name() {
+        let compiled = rules(COVERAGE_RULE);
+        let report = CoverageReport {
+            files: BTreeMap::from([("other/tree/src/gone.rs".to_string(), cov(0, 4))]),
+            source: "/tmp/lcov.info".to_string(),
+        };
+        let resolved = resolve(&report, &["src/a.rs".to_string()]);
+
+        let err = require_resolved(&compiled, &report, &resolved).unwrap_err();
+        assert!(err.contains("cov.min"), "{err}");
+        assert!(err.contains("/tmp/lcov.info"), "{err}");
+        assert!(err.contains("none of the scanned files"), "{err}");
+    }
+
+    /// The report a caller built rather than parsed has no path to name, and
+    /// still gets refused rather than waved through on a missing string.
+    #[test]
+    fn a_report_with_no_source_is_still_refused_by_name() {
+        let compiled = rules(COVERAGE_RULE);
+        let report = CoverageReport::default();
+
+        let err = require_resolved(&compiled, &report, &BTreeMap::new()).unwrap_err();
+        assert!(err.contains("cov.min"), "{err}");
+        assert!(err.contains("supplied coverage report"), "{err}");
+    }
+
+    /// The legitimate case, which this must not break: a report that covers
+    /// some scanned files and not others. Files with no coverage data are not
+    /// violations by design, and a partial report is the normal shape of one.
+    #[test]
+    fn a_report_covering_only_some_scanned_files_is_accepted() {
+        let compiled = rules(COVERAGE_RULE);
+        let report = CoverageReport {
+            files: BTreeMap::from([("src/a.rs".to_string(), cov(1, 4))]),
+            source: "lcov.info".to_string(),
+        };
+        let scanned = vec!["src/a.rs".to_string(), "src/b.rs".to_string()];
+        let resolved = resolve(&report, &scanned);
+
+        assert_eq!(require_resolved(&compiled, &report, &resolved), Ok(()));
+    }
+
+    /// And with no coverage rule loaded there is no gate to be silent, so an
+    /// unrelated report that matches nothing is not an error.
+    #[test]
+    fn an_unmatched_report_without_a_coverage_rule_is_not_an_error() {
+        let report = CoverageReport::default();
+        assert_eq!(require_resolved(&[], &report, &BTreeMap::new()), Ok(()));
+    }
+
+    #[test]
+    fn rules_without_a_coverage_payload_need_no_report() {
+        let compiled = rules(
+            r#"
+version: 1
+rules:
+  - id: other.regex
+    severity: info
+    message: m
+    regex:
+      pattern: 'needle'
+"#,
+        );
+
+        assert_eq!(require_report(&compiled, None), Ok(()));
+        assert_eq!(require_report(&[], None), Ok(()));
     }
 
     #[test]

@@ -97,6 +97,7 @@ mod tests {
             path: "src/a.rs".to_string(),
             line,
             column: 1,
+            column_utf16: 1,
             matched: "needle".to_string(),
             fingerprint: fingerprint(rule_id, "src/a.rs", "needle", 0),
         }

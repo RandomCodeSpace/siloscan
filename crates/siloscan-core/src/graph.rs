@@ -20,6 +20,11 @@ pub struct Import {
     pub line: u64,
     /// 1-based byte offset within the line.
     pub column: u64,
+    /// 1-based UTF-16 code unit offset within the line. Carried alongside the
+    /// byte column because a boundary violation is reported at its import, and
+    /// SARIF measures that column in UTF-16 units; the importing file's bytes
+    /// are in hand here and nowhere downstream.
+    pub column_utf16: u64,
 }
 
 /// A named declaration.
@@ -68,6 +73,7 @@ pub fn extract(lang: &str, content: &str, tree: &Tree) -> FileFacts {
             raw,
             line: capture.line,
             column: capture.column,
+            column_utf16: capture.column_utf16,
         });
     }
 
@@ -88,6 +94,7 @@ struct Capture {
     start: usize,
     line: u64,
     column: u64,
+    column_utf16: u64,
 }
 
 /// Run `query` over `tree`, returning captures in source order. Captures whose
@@ -99,6 +106,11 @@ fn captures(source: &str, tree: &Tree, query: &Query) -> Vec<Capture> {
 
     let mut out: Vec<Capture> = Vec::new();
     let mut cursor = QueryCursor::new();
+    // Both columns are measured from the capture's byte offset against the
+    // line it falls on, rather than read off the node's `start_position`, whose
+    // column is bytes only. One source for line and both columns is what stops
+    // them from disagreeing.
+    let mut lines = crate::engines::LineIndex::new(source);
     let mut matches = cursor.matches(query, tree.root_node(), bytes);
     while let Some(matched) = matches.next() {
         for capture in matched.captures {
@@ -109,13 +121,15 @@ fn captures(source: &str, tree: &Tree, query: &Query) -> Vec<Capture> {
             let Ok(text) = capture.node.utf8_text(bytes) else {
                 continue;
             };
-            let point = capture.node.start_position();
+            let start = capture.node.start_byte();
+            let at = lines.position(start);
             out.push(Capture {
                 name: name.to_string(),
                 text: text.to_string(),
-                start: capture.node.start_byte(),
-                line: point.row as u64 + 1,
-                column: point.column as u64 + 1,
+                start,
+                line: at.line,
+                column: at.column,
+                column_utf16: at.column_utf16,
             });
         }
     }

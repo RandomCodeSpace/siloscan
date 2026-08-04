@@ -6,8 +6,6 @@ use sha2::{Digest, Sha256};
 
 use crate::rules::Severity;
 
-/// `Deserialize` is required by the incremental cache, which stores findings
-/// verbatim and reads them back.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Finding {
     pub rule_id: String,
@@ -17,8 +15,40 @@ pub struct Finding {
     pub path: String,
     /// 1-based line number.
     pub line: u64,
-    /// 1-based byte offset within the line.
+    /// 1-based byte offset within the line. This is what the JSON report
+    /// publishes, and what it has always published.
     pub column: u64,
+    /// 1-based offset within the line counted in UTF-16 code units, which is
+    /// how SARIF measures a column.
+    ///
+    /// The two agree exactly when everything before the match on that line is
+    /// ASCII, and diverge otherwise: a `\u{4e2d}` costs three bytes and one
+    /// UTF-16 unit, an emoji four bytes and two. Publishing the byte column as
+    /// a SARIF `startColumn` therefore points a consumer past the match, or
+    /// past the end of the line, on any line with non-ASCII text before it.
+    ///
+    /// Measured by whatever produces the finding, because that is the only
+    /// place the line's bytes are certainly in hand; see
+    /// [`crate::engines::LineIndex::position`]. It is deliberately absent from
+    /// [`fingerprint`], which must not move when a report gains a second way to
+    /// spell a column, and absent from the JSON report, whose schema is
+    /// unchanged.
+    ///
+    /// Zero means "the source this finding was reconstructed from does not
+    /// carry a UTF-16 column", and it arises in exactly one place: the TUI
+    /// loading a finished JSON report, which by design publishes only the byte
+    /// column. That path renders findings and emits no SARIF, so a zero never
+    /// reaches a `startColumn`; the one that would, `sarif_column`, clamps it
+    /// anyway rather than emit an illegal region.
+    ///
+    /// Every path that can reach SARIF measures it for real. The incremental
+    /// cache is the case that matters, and it does not store this field: it
+    /// recomputes it from the file's own bytes on the way back, so a warm scan
+    /// and a cold scan of the same tree emit byte-identical SARIF. Defaulting
+    /// there instead of recomputing would make cache state visible in the
+    /// output, which is the one thing it must never be.
+    #[serde(default)]
+    pub column_utf16: u64,
     pub matched: String,
     pub fingerprint: String,
 }
@@ -64,6 +94,23 @@ pub fn fingerprint(rule_id: &str, path: &str, matched: &str, occurrence: u32) ->
 /// line's fields out of their columns and hide a path behind the message beside
 /// it; a scanned path or message has no legitimate reason to carry one.
 ///
+/// Escape sequences are not the only way to forge a line. The Unicode
+/// bidirectional formatting codes reorder the text around them without emitting
+/// anything themselves - the Trojan Source trick - so a file named
+/// `report\u{202e}sj.eruces` is displayed as `reportsecures.js` while the scan
+/// reads the name it really has, and an override left open in a rule message
+/// reverses the rest of the report line it sits on. The explicit formatting and
+/// override codes are therefore escaped too: U+061C, U+200E, U+200F,
+/// U+202A-U+202E and U+2066-U+2069.
+///
+/// Only those codes. Arabic and Hebrew letters carry their direction as a
+/// property of the script and are ordinary content: a path or a message written
+/// in either must render as itself, and escaping the letters would make the
+/// scanner unusable on a repository that is simply not written in English.
+/// A bidi code is written `\u{202e}` rather than `\xNN` because it does not fit
+/// in two hex digits, and `\x202e` could not be told apart from `\x20` followed
+/// by the text `2e`. Both forms are visible, neither is a control.
+///
 /// The result is a display form and not a reversible encoding: text that
 /// literally contains the four characters `\x1b` renders as itself. Nothing
 /// reads this back, and the property that has to hold is only that no control
@@ -79,7 +126,7 @@ pub fn fingerprint(rule_id: &str, path: &str, matched: &str, occurrence: u32) ->
 /// finding's column - must slice first and sanitize the pieces, since expanding
 /// a control byte to four characters moves every offset after it.
 pub fn sanitize_for_terminal(text: &str) -> Cow<'_, str> {
-    if !text.chars().any(is_display_control) {
+    if !text.chars().any(needs_escape) {
         return Cow::Borrowed(text);
     }
 
@@ -87,6 +134,8 @@ pub fn sanitize_for_terminal(text: &str) -> Cow<'_, str> {
     for ch in text.chars() {
         if is_display_control(ch) {
             let _ = write!(out, "\\x{:02x}", ch as u32);
+        } else if is_bidi_control(ch) {
+            let _ = write!(out, "\\u{{{:04x}}}", ch as u32);
         } else {
             out.push(ch);
         }
@@ -94,10 +143,31 @@ pub fn sanitize_for_terminal(text: &str) -> Cow<'_, str> {
     Cow::Owned(out)
 }
 
+/// Everything [`sanitize_for_terminal`] rewrites. Kept as one predicate so the
+/// borrowing fast path and the rewriting loop can never disagree about what
+/// counts as safe to print.
+fn needs_escape(ch: char) -> bool {
+    is_display_control(ch) || is_bidi_control(ch)
+}
+
 /// C0 including tab, DEL, and C1. Every one of them is at most two hex digits
 /// wide, which is what makes the `\xNN` rendering above unambiguous.
 fn is_display_control(ch: char) -> bool {
     matches!(ch, '\u{00}'..='\u{1f}' | '\u{7f}'..='\u{9f}')
+}
+
+/// The Unicode bidirectional formatting and override codes, and nothing else.
+///
+/// These are the codepoints whose entire effect is to reorder the characters
+/// around them: the marks (U+061C, U+200E, U+200F), the embeddings and
+/// overrides with their terminator (U+202A-U+202E) and the isolates with theirs
+/// (U+2066-U+2069). Letters of right-to-left scripts are deliberately absent -
+/// they are content, not instructions.
+fn is_bidi_control(ch: char) -> bool {
+    matches!(
+        ch,
+        '\u{061c}' | '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}'
+    )
 }
 
 #[cfg(test)]
@@ -130,6 +200,60 @@ mod tests {
         let hostile: String = (0u32..0x100).filter_map(char::from_u32).collect();
         let safe = sanitize_for_terminal(&hostile);
         assert!(!safe.chars().any(is_display_control), "{safe:?}");
+    }
+
+    /// The Trojan Source half of the forgery hole: a name that reads as one
+    /// thing and is another. The escaped form must show where the override was.
+    #[test]
+    fn sanitize_escapes_every_bidi_control() {
+        assert_eq!(
+            sanitize_for_terminal("report\u{202e}sj.eruces"),
+            "report\\u{202e}sj.eruces"
+        );
+        assert_eq!(
+            sanitize_for_terminal("\u{61c}\u{200e}\u{200f}"),
+            "\\u{061c}\\u{200e}\\u{200f}"
+        );
+        assert_eq!(
+            sanitize_for_terminal("\u{202a}\u{202b}\u{202c}\u{202d}\u{202e}"),
+            "\\u{202a}\\u{202b}\\u{202c}\\u{202d}\\u{202e}"
+        );
+        assert_eq!(
+            sanitize_for_terminal("\u{2066}\u{2067}\u{2068}\u{2069}"),
+            "\\u{2066}\\u{2067}\\u{2068}\\u{2069}"
+        );
+        // Mixed with an escape sequence: each class keeps its own rendering.
+        assert_eq!(
+            sanitize_for_terminal("a\u{1b}[2Kb\u{202e}c"),
+            "a\\x1b[2Kb\\u{202e}c"
+        );
+    }
+
+    /// Right-to-left scripts are text. A repository whose paths and messages are
+    /// written in Arabic or Hebrew has to stay readable, and none of these
+    /// characters reorders anything on its own.
+    #[test]
+    fn sanitize_leaves_ordinary_text_alone() {
+        for text in [
+            "src/\u{645}\u{644}\u{641}\u{627}\u{62a}/\u{62a}\u{62c}\u{631}\u{628}\u{629}.rs",
+            "\u{5e7}\u{5d5}\u{5d1}\u{5e5}/\u{5d1}\u{5d3}\u{5d9}\u{5e7}\u{5d4}.js",
+            "\u{4e2d}\u{6587}/\u{30c6}\u{30b9}\u{30c8}.py",
+            "e\u{301}te\u{301}/cafe\u{301}.rs",
+            "\u{1f600}\u{1f469}\u{200d}\u{1f4bb}/ok.rs",
+        ] {
+            assert!(
+                matches!(sanitize_for_terminal(text), Cow::Borrowed(_)),
+                "{text:?} was rewritten"
+            );
+            assert_eq!(sanitize_for_terminal(text), text);
+        }
+    }
+
+    #[test]
+    fn no_bidi_control_survives_sanitizing() {
+        let hostile: String = (0u32..0x2100).filter_map(char::from_u32).collect();
+        let safe = sanitize_for_terminal(&hostile);
+        assert!(!safe.chars().any(needs_escape), "{safe:?}");
     }
 
     #[test]

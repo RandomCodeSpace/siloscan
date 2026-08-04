@@ -524,6 +524,7 @@ mod tests {
             path: path.to_string(),
             line,
             column: 9,
+            column_utf16: 9,
             matched: "needle".to_string(),
             fingerprint: format!("{:0>64}", rule_id.len()),
         }

@@ -42,9 +42,14 @@ Arguments:
 Options:
       --rules DIR      Rule directory, repeatable
       --no-default-rules
-                       Do not load the built-in rule pack
-      --config FILE    Repository config (default: nearest siloscan.toml at or
-                       above PATH)
+                       Do not load the built-in rule pack. A run that ends up
+                       with no rules at all checks nothing and is refused with
+                       exit 2, since an empty dashboard would read as a clean
+                       tree
+      --config FILE    Repository config (default: nearest siloscan.toml at
+                       PATH, or above it only when a .git marker exists at or
+                       above PATH; pass this explicitly for an exported tree
+                       that has none)
       --report FILE    Open a JSON report as a read-only snapshot instead of
                        scanning; cannot be combined with PATH
       --no-ignore      Scan every file: ignore no .gitignore and no .ignore
@@ -418,7 +423,47 @@ fn load_rules(root: &Path, dirs: &[PathBuf], no_default_rules: bool) -> Result<R
         }
     }
 
+    // A scan with no rules checks nothing and reports nothing, which on screen
+    // is indistinguishable from a clean tree. The CLI refuses it; so does this,
+    // in the same words, because the two load rules the same way and a hole
+    // closed in one of them is not closed.
+    if rules.is_empty() {
+        return Err(no_rules_message(dirs, no_default_rules));
+    }
+
     Ok(RuleSet { rules, sources })
+}
+
+/// Why nothing loaded, naming the rule directories that were searched and
+/// whether the built-in pack was in play. Kept identical to the CLI's message:
+/// the two binaries answer the same question, and a user comparing them must
+/// not have to work out whether they mean the same thing.
+///
+/// The `error: ` prefix is *not* here, unlike the CLI's copy. Every failure in
+/// this binary is a `Result` the caller renders with that prefix, so carrying
+/// one here printed `error: error: no rules loaded`. The line that reaches the
+/// terminal is the one that has to match the CLI's, and it does.
+///
+/// Directory names come from the command line or from a config inside the
+/// scanned tree, so they are rendered through the terminal sanitizer wherever
+/// this is printed, like any other scanned text.
+fn no_rules_message(dirs: &[PathBuf], no_default_rules: bool) -> String {
+    let searched = if dirs.is_empty() {
+        "no rule directories were given".to_string()
+    } else {
+        let list = dirs
+            .iter()
+            .map(|dir| dir.display().to_string())
+            .collect::<Vec<String>>()
+            .join(", ");
+        format!("searched: {list}")
+    };
+    let pack = if no_default_rules {
+        "the built-in pack is disabled by --no-default-rules"
+    } else {
+        "the built-in pack loaded no rules"
+    };
+    format!("no rules loaded, so nothing would be checked: {pack}; {searched}")
 }
 
 /// The walker cannot tell "nothing to scan" from "root is missing", so the root
@@ -613,10 +658,32 @@ mod tests {
     }
 
     #[test]
-    fn default_pack_can_be_skipped() {
+    fn the_default_pack_loads_rules() {
         let with = load_rules(Path::new("."), &[], false).unwrap();
-        let without = load_rules(Path::new("."), &[], true).unwrap();
         assert!(!with.rules.is_empty());
-        assert!(without.rules.is_empty());
+    }
+
+    /// Skipping the pack with nothing to replace it leaves zero rules, and a
+    /// zero-rule scan paints an empty dashboard that reads as a clean tree.
+    /// Refused here exactly as the CLI refuses it, and in the same words - one
+    /// `error: ` prefix, added by whoever prints the failure.
+    #[test]
+    fn skipping_the_default_pack_with_no_rule_dirs_is_refused() {
+        let err = load_rules(Path::new("."), &[], true).unwrap_err();
+        assert!(
+            err.starts_with("no rules loaded, so nothing would be checked"),
+            "{err}"
+        );
+        assert!(
+            err.contains("the built-in pack is disabled by --no-default-rules"),
+            "{err}"
+        );
+        assert_eq!(err, super::no_rules_message(&[], true));
+        assert_eq!(
+            format!("error: {err}"),
+            "error: no rules loaded, so nothing would be checked: the built-in pack is disabled \
+             by --no-default-rules; no rule directories were given",
+            "the printed line must carry exactly one prefix"
+        );
     }
 }

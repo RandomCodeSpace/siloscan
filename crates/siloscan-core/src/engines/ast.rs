@@ -2,7 +2,7 @@ use std::collections::HashSet;
 
 use tree_sitter::{Node, QueryCursor, QueryMatch, StreamingIterator, Tree};
 
-use super::{Occurrences, applies};
+use super::{LineIndex, Occurrences, applies};
 use crate::findings::{Finding, fingerprint};
 use crate::rules::{CompiledPayload, CompiledRule};
 
@@ -28,6 +28,12 @@ pub fn scan_file(
     let mut seen: HashSet<(&str, usize, usize)> = HashSet::new();
     let mut hits: Vec<(usize, Finding)> = Vec::new();
     let mut cursor = QueryCursor::new();
+    // Positions come from the byte offset rather than from the node's own
+    // `start_position`. Tree-sitter reports a column in bytes, which is the
+    // right answer for one of the two columns a finding carries and silently
+    // the wrong one for the other; measuring both from the same offset against
+    // the same line is what keeps them consistent.
+    let mut lines = LineIndex::new(content);
 
     for rule in rules {
         if !applies(rule, path_rel, Some(language)) {
@@ -62,7 +68,7 @@ pub fn scan_file(
             };
 
             let occurrence = occurrences.next(rule.id.as_str(), matched);
-            let start = node.start_position();
+            let at = lines.position(range.start);
 
             hits.push((
                 range.start,
@@ -71,8 +77,9 @@ pub fn scan_file(
                     severity: rule.severity,
                     message: rule.message.clone(),
                     path: path_rel.to_string(),
-                    line: start.row as u64 + 1,
-                    column: start.column as u64 + 1,
+                    line: at.line,
+                    column: at.column,
+                    column_utf16: at.column_utf16,
                     matched: matched.to_string(),
                     fingerprint: fingerprint(&rule.id, path_rel, matched, occurrence),
                 },

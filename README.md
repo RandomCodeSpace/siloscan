@@ -121,6 +121,19 @@ Exit codes: `0` clean, `1` new findings at or above the `--fail-on` threshold
 (default `error`), `2` usage, config, or rule-load error. Baselined and
 suppressed findings are reported but never fail the build.
 
+A scan that *cannot be evaluated* exits `2` rather than `0`. An empty report is
+indistinguishable from a clean tree, so siloscan refuses the cases where it
+would be producing one for the wrong reason:
+
+- **No rules loaded.** `--no-default-rules` with no `--rules` directory, or
+  `--rules` pointing at a directory holding no rule files, checks nothing.
+  The message names the rule directories searched and whether the built-in
+  pack was in play. This applies to `siloscan-tui` identically.
+- **A gate with no input.** A `coverage` rule with no `--coverage-report` to
+  read reports nothing regardless of the real coverage, so the rule is named
+  and the scan is refused. Boundary and silo-scoped duplication rules are
+  refused the same way when no `siloscan.toml` defines `[silos]`.
+
 ## Rule schema
 
 Every rule shares one envelope and carries exactly one payload:
@@ -174,7 +187,8 @@ rules:
 ```
 
 ```toml
-# siloscan.toml - discovered walking up from the scan root
+# siloscan.toml - discovered at the scan root or walking up to the nearest
+# repository root (.git), from there up to the filesystem root, then stopping
 [silos]
 core = ["crates/core/**"]
 web  = ["crates/web/**"]
@@ -201,12 +215,11 @@ it contributes no ast findings. Every such file is recorded in the report's
 `skipped` array with a reason naming the limit, so the findings it could not
 produce are never read as a clean file. The default is 2 MiB (2097152 bytes).
 
-The cap has one exception: when a boundary rule is loaded, every file is parsed
-regardless of size. The boundary engine resolves imports against the whole
-graph, so a gated file is not a hole in its own results alone - an import
-pointing at it stops resolving, and the violation the importing file really
-commits goes unreported. A partial graph changes results for files nowhere near
-the cap, so the graph is built whole and boundary scans do not honour the limit.
+When a boundary rule is loaded, a file larger than the cap is not parsed but is
+entered in the import graph as a node with no outbound imports: imports *of* it
+still resolve, so other files' violations are still reported, while the imports
+it makes are not analysed. The skip is recorded in the report's `skipped` array
+with a reason naming the file's size and the cap.
 
 Unknown keys, duplicate ids, invalid patterns, and unknown silo names are load
 errors - rules fail loudly, never silently.
@@ -231,26 +244,31 @@ schema metadata:
 
 ```json
 {
-  "version": "1.1.1",
+  "version": "1.1.2",
   "findings": [
     {
-      "rule_id": "metrics.duplicate-block",
-      "severity": "info",
-      "message": "10 duplicated lines (block abc123456789)",
-      "path": "src/main.rs",
+      "rule_id": "secrets.stripe-access-token",
+      "severity": "error",
+      "message": "Found a Stripe Access Token, posing a risk to payment processing services and sensitive financial data.",
+      "path": "src/config.rs",
       "line": 42,
-      "column": 1,
-      "matched": "10 duplicated lines (block abc123456789)",
+      "column": 12,
+      "matched": "<redacted>",
       "fingerprint": "00f13c99a1d5c00060ab482949f6206276bf13a3410527de9dae109d6913d53d"
     }
   ],
   "baselined": [],
   "suppressed": [],
-  "skipped": [],
+  "skipped": [
+    {
+      "path": "vendor/large-crate.rs",
+      "reason": "file size exceeds [limits] max_parse_bytes (5242880 > 2097152)"
+    }
+  ],
   "schema_version": "1.2",
   "metrics": {
     "files": {
-      "src/main.rs": {
+      "src/config.rs": {
         "lines": 150,
         "code_lines": 120,
         "duplicated_lines": 10
@@ -263,16 +281,40 @@ schema metadata:
       "duplication_density": 6.0
     }
   },
-  "anchor": "scan-root"
+  "anchor": "scan-root",
+  "ignored": {
+    "files": 3,
+    "directories": 1
+  }
 }
 ```
 
 The `schema_version` field declares the report contract version. It is
 additive-only: a consumer unknown to version X but supporting version Y >= X
-can read the report. Absent `code_lines` indicates a non-tier-1 language.
-Duplicate-block findings carry the 12-hex normalized-block hash in the matched
-text. The `anchor` key names the path convention all findings, skipped files,
-and metrics keys use.
+can read the report. The `version` field is the scanner's semantic version (for
+diagnostic purposes only; the schema version is authoritative). Absent
+`code_lines` indicates a non-tier-1 language. Duplicate-block findings carry the
+12-hex normalized-block hash in the matched text. The `anchor` key names the
+path convention all findings, skipped files, and metrics keys use.
+
+The `skipped` array contains every file that was not scanned, including reasons:
+binary files, invalid UTF-8, and any file exceeding size limits. Findings are
+never silently omitted.
+
+The `ignored` object counts what an ignore file kept out of the walk entirely,
+which is a different thing from `skipped`: a skipped file was looked at and
+could not be read, an ignored one was never opened. A report with no findings
+and a non-zero `ignored` is **not** a clean tree - it is a tree the scan did
+not fully look at, and a gate reading this report can now tell the two apart.
+The same statement appears as one line in human output, printed above the
+metrics summary.
+
+The count is deliberately coarse, and the caveat matters: **an ignored
+directory counts as one, and its contents are not walked and so are counted
+nowhere.** `"directories": 1` may stand for one empty folder or for a
+`node_modules` with forty thousand files beneath it. The field answers "was
+anything held back", not "how much". Use `--no-ignore` to scan the excluded
+files.
 
 A finding from a secret rule reports `matched` as `<redacted>`: the credential
 itself never reaches the report, in any of the three finding arrays. Its
@@ -292,9 +334,7 @@ fingerprint untouched.
   during the cross-file normalized-line pass, so a very large tree still costs
   memory proportional to the text it contains. `[limits] max_parse_bytes` does
   not bound this - it gates parsing, not reading, and an oversized file still
-  reaches the duplication pass. It does not bound parsing either when a boundary
-  rule is loaded: the import graph has to be whole, so those scans parse past
-  the cap.
+  reaches the duplication pass.
 - **Duplication block filtering**: findings respect ignore files (`gitignore`,
   `.ignore`) and inline suppression like any rule, but have no dedicated
   path-filter configuration separate from rule paths. A duplication rule with
@@ -343,6 +383,26 @@ narrower than the gitleaks version, a minimal keyword requirement, or both. Exam
 
 ## Scanner scope and ignore semantics
 
+### Config discovery
+
+The `siloscan.toml` file is discovered by walking upward from the scan root
+until one is found at the scan root itself, or until a repository boundary
+(a `.git` directory with a `HEAD` file or a `.git` file for a worktree) is
+reached. An ancestor's config is adopted only if found before hitting the
+repository boundary; the walk stops at that boundary. This keeps a scan
+self-contained: a config outside the repository (e.g. in `$HOME` or `/`) is
+never consulted.
+
+The marker is required, not merely respected. If the walk reaches the
+filesystem root without finding a `.git` at or above the scan root, whatever
+config it passed on the way is **discarded**, not adopted. The practical
+consequence: an exported tarball, a `git archive` checkout, or any copy of a
+subtree without its `.git` scans with **no config at all** - no silos, no
+source roots, no anchor - and rules that need one are refused (exit `2`)
+rather than silently skipped. Pass `--config FILE` explicitly for those trees.
+
+### Ignore file scope
+
 A scan reads the ignore files inside the tree it was pointed at, and no others.
 `.gitignore` and `.ignore` files at or below `PATH` are honored, whether or not
 a `.git` directory exists. Ignore files in parent directories, git's global
@@ -376,7 +436,22 @@ Three ways out, in the order worth trying:
 - put a `.gitignore` or `.ignore` inside the directory being scanned, which
   makes the exclusion part of the tree and therefore reproducible;
 - pass `--respect-parent-ignores`, which restores the 1.1.1 behavior for this
-  source and reintroduces its machine-dependence.
+  source and reintroduces its machine-dependence;
+- set `anchor = "config"` in the project's `siloscan.toml` (see below), which
+  declares the config root to be the project and brings exactly that project's
+  ignore files into scope - bounded, unlike `--respect-parent-ignores`.
+
+A config-anchored scan is the one case where a scan reads ignore files above
+its own root, and the boundary is the config root rather than the filesystem.
+Under `anchor = "config"`, `siloscan modules/api` also honors the `.gitignore`
+and `.ignore` files in the config root and in every directory between it and
+the scan root. That is what makes a module scan comparable to a root scan: a
+file the project ignores is absent from both, so a baseline written at the root
+still covers the module. Nothing above the config root is read, and under the
+default `anchor = "scan-root"` nothing above the scan root is read at all. Each
+file is still honored only through the switch that governs its kind, so
+`--no-ignore` and `--no-gitignore` apply here exactly as they do inside the
+scan root.
 
 Every ignore source is a flag, on both `siloscan` and `siloscan-tui`:
 
@@ -423,6 +498,95 @@ tens of thousands of files:
 
 Both caps keep the head of a list the scanner already sorted by path, so the
 sample and the count are identical across runs of the same tree.
+
+## Trust model
+
+The scanned tree is untrusted input. Nothing inside the tree being scanned may
+weaken, disable, or silently narrow the scan. Where the scanner does not look,
+it must say so.
+
+A repository cannot:
+- disable or weaken scanning via its cache (committed cache entries are
+  authenticated per directory and not trusted across scans with different rules)
+- restrict rule paths or inject rules via `siloscan.toml` rule directories
+  (rule paths are resolved relative to the config file itself, and only
+  `siloscan.toml` files discovered inside the scan root are consulted)
+- disable sanitization or weaken reporting via control characters in matched
+  text, filenames, or file paths
+
+### Config path containment
+
+**Behavior change in 1.2.1.** Every filesystem path a discovered
+`siloscan.toml` declares - `rules`, `source_roots`, and `include` - must resolve
+inside the config root. Absolute paths are refused, `..` that climbs out of the
+config root is refused, and a path that lands outside through a **symlink** is
+refused: the check is applied to the resolved path, not to how it is spelled.
+
+**What no longer works.** Up to and including 1.2.0, an *included* config could
+name a rule directory outside the config root, and the documented use for it was
+a shared rule pack sitting next to the repository:
+
+```toml
+# modules/api/siloscan.toml - refused from 1.2.1 on
+rules = ["../../../shared-rules"]
+```
+
+That layout is gone, and the removal is the point rather than a casualty of it.
+An included config is content of the scanned tree exactly as the root config is,
+so leaving the escape open left the root's own containment one `include` line
+away from useless: any repository could point the scan at a rule directory the
+reviewer never saw and replace the rule set the scan was supposed to run.
+
+**What to do instead.** Pass the shared pack on the command line -
+`siloscan . --rules ../../shared-rules`. The restriction is on the scanned
+tree's config, not on the operator: `--rules` takes any path, inside the tree or
+out, because the person typing it chose it. Copying or symlinking the pack into
+the repository works too, as long as the resolved location is inside the config
+root.
+
+A repository can still:
+- exclude files via `.gitignore` and `.ignore` at or below the scan root
+- declare silos and source roots in `siloscan.toml` to partition findings
+- suppress individual findings via inline `siloscan-ignore` comments
+
+Each of those is visible in the report rather than silent: exclusions are
+counted in `ignored`, and suppressed findings are listed in their own array.
+
+The `--no-ignore` flag overrides file exclusion; this is the only way to ensure
+a committed `.gitignore` does not hide a file from scanning. It takes
+precedence over every exclusion the tree declares - `.gitignore`, `.ignore`,
+and any ignore file a config-anchored project boundary brings into scope - and
+the resulting report shows `ignored` as zero, because nothing could have been
+held back. It does not re-admit the out-of-root sources: "scan everything under
+the root" is not a reason to start reading files above it.
+
+### Terminal-safe output
+
+Human output - CLI stdout, CLI stderr, and every span the TUI draws - renders
+scanned text so a terminal displays it instead of obeying it. Paths, rule ids
+and rule messages are all attacker-controlled, and two classes of character are
+rewritten:
+
+- **Control characters** become a visible `\xNN`: every C0 (`0x00`-`0x1F`,
+  including tab), DEL (`0x7F`), and every C1 (`U+0080`-`U+009F`). Written raw,
+  an `ESC [ 2 K` erases the line it lands on and `ESC [ A` walks back over the
+  lines above, so a repository holding a live credential could paint
+  "scan complete: 0 findings" over its own report.
+- **Unicode bidi formatting codes** become a visible `\u{XXXX}`: `U+061C`,
+  `U+200E`, `U+200F`, `U+202A`-`U+202E` and `U+2066`-`U+2069`. These reorder
+  the text around them without emitting a glyph - the Trojan Source trick - so
+  a file named `report\u{202e}sj.eruces` displays as `reportsecures.js` while
+  the scan reads the name it really has.
+
+Letters of right-to-left scripts are **not** escaped. Arabic and Hebrew carry
+direction as a property of the script and are ordinary content; a repository
+whose paths and messages are written in either stays readable.
+
+This is a display form, not a reversible encoding, and it applies to human
+output only. JSON and SARIF are read by tools, already escape control
+characters per RFC 8259, and carry the fingerprints - rewriting their bytes
+would move output that other things compare. Fingerprints are computed over the
+real text, so escaping never moves one.
 
 ## License
 

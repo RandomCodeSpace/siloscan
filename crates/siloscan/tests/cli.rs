@@ -514,15 +514,77 @@ fn test_subcommand_fails_on_a_missing_expectation() {
     );
 }
 
+/// A scan that loaded no rules checks nothing, and a report of nothing is
+/// indistinguishable from a clean tree. The fixture holds a live-looking
+/// credential precisely so that "exit 0, no output" would be a lie about it.
 #[test]
-fn no_default_rules_without_rule_dirs_scans_with_zero_rules() {
+fn no_default_rules_without_rule_dirs_is_refused() {
     let src = src_dir(&[("a.rs", "needle\ntoken = \"aG7xQ2vT9pL4zR1b\"\n")]);
 
     let output = run_args(&[path_str(&src), "--no-default-rules"]);
 
+    assert_eq!(output.status.code(), Some(2), "{}", stdout(&output));
+    let err = stderr(&output);
+    assert!(
+        err.contains("error: no rules loaded, so nothing would be checked"),
+        "{err}"
+    );
+    assert!(
+        err.contains("the built-in pack is disabled by --no-default-rules"),
+        "{err}"
+    );
+    assert!(err.contains("no rule directories were given"), "{err}");
+    assert!(report_lines(&stdout(&output)).is_empty());
+}
+
+/// The same hole reached the other way: a `--rules` directory that exists and
+/// holds no rule file. The directory is named, so the message separates "my
+/// path is wrong" from "I disabled the pack and forgot the replacement".
+#[test]
+fn no_default_rules_with_an_empty_rule_dir_is_refused() {
+    let src = src_dir(&[("a.rs", "needle\ntoken = \"aG7xQ2vT9pL4zR1b\"\n")]);
+    let empty = tempfile::tempdir().expect("tempdir");
+
+    let output = run_args(&[
+        path_str(&src),
+        "--rules",
+        path_str(&empty),
+        "--no-default-rules",
+    ]);
+
+    assert_eq!(output.status.code(), Some(2), "{}", stdout(&output));
+    let err = stderr(&output);
+    assert!(
+        err.contains("error: no rules loaded, so nothing would be checked"),
+        "{err}"
+    );
+    assert!(err.contains("searched:"), "{err}");
+}
+
+/// The refusal is about loading zero rules and nothing else: one rule in the
+/// directory and the same invocation scans normally. Without this, "refuse when
+/// empty" could be satisfied by refusing `--no-default-rules` outright.
+#[test]
+fn no_default_rules_with_one_rule_still_scans() {
+    let rules = rules_dir(
+        r#"
+version: 1
+rules:
+  - id: test.needle
+    severity: warning
+    message: needle found
+    regex: { pattern: 'needle' }
+"#,
+    );
+    let src = src_dir(&[("a.rs", "needle\n")]);
+
+    let output = run(rules.path(), src.path(), &["--no-default-rules"]);
+
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
-    let text = stdout(&output);
-    assert!(report_lines(&text).is_empty(), "stdout: {text}");
+    assert_eq!(
+        report_lines(&stdout(&output)),
+        vec!["a.rs:1:1 warning test.needle needle found"]
+    );
 }
 
 #[test]
@@ -672,16 +734,56 @@ fn coverage_rule_reports_a_file_below_the_threshold() {
     );
 }
 
+/// A coverage rule with no `--coverage-report` to read produces no findings,
+/// which on stdout is exactly what a passing gate looks like. A gate that
+/// cannot be evaluated has to fail, so the scan is refused and the rule that
+/// could not run is named.
 #[test]
-fn coverage_rules_are_inert_without_a_report() {
+fn coverage_rules_without_a_report_are_refused() {
     let rules = rules_dir(COVERAGE_RULE);
     let src = coverage_src();
 
     let output = run(rules.path(), src.path(), &["--no-default-rules"]);
 
-    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
-    let text = stdout(&output);
-    assert!(report_lines(&text).is_empty(), "stdout: {text}");
+    assert_eq!(output.status.code(), Some(2), "{}", stdout(&output));
+    let err = stderr(&output);
+    assert!(err.contains("cov.min"), "{err}");
+    assert!(err.contains("--coverage-report"), "{err}");
+    assert!(report_lines(&stdout(&output)).is_empty());
+}
+
+/// A report that resolves onto none of the scanned files is the same hole with
+/// a file in the way of seeing it: the gate reads a report, measures nothing,
+/// and exits clean. A stale report from another tree, or one written under a
+/// path prefix that cannot be reconciled, is refused and named.
+#[test]
+fn a_coverage_report_matching_no_scanned_file_is_refused() {
+    let rules = rules_dir(COVERAGE_RULE);
+    let src = coverage_src();
+    let report = tempfile::tempdir().unwrap();
+    write(
+        report.path(),
+        "stale.info",
+        "TN:suite\nSF:src/gone.rs\nDA:1,0\nDA:2,0\nend_of_record\n",
+    );
+    let path = report.path().join("stale.info");
+
+    let output = run(
+        rules.path(),
+        src.path(),
+        &[
+            "--no-default-rules",
+            "--coverage-report",
+            path.to_str().expect("temp path should be UTF-8"),
+        ],
+    );
+
+    assert_eq!(output.status.code(), Some(2), "{}", stdout(&output));
+    let err = stderr(&output);
+    assert!(err.contains("cov.min"), "{err}");
+    assert!(err.contains("stale.info"), "{err}");
+    assert!(err.contains("none of the scanned files"), "{err}");
+    assert!(report_lines(&stdout(&output)).is_empty());
 }
 
 /// A repository holding one matching file and one clean one, so a scan of
@@ -1134,4 +1236,193 @@ fn a_binary_heavy_tree_summarises_its_skip_warnings() {
         BINARIES,
         "the JSON record is what the warnings summarise"
     );
+}
+
+/// A `rules` entry in the scanned repository's own config may not point outside
+/// the config root. The config is untrusted input: a repository that could name
+/// `../` could name a rule directory the reviewer never saw, and replace the
+/// rule set the scan was supposed to run.
+#[test]
+fn a_config_rules_entry_leaving_the_config_root_is_refused() {
+    let src = src_dir(&[
+        ("siloscan.toml", "rules = [\"../outside\"]\n"),
+        ("a.rs", "needle\n"),
+    ]);
+
+    let output = run_args(&[path_str(&src)]);
+
+    assert_eq!(output.status.code(), Some(2), "{}", stdout(&output));
+    let err = stderr(&output);
+    assert!(err.contains("rules"), "{err}");
+    assert!(err.contains("outside the config root"), "{err}");
+}
+
+/// The same key with an absolute path. Refused for the same reason and named
+/// the same way, so neither spelling is the one that gets through.
+#[test]
+fn a_config_rules_entry_with_an_absolute_path_is_refused() {
+    let src = src_dir(&[
+        ("siloscan.toml", "rules = [\"/etc/siloscan-rules\"]\n"),
+        ("a.rs", "needle\n"),
+    ]);
+
+    let output = run_args(&[path_str(&src)]);
+
+    assert_eq!(output.status.code(), Some(2), "{}", stdout(&output));
+    let err = stderr(&output);
+    assert!(err.contains("rules"), "{err}");
+    assert!(err.contains("relative path"), "{err}");
+}
+
+/// The same key through a symlink. `rules = ["link"]` holds no `..` at all, so
+/// the lexical guard passes it; the symlink and the config naming it are both
+/// content of the untrusted tree, and together they are the guard's own attack
+/// one indirection later.
+#[test]
+#[cfg(unix)]
+fn a_config_rules_entry_through_a_symlink_out_of_the_tree_is_refused() {
+    let outside = rules_dir(MATCHING_RULE);
+    let src = src_dir(&[
+        ("siloscan.toml", "rules = [\"link\"]\n"),
+        ("a.rs", "needle\n"),
+    ]);
+    std::os::unix::fs::symlink(outside.path(), src.path().join("link")).unwrap();
+
+    let output = run_args(&[path_str(&src), "--no-default-rules"]);
+
+    assert_eq!(output.status.code(), Some(2), "{}", stdout(&output));
+    let err = stderr(&output);
+    assert!(err.contains("rules"), "{err}");
+    assert!(err.contains("outside the config root"), "{err}");
+}
+
+/// And the same bypass via `include`, which would otherwise pull an arbitrary
+/// TOML file from outside the tree into the scan.
+#[test]
+#[cfg(unix)]
+fn a_config_include_through_a_symlink_out_of_the_tree_is_refused() {
+    let outside = TempDir::new().unwrap();
+    fs::write(outside.path().join("siloscan.toml"), "source_roots = []\n").unwrap();
+    let src = src_dir(&[
+        ("siloscan.toml", "include = [\"link/siloscan.toml\"]\n"),
+        ("a.rs", "needle\n"),
+    ]);
+    std::os::unix::fs::symlink(outside.path(), src.path().join("link")).unwrap();
+
+    let output = run_args(&[path_str(&src), "--no-default-rules"]);
+
+    assert_eq!(output.status.code(), Some(2), "{}", stdout(&output));
+    let err = stderr(&output);
+    assert!(err.contains("include"), "{err}");
+    assert!(err.contains("outside the config root"), "{err}");
+}
+
+/// The restriction is on the scanned tree's config, not on the operator. A
+/// `--rules` directory outside the scan root is the normal way to run, and it
+/// keeps working: the command line is trusted, the repository is not.
+#[test]
+fn a_rules_flag_outside_the_scan_root_still_scans() {
+    let rules = rules_dir(MATCHING_RULE);
+    let src = src_dir(&[("a.rs", "needle\n")]);
+
+    let output = run(rules.path(), src.path(), &["--no-default-rules"]);
+
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    assert_eq!(
+        report_lines(&stdout(&output)),
+        vec!["a.rs:1:1 error test.needle needle found"]
+    );
+}
+
+/// A module scan under `anchor = "config"` reads the project root's
+/// `.gitignore`, because that anchor declares the config root to be the
+/// project. Without this a file the repository ignores would be absent from a
+/// root scan and present in a module scan of the same commit, and a baseline
+/// written at the root would not cover it.
+#[test]
+fn a_config_anchored_module_scan_honours_the_project_gitignore() {
+    let rules = rules_dir(MATCHING_RULE);
+    let src = src_dir(&[
+        ("siloscan.toml", "anchor = \"config\"\n"),
+        (".gitignore", "generated.rs\n"),
+        ("modules/api/generated.rs", "needle\n"),
+        ("modules/api/hand.rs", "needle\n"),
+    ]);
+
+    let output = run(
+        rules.path(),
+        &src.path().join("modules/api"),
+        &["--no-default-rules"],
+    );
+
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    let text = stdout(&output);
+    let lines = report_lines(&text);
+    assert!(
+        lines.iter().any(|line| line.contains("hand.rs")),
+        "the file the project does not ignore must still be reported: {lines:?}"
+    );
+    assert!(
+        !lines.iter().any(|line| line.contains("generated.rs")),
+        "the project root's .gitignore must reach a module scan: {lines:?}"
+    );
+}
+
+/// The counterpart: with the default scan-root anchor the project root is not
+/// declared, nothing above the scan root is read, and the same file is scanned.
+/// This is what makes the test above about the anchor rather than about the
+/// walker reading parents on its own.
+#[test]
+fn a_scan_root_anchored_module_scan_ignores_the_project_gitignore() {
+    let rules = rules_dir(MATCHING_RULE);
+    let src = src_dir(&[
+        ("siloscan.toml", "anchor = \"scan-root\"\n"),
+        (".gitignore", "generated.rs\n"),
+        ("modules/api/generated.rs", "needle\n"),
+        ("modules/api/hand.rs", "needle\n"),
+    ]);
+
+    let output = run(
+        rules.path(),
+        &src.path().join("modules/api"),
+        &["--no-default-rules"],
+    );
+
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    let text = stdout(&output);
+    let lines = report_lines(&text);
+    assert!(
+        lines.iter().any(|line| line.contains("generated.rs")),
+        "nothing above the scan root may remove a file from it: {lines:?}"
+    );
+}
+
+/// The report says how much of the tree an ignore file kept out, in the machine
+/// -readable output as well as the human one. A gate reading JSON has to be
+/// able to tell a clean tree from a tree the scan did not fully look at.
+#[test]
+fn the_json_report_counts_what_the_walk_ignored() {
+    let rules = rules_dir(MATCHING_RULE);
+    let src = src_dir(&[
+        (".gitignore", "secrets.rs\n"),
+        ("secrets.rs", "needle\n"),
+        ("a.rs", "clean\n"),
+    ]);
+
+    let output = run(
+        rules.path(),
+        src.path(),
+        &["--no-default-rules", "--format", "json"],
+    );
+
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let report: Value = siloscan_core::serde_json::from_str(&stdout(&output)).unwrap();
+    assert_eq!(report["findings"].as_array().unwrap().len(), 0);
+    assert_eq!(
+        report["ignored"]["files"].as_u64(),
+        Some(1),
+        "a report with no findings and an ignored file is not a clean tree"
+    );
+    // Additive: the schema minor does not move for an appended field.
+    assert_eq!(report["schema_version"].as_str(), Some("1.2"));
 }

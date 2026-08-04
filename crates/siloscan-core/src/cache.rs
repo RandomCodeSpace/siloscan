@@ -18,6 +18,35 @@
 //! written beside the cache directory so entries cannot be committed to the
 //! scanned repository.
 //!
+//! # The cache is inside untrusted input
+//!
+//! A `.gitignore` is a courtesy, not a boundary. Nothing stops a repository
+//! from committing a `.siloscan/cache` whose entries claim a file containing a
+//! live credential has no findings, and every part of the key - content hash,
+//! rule hash, path scope - would legitimately match on a fresh clone. Before
+//! this, the scan of that clone reported nothing and exited 0.
+//!
+//! So an entry is only believed on the checkout that wrote it. Each cache
+//! directory holds a `.salt` (see [`SALT_NAME`]), and every entry carries an
+//! authentication tag over its own canonical body computed with that salt. A
+//! tag that is absent, malformed or does not recompute is a miss - never an
+//! error, never a warning - so a foreign, poisoned or simply borrowed cache
+//! costs a real scan and nothing else. Rejecting an entry cannot change a
+//! report: a miss is a rescan, and a rescan is what a cold run does.
+//!
+//! The salt is bound to the absolute path of the cache directory as well as to
+//! its own random bytes (see [`resolve_salt`]), because an attacker who commits
+//! the entries can commit the salt beside them. Their clone and the victim's do
+//! not sit at the same absolute path, so the tags do not recompute. That alone
+//! is not enough where checkout paths are public and fixed - a GitHub Actions
+//! windows runner builds every repository at `D:\a\<repo>\<repo>` - so a salt
+//! also has to prove it was written by this build rather than checked out with
+//! the tree ([`salt_file`]): an owner-only mode on unix, an alternate data
+//! stream on Windows, and on any platform that offers neither, no salt is
+//! trusted at all and the cache stays cold. Both are anti-tampering measures,
+//! not key management - the honest statement of the residual risk is in
+//! [`resolve_salt`].
+//!
 //! The crate version inside an entry makes it a miss after an upgrade, but a
 //! miss is not a removal: without one, every release left the whole of the
 //! previous release's cache on disk for good. [`Cache::open`] therefore prunes
@@ -31,7 +60,9 @@ use std::fmt::Write as _;
 use std::fs;
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -67,6 +98,25 @@ const STAMP_NAME: &str = ".version";
 /// Written to `.siloscan/.gitignore`. Scoped to `cache/` so a committed
 /// baseline beside it stays visible to git.
 const IGNORE_MARKER: &str = "# Written by siloscan. Cache entries are local state.\ncache/\n";
+
+/// Per-directory secret that makes an entry believable. It lives beside the
+/// entries it authenticates, inside `.siloscan/cache`, which the walk excludes
+/// from every scan and the `.gitignore` above covers.
+const SALT_NAME: &str = ".salt";
+
+/// Salt width in bytes, matching the digest that consumes it.
+const SALT_LEN: usize = 32;
+
+/// Owner-only file mode for the salt, and the mask a stored salt is checked
+/// against on read. Group or world access means the file did not come from
+/// [`create_salt`].
+#[cfg(unix)]
+const SALT_MODE: u32 = 0o600;
+
+/// The NTFS alternate data stream a salt's bytes live in on Windows, appended
+/// to [`SALT_NAME`]. See [`salt_file`] for why the salt is not simply the file.
+#[cfg(windows)]
+const SALT_STREAM: &str = ":siloscan";
 
 /// The path convention every path inside a cache entry was recorded under.
 ///
@@ -137,6 +187,63 @@ struct StoredEntry {
     path_scope: String,
     findings: Vec<StoredFinding>,
     facts: Option<FileFacts>,
+    /// Hex [`entry_tag`] over the fields above. Defaulted rather than required
+    /// so an entry without one parses and then fails the comparison: an
+    /// untagged entry is a miss like any other, not a parse error.
+    #[serde(default)]
+    tag: String,
+}
+
+/// The part of an entry the tag covers, borrowed from a [`StoredEntry`].
+///
+/// Reading re-serializes this from the parsed entry rather than tagging the
+/// bytes on disk, so the tag is over one canonical form of the body. Whitespace,
+/// field order and any field this build does not know about are then free to
+/// differ without touching the tag, and none of them can carry meaning past it.
+#[derive(Serialize)]
+struct EntryBody<'a> {
+    version: &'a str,
+    path_scope: &'a str,
+    findings: &'a [StoredFinding],
+    facts: &'a Option<FileFacts>,
+}
+
+impl StoredEntry {
+    /// Canonical bytes of everything but the tag. `None` only if the body
+    /// cannot be serialized, which makes the entry unusable either way.
+    ///
+    /// [`StoredEntry`] is destructured exhaustively - no `..` - so this list
+    /// cannot drift from the one above it. A field added to a stored entry and
+    /// not to [`EntryBody`] would otherwise land outside the tag and be
+    /// attacker-controlled data the authentication says nothing about; with the
+    /// binding written out, adding one is a compile error until it is either
+    /// covered or explicitly named and dropped here.
+    ///
+    /// Chosen over tagging the serialized entry minus its `tag` field, which
+    /// would derive the coverage from the type with no list to keep in step:
+    /// that shape has to reach the same bytes through a serde value or a
+    /// string edit of the JSON, and either one changes what the tag is computed
+    /// over. Every cache entry in existence would then fail to authenticate
+    /// against the build that wrote it - a silent, tree-wide cold scan bought
+    /// for a guard the compiler can give for free.
+    fn body_bytes(&self) -> Option<Vec<u8>> {
+        let StoredEntry {
+            version,
+            path_scope,
+            findings,
+            facts,
+            // The tag is what this body is tagged with; covering it with itself
+            // is not a thing that can be done.
+            tag: _,
+        } = self;
+        serde_json::to_vec(&EntryBody {
+            version,
+            path_scope,
+            findings,
+            facts,
+        })
+        .ok()
+    }
 }
 
 /// On-disk shape of one finding, without its match text. `matched_len` is the
@@ -171,10 +278,20 @@ impl StoredFinding {
     /// Rebuild the finding, reading its match text back out of `content`.
     /// Returns `None` when the span does not address `content`, which makes the
     /// whole entry a miss.
+    ///
+    /// The UTF-16 column is recomputed here rather than stored. It is a
+    /// function of the line prefix, and the entry is only usable at all when
+    /// that prefix is present and addressable, so recomputing costs one pass
+    /// over a line and keeps the on-disk shape free of a second spelling of a
+    /// column that could drift from the first. A cache hit and a cold scan of
+    /// the same bytes therefore produce identical findings, which is what makes
+    /// SARIF output independent of cache state.
     fn restore(self, starts: &[usize], content: &str) -> Option<Finding> {
         let start = offset_of(starts, self.line, self.column)?;
         let end = start.checked_add(self.matched_len)?;
         let matched = content.get(start..end)?;
+        let line_start = *starts.get(usize::try_from(self.line.checked_sub(1)?).ok()?)?;
+        let prefix = content.get(line_start..start)?;
 
         Some(Finding {
             rule_id: self.rule_id,
@@ -183,6 +300,7 @@ impl StoredFinding {
             path: self.path,
             line: self.line,
             column: self.column,
+            column_utf16: crate::engines::utf16_column(prefix),
             matched: matched.to_string(),
             fingerprint: self.fingerprint,
         })
@@ -197,6 +315,25 @@ pub struct Cache {
     /// carries a prefix of it, so entries from different rule sets or
     /// different path conventions land on different names and coexist.
     scope_hash: String,
+    /// This directory's salt, bound to its location, resolved at most once per
+    /// cache. Reading may find none; writing creates one. Opening resolves
+    /// nothing, because a scan of a tree with no cache must not grow one.
+    salt: OnceLock<[u8; SALT_LEN]>,
+    /// Set once a read has failed to find a usable salt, so a cold or foreign
+    /// cache is not probed again for every file in the tree. Writing ignores
+    /// it: [`Cache::put`] creates the directory and the salt with it, and
+    /// publishes the result through `salt`, which is consulted first.
+    salt_missing: AtomicBool,
+    /// Held while this process creates the salt, so exactly one thread does.
+    ///
+    /// [`create_salt`] tolerates losing the create race by reading back what
+    /// the winner wrote, and across processes that is enough - the loser reads
+    /// a half-written file at worst, and pays one uncached run for it. Inside
+    /// one process it is not enough: the workers reach a cold cache together,
+    /// so nearly all of them lose the race, read a file whose bytes do not
+    /// exist yet, and write no entry at all. A cold scan then caches one file
+    /// out of however many it read, and the cache only fills over later runs.
+    salt_create: Mutex<()>,
 }
 
 impl Cache {
@@ -221,6 +358,9 @@ impl Cache {
             scope_hash: scope_hash(&rules_hash, &path_scope),
             rules_hash,
             path_scope,
+            salt: OnceLock::new(),
+            salt_missing: AtomicBool::new(false),
+            salt_create: Mutex::new(()),
         }
     }
 
@@ -251,12 +391,21 @@ impl Cache {
     /// Look up an entry. `content` is the scanned file's current text, which the
     /// entry's spans are read against to recover match text that was never
     /// stored. Absent, unreadable, malformed, version-mismatched,
-    /// scope-mismatched and unrecoverable entries are all plain misses.
+    /// scope-mismatched, untrusted and unrecoverable entries are all plain
+    /// misses: the caller scans the file, which is what it would have done on a
+    /// cold cache, so no report depends on any of this.
     pub fn get(&self, content_hash: &str, content: &str) -> Option<CachedFile> {
         let path = self.entry_path(content_hash)?;
         let bytes = fs::read(path).ok()?;
         let stored: StoredEntry = serde_json::from_slice(&bytes).ok()?;
         if stored.version != VERSION || stored.path_scope != self.path_scope {
+            return None;
+        }
+        // Nothing below this line trusts the entry's contents until the tag
+        // over them recomputes under this checkout's salt.
+        let salt = self.salt_for_read()?;
+        let body = stored.body_bytes()?;
+        if entry_tag(salt, &self.entry_key(content_hash), &body) != stored.tag {
             return None;
         }
 
@@ -287,12 +436,25 @@ impl Cache {
             return;
         }
         self.write_ignore_marker();
+        // An entry this checkout cannot authenticate would be an entry it could
+        // never read back, so there is no point writing one.
+        let Some(salt) = self.salt_for_write() else {
+            return;
+        };
 
         let stored = StoredEntry {
             version: VERSION.to_string(),
             path_scope: self.path_scope.clone(),
             findings: entry.findings.iter().map(StoredFinding::new).collect(),
             facts: entry.facts.clone(),
+            tag: String::new(),
+        };
+        let Some(body) = stored.body_bytes() else {
+            return;
+        };
+        let stored = StoredEntry {
+            tag: entry_tag(salt, &self.entry_key(content_hash), &body),
+            ..stored
         };
         let Ok(mut bytes) = serde_json::to_vec(&stored) else {
             return;
@@ -339,6 +501,68 @@ impl Cache {
                 .join(&content_hash[..2])
                 .join(format!("{content_hash}-{prefix}.json")),
         )
+    }
+
+    /// The identity the tag binds a body to: the content it was produced from
+    /// and the rules and path convention that produced it. Both halves are
+    /// fixed-width hex, so no pair of keys can be read as another.
+    fn entry_key(&self, content_hash: &str) -> String {
+        format!("{content_hash}\0{}", self.scope_hash)
+    }
+
+    /// This cache's salt for reading, or `None` when there is nothing to read
+    /// it from - an absent, unreadable or foreign salt file, or a directory
+    /// whose location cannot be resolved. Every one of those makes the whole
+    /// cache cold, which is a correct cache.
+    fn salt_for_read(&self) -> Option<&[u8; SALT_LEN]> {
+        if let Some(salt) = self.salt.get() {
+            return Some(salt);
+        }
+        if self.salt_missing.load(Ordering::Relaxed) {
+            return None;
+        }
+        match resolve_salt(&self.root, false) {
+            Some(salt) => Some(self.salt.get_or_init(|| salt)),
+            None => {
+                self.salt_missing.store(true, Ordering::Relaxed);
+                None
+            }
+        }
+    }
+
+    /// This cache's salt for writing, creating one if the directory has none.
+    /// `None` when it cannot be created or read back, which means this run
+    /// writes no entries.
+    ///
+    /// Creation is serialized on `salt_create`, so within this process exactly
+    /// one thread calls [`create_salt`] and the rest find the finished value in
+    /// the [`OnceLock`]. Doing it unlocked would make every worker race for a
+    /// file that exists before its bytes do: the winner writes an entry and the
+    /// losers read an empty salt and write none, which costs a cold scan nearly
+    /// all of its entries. Another *process* racing this one still resolves the
+    /// same way [`create_salt`] describes.
+    ///
+    /// The lock is held across a file create and a small write, and only until
+    /// the first salt is resolved; afterwards the [`OnceLock`] answers without
+    /// taking it.
+    fn salt_for_write(&self) -> Option<&[u8; SALT_LEN]> {
+        if let Some(salt) = self.salt.get() {
+            return Some(salt);
+        }
+        // A poisoned lock guards no invariant of its own: the salt either
+        // resolved into the `OnceLock` or it did not, and either way the value
+        // behind the guard is `()`.
+        let _guard = self
+            .salt_create
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // Re-checked under the lock: the thread that held it may have resolved
+        // the salt while this one waited.
+        if let Some(salt) = self.salt.get() {
+            return Some(salt);
+        }
+        let salt = resolve_salt(&self.root, true)?;
+        Some(self.salt.get_or_init(|| salt))
     }
 }
 
@@ -447,6 +671,298 @@ fn entry_version(path: &Path) -> Option<String> {
     std::str::from_utf8(version).ok().map(str::to_string)
 }
 
+/// The salt this cache directory's entries are authenticated with, or `None`
+/// when there is none to be had. With `create`, a directory that exists and has
+/// no salt gets one; without it, nothing is written and nothing is created.
+///
+/// The value returned is not the file's bytes but those bytes bound to the
+/// directory's absolute location, so an entry authenticates for one checkout at
+/// one path. That is what defeats a committed cache: the attacker can commit
+/// the salt beside the entries they forged, and their tree and their victim's
+/// still do not sit at the same absolute path. A location that cannot be
+/// resolved yields `None` - a cache that cannot say where it is does not get
+/// believed.
+///
+/// This is tamper resistance, not key management. The salt sits unencrypted in
+/// a file any process running as this user can read, and an attacker who knows
+/// the absolute path a target will scan at, can read or predict that target's
+/// salt, and can get the file there with owner-only permissions can still forge
+/// an entry. What it stops is the case that shipped: a cache committed to a
+/// repository, cloned somewhere else, and believed.
+fn resolve_salt(root: &Path, create: bool) -> Option<[u8; SALT_LEN]> {
+    let stored = match read_salt(root) {
+        Some(salt) => salt,
+        None if create => create_salt(root)?,
+        None => return None,
+    };
+    let location = fs::canonicalize(root).ok()?;
+
+    let mut hasher = Sha256::new();
+    hasher.update(stored);
+    hasher.update([0]);
+    hasher.update(location.as_os_str().as_encoded_bytes());
+    Some(hasher.finalize().into())
+}
+
+/// Where a salt's bytes are read from and written to under `root`, or `None` on
+/// a platform where this build cannot tell a salt it wrote from one that
+/// arrived with the tree.
+///
+/// The check has to be something a repository cannot carry, because the
+/// committed-cache attack hands the victim a `.salt` along with the forged
+/// entries and the path binding in [`resolve_salt`] is not enough on its own
+/// where checkout paths are public and fixed.
+///
+/// - unix: the file itself, and [`read_salt`] rejects any mode wider than
+///   [`SALT_MODE`]. Git records no file mode but the executable bit, so a
+///   checked-out `.salt` is never owner-only.
+/// - windows: an NTFS alternate data stream on `.salt` ([`SALT_STREAM`]). Git
+///   does not record streams, and no archive format a tree arrives in carries
+///   one, so a `.salt` that came with the checkout has no stream and the bytes
+///   this build reads are ones it wrote. A committed `.salt` is simply never
+///   read: only the stream is. On a volume with no stream support - FAT32,
+///   exFAT, some network shares - creating it fails and the cache stays cold,
+///   which is a correct cache.
+/// - anything else: `None`. A gate that cannot be evaluated does not get to
+///   pass, so a platform where provenance cannot be established trusts no salt,
+///   writes none, and scans cold every time.
+fn salt_file(root: &Path) -> Option<PathBuf> {
+    #[cfg(unix)]
+    {
+        Some(root.join(SALT_NAME))
+    }
+    #[cfg(windows)]
+    {
+        Some(root.join(format!("{SALT_NAME}{SALT_STREAM}")))
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = root;
+        None
+    }
+}
+
+/// The salt stored in `root`, if it is one this build would have written.
+///
+/// Provenance is [`salt_file`]'s business, plus the mode check below on the one
+/// platform where the path alone does not carry it. Everything else - absent,
+/// unreadable, not hex, wrong length - lands in the same place, which is a cold
+/// cache.
+fn read_salt(root: &Path) -> Option<[u8; SALT_LEN]> {
+    let path = salt_file(root)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let meta = fs::metadata(&path).ok()?;
+        if !meta.is_file() {
+            return None;
+        }
+        if meta.permissions().mode() & !SALT_MODE & 0o777 != 0 {
+            return None;
+        }
+    }
+    unhex(fs::read_to_string(&path).ok()?.trim())
+}
+
+/// Write a fresh salt into an existing cache directory and return it.
+///
+/// The file is created exclusively, so a concurrent writer cannot be
+/// overwritten - losing that race means reading the winner's salt instead. A
+/// directory that does not exist is not created here; only [`Cache::put`]
+/// creates one, and it does so before asking for a salt.
+///
+/// A salt that fails the provenance check is *replaced*, once, rather than left
+/// where it is. Leaving it was the previous behavior and it was a trap: the
+/// exclusive create can never overwrite the file, [`read_salt`] can never
+/// accept it, and the result is a cache that is cold on every scan, forever,
+/// with nothing said about why. Replacement costs whatever was written under
+/// the salt it replaces, which becomes misses like any other stale entry, and
+/// costs it once. It is silent, like every other failure in this module: a
+/// cache is not a channel this crate reports through, and a line per scan for a
+/// condition that fixes itself on the first one would be noise on every run
+/// afterwards.
+///
+/// On Windows the exclusive create is on the stream ([`salt_file`]), so a
+/// `.salt` that arrived with a checkout is neither read nor rewritten: the
+/// stream beside it is this build's, and the file's own contents stay where
+/// they are and mean nothing to anyone here.
+///
+/// The file exists for a moment before its bytes do, so a second process that
+/// looks in exactly that window reads a salt it cannot parse and treats the
+/// cache as cold for that run. It costs the loser of that race a scan it was
+/// going to do anyway on a cache this empty, and the next run finds a finished
+/// file. Nothing about a report depends on which side of it a process lands.
+fn create_salt(root: &Path) -> Option<[u8; SALT_LEN]> {
+    if !root.is_dir() {
+        return None;
+    }
+    let path = salt_file(root)?;
+    let salt = generate_salt(root);
+
+    if let Some(written) = write_salt(&path, &salt) {
+        return Some(written);
+    }
+    // Either someone else got there first, or the file is one this build can
+    // never use. Only the second is replaced, and only once: losing the second
+    // create too means another process refilled it in the same window, and its
+    // salt is the one to read.
+    if foreign_salt(&path)
+        && fs::remove_file(&path).is_ok()
+        && let Some(written) = write_salt(&path, &salt)
+    {
+        return Some(written);
+    }
+    read_salt(root)
+}
+
+/// Create `path` exclusively, owner-only, holding `salt`. `None` when the file
+/// already existed or the write did not complete.
+fn write_salt(path: &Path, salt: &[u8; SALT_LEN]) -> Option<[u8; SALT_LEN]> {
+    use std::io::Write as _;
+
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(SALT_MODE);
+    }
+    let mut file = options.open(path).ok()?;
+    let mut text = hex(salt);
+    text.push('\n');
+    file.write_all(text.as_bytes()).ok()?;
+    file.sync_all().ok()?;
+    Some(*salt)
+}
+
+/// True when a salt file exists and fails the provenance check [`read_salt`]
+/// applies before it reads a byte: on unix, a regular file whose mode is wider
+/// than [`SALT_MODE`].
+///
+/// Deliberately narrower than "[`read_salt`] returned `None`". A salt with the
+/// right mode whose bytes do not parse is the create race described on
+/// [`create_salt`] - a file that exists a moment before its contents do - and
+/// deleting it on sight would be one process undoing another's work. That case
+/// recovers by itself on the next run. A file that cannot have been written
+/// here never recovers, which is what makes it worth replacing.
+///
+/// Anything that is not a regular file is left alone: it is not a salt this
+/// build wrote and not one it can remove with a single `unlink` either.
+#[cfg(unix)]
+fn foreign_salt(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt as _;
+    fs::metadata(path)
+        .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & !SALT_MODE & 0o777 != 0)
+}
+
+/// No provenance check outside unix carries a signal a file can fail on its
+/// own: on Windows the salt is an alternate data stream, which a checkout
+/// cannot carry at all, and elsewhere there is no salt to begin with.
+#[cfg(not(unix))]
+fn foreign_salt(_path: &Path) -> bool {
+    false
+}
+
+/// Unpredictable bytes for a new salt.
+///
+/// Every platform contributes randomness the operating system produced, and it
+/// has to: a salt an attacker can guess is a tag they can forge, and the whole
+/// of the committed-cache defense rests on not being able to. Where a salt was
+/// derived from the process id, the wall clock and the directory path alone -
+/// which is what a platform without `/dev/urandom` used to get - anyone who
+/// knew roughly when and where the cache was created could produce it.
+///
+/// Two sources, folded together:
+///
+/// - `/dev/urandom`, where the platform has it.
+/// - [`RandomState`](std::collections::hash_map::RandomState), which the
+///   standard library seeds from the operating system's randomness. It is the
+///   only OS randomness `std` exposes on every target, and on Windows it is the
+///   only one available here without a dependency. Its key is 128 bits, so a
+///   salt made from it alone has 128 bits behind it rather than 256; four
+///   keyed hashes of distinct inputs spread that key across the digest.
+///
+/// The process id, the clock, a per-process counter and the directory path are
+/// still folded in. They are not entropy and are not counted as any: they only
+/// keep two salts made in the same process from colliding if a random source
+/// ever repeats itself.
+fn generate_salt(root: &Path) -> [u8; SALT_LEN] {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    let mut hasher = Sha256::new();
+    if let Ok(mut urandom) = fs::File::open("/dev/urandom") {
+        let mut bytes = [0u8; SALT_LEN];
+        if urandom.read_exact(&mut bytes).is_ok() {
+            hasher.update(bytes);
+        }
+    }
+    hasher.update([0]);
+    hasher.update(os_random_bytes());
+    hasher.update([0]);
+    hasher.update(std::process::id().to_le_bytes());
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|since| since.as_nanos())
+        .unwrap_or_default();
+    hasher.update(nanos.to_le_bytes());
+    hasher.update(COUNTER.fetch_add(1, Ordering::Relaxed).to_le_bytes());
+    hasher.update(root.as_os_str().as_encoded_bytes());
+    hasher.finalize().into()
+}
+
+/// [`SALT_LEN`] bytes derived from a freshly constructed
+/// [`RandomState`](std::collections::hash_map::RandomState), whose keys the
+/// standard library takes from the operating system.
+///
+/// The state is not readable, so it is spent through the one thing a
+/// [`BuildHasher`](std::hash::BuildHasher) does: four hashes of four distinct
+/// inputs under the same key, which is eight bytes of output each. The result
+/// is not more than the 128 bits of key behind it and is not claimed to be; it
+/// is unpredictable to anyone who cannot read this process's memory, which is
+/// what a salt needs and what a clock never was.
+fn os_random_bytes() -> [u8; SALT_LEN] {
+    use std::hash::{BuildHasher as _, RandomState};
+
+    let state = RandomState::new();
+    let mut bytes = [0u8; SALT_LEN];
+    for (index, chunk) in bytes.chunks_mut(8).enumerate() {
+        let word = state.hash_one((index as u64, u64::MAX - index as u64));
+        chunk.copy_from_slice(&word.to_le_bytes()[..chunk.len()]);
+    }
+    bytes
+}
+
+/// The [`SALT_LEN`]-byte value `text` spells in lowercase or uppercase hex, or
+/// `None` if it does not spell exactly one.
+fn unhex(text: &str) -> Option<[u8; SALT_LEN]> {
+    let bytes = text.as_bytes();
+    if bytes.len() != SALT_LEN * 2 {
+        return None;
+    }
+    if !bytes.iter().all(u8::is_ascii_hexdigit) {
+        return None;
+    }
+    let mut out = [0u8; SALT_LEN];
+    for (byte, pair) in out.iter_mut().zip(bytes.chunks_exact(2)) {
+        let text = std::str::from_utf8(pair).ok()?;
+        *byte = u8::from_str_radix(text, 16).ok()?;
+    }
+    Some(out)
+}
+
+/// Hex SHA-256 binding an entry's body to its key and this directory's salt,
+/// NUL-separated like every other composite hash here. The salt comes first, so
+/// no attacker-controlled prefix can position itself ahead of it.
+fn entry_tag(salt: &[u8; SALT_LEN], key: &str, body: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(salt);
+    hasher.update([0]);
+    hasher.update(key.as_bytes());
+    hasher.update([0]);
+    hasher.update(body);
+    hex(&hasher.finalize())
+}
+
 /// Hex SHA-256 of the rules hash and the path scope, NUL-separated so no pair
 /// of inputs can be concatenated into another pair's bytes.
 fn scope_hash(rules_hash: &str, path_scope: &str) -> String {
@@ -539,6 +1055,10 @@ mod tests {
             path: "src/a.rs".to_string(),
             line,
             column,
+            // The fixture is ASCII, so the two columns coincide. A restored
+            // finding recomputes this, and comparing it against the original
+            // is what proves the recomputation agrees with the engine.
+            column_utf16: column,
             matched: matched.to_string(),
             fingerprint: "ff".to_string(),
         }
@@ -823,8 +1343,11 @@ mod tests {
         assert!(names[0].ends_with(".json"));
     }
 
+    /// The body an entry stores is a pure function of what was cached: two
+    /// caches record the same result the same way. Only the tag differs, and it
+    /// has to - it is what ties the entry to the directory it lives in.
     #[test]
-    fn stored_bytes_are_identical_across_puts() {
+    fn stored_bodies_are_identical_across_puts_and_tags_are_not() {
         let dir_a = tempdir();
         let dir_b = tempdir();
         let hash = hash();
@@ -835,8 +1358,15 @@ mod tests {
         b.put(&hash, &entry());
 
         let left = fs::read(a.entry_path(&hash).unwrap()).unwrap();
-        let right = fs::read(b.entry_path(&hash).unwrap()).unwrap();
-        assert_eq!(left, right);
+        assert_eq!(
+            read_entry(&a, &hash).body_bytes(),
+            read_entry(&b, &hash).body_bytes()
+        );
+        assert_ne!(
+            read_entry(&a, &hash).tag,
+            read_entry(&b, &hash).tag,
+            "two directories must not authenticate each other's entries"
+        );
         assert_eq!(left.last(), Some(&b'\n'));
 
         // Rewriting the same entry reproduces the same bytes.
@@ -1108,6 +1638,409 @@ mod tests {
         assert_eq!(probe(b"{ \"version\": \"1.2.3\" }"), None, "not our shape");
         assert_eq!(probe(b"{\"version\":\"1.2\\\"3\"}"), None, "escaped quote");
         assert_eq!(probe(b""), None);
+    }
+
+    /// The entry as it sits on disk.
+    fn read_entry(cache: &Cache, content_hash: &str) -> StoredEntry {
+        let path = cache.entry_path(content_hash).unwrap();
+        serde_json::from_slice(&fs::read(path).unwrap()).unwrap()
+    }
+
+    /// Rewrite an entry the way an attacker with a text editor would: change
+    /// the body, leave the tag alone.
+    fn tamper(cache: &Cache, content_hash: &str, edit: impl FnOnce(&mut StoredEntry)) {
+        let mut stored = read_entry(cache, content_hash);
+        edit(&mut stored);
+        let path = cache.entry_path(content_hash).unwrap();
+        fs::write(path, serde_json::to_vec(&stored).unwrap()).unwrap();
+    }
+
+    /// Rewrite an entry the way this build would: change the body and re-tag it
+    /// with the salt that is actually in the directory.
+    fn retag(cache: &Cache, content_hash: &str, edit: impl FnOnce(&mut StoredEntry)) {
+        let mut stored = read_entry(cache, content_hash);
+        edit(&mut stored);
+        let salt = resolve_salt(cache.root(), false).expect("a written cache has a salt");
+        stored.tag = entry_tag(
+            &salt,
+            &cache.entry_key(content_hash),
+            &stored.body_bytes().unwrap(),
+        );
+        let path = cache.entry_path(content_hash).unwrap();
+        fs::write(path, serde_json::to_vec(&stored).unwrap()).unwrap();
+    }
+
+    /// Where this platform keeps a salt's bytes, which is not always the file
+    /// named [`SALT_NAME`] - see [`salt_file`].
+    fn salt_path(cache: &Cache) -> PathBuf {
+        salt_file(cache.root()).expect("this platform trusts no salt at all")
+    }
+
+    /// Put `text` in the salt file with the permissions this build writes, so a
+    /// test about the salt's contents is not quietly decided by its mode.
+    fn write_salt(cache: &Cache, text: &str) {
+        let path = salt_path(cache);
+        fs::write(&path, text).unwrap();
+        set_owner_only(&path);
+    }
+
+    fn set_owner_only(path: &Path) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            fs::set_permissions(path, fs::Permissions::from_mode(SALT_MODE)).unwrap();
+        }
+        #[cfg(not(unix))]
+        let _ = path;
+    }
+
+    /// The shipped defect, at this layer: an entry that says the file is clean
+    /// is believed, and the credential in it is never reported. Editing the
+    /// findings out of an entry must cost the attacker the entry.
+    #[test]
+    fn an_entry_whose_body_was_edited_is_a_miss() {
+        let dir = tempdir();
+        let cache = Cache::open(dir.path(), &ruleset("a"), &PathScope::ScanRoot);
+        let hash = hash();
+        cache.put(&hash, &entry());
+        assert!(cache.get(&hash, &content()).is_some(), "warm to begin with");
+
+        // The exact edit from the report: the findings are emptied out.
+        tamper(&cache, &hash, |stored| stored.findings.clear());
+        assert!(
+            cache.get(&hash, &content()).is_none(),
+            "an emptied entry was served, so the credential goes unreported"
+        );
+
+        // Every other edit to the body lands the same way.
+        type Edit = Box<dyn FnOnce(&mut StoredEntry)>;
+        let cases: Vec<Edit> = vec![
+            Box::new(|stored: &mut StoredEntry| stored.findings.truncate(1)),
+            Box::new(|stored: &mut StoredEntry| stored.findings[0].severity = Severity::Info),
+            Box::new(|stored: &mut StoredEntry| stored.findings[0].matched_len = 1),
+            Box::new(|stored: &mut StoredEntry| stored.findings[0].fingerprint = "00".to_string()),
+            Box::new(|stored: &mut StoredEntry| stored.tag = String::new()),
+            Box::new(|stored: &mut StoredEntry| stored.tag.insert(0, 'a')),
+        ];
+        for edit in cases {
+            cache.put(&hash, &entry());
+            assert!(cache.get(&hash, &content()).is_some());
+            tamper(&cache, &hash, edit);
+            assert!(cache.get(&hash, &content()).is_none());
+        }
+    }
+
+    /// An entry written by another checkout is not this checkout's to believe,
+    /// whether or not the salt travelled with it. The second half is the
+    /// committed-cache attack: `.siloscan` is checked in wholesale, salt
+    /// included, and cloned somewhere else.
+    #[test]
+    fn an_entry_from_another_cache_directory_is_a_miss() {
+        let hash = hash();
+        let theirs_dir = tempdir();
+        let mine_dir = tempdir();
+        let theirs = Cache::open(theirs_dir.path(), &ruleset("a"), &PathScope::ScanRoot);
+        let mine = Cache::open(mine_dir.path(), &ruleset("a"), &PathScope::ScanRoot);
+
+        theirs.put(&hash, &entry());
+        let source = theirs.entry_path(&hash).unwrap();
+        let target = mine.entry_path(&hash).unwrap();
+        fs::create_dir_all(target.parent().unwrap()).unwrap();
+        fs::copy(&source, &target).unwrap();
+
+        assert!(
+            mine.get(&hash, &content()).is_none(),
+            "a foreign entry was served"
+        );
+
+        // Now with the salt as well, as a committed `.siloscan/cache` would
+        // arrive. A fresh instance is used because the first one has already
+        // resolved this directory as saltless.
+        fs::copy(salt_path(&theirs), salt_path(&mine)).unwrap();
+        set_owner_only(&salt_path(&mine));
+        let mine = Cache::open(mine_dir.path(), &ruleset("a"), &PathScope::ScanRoot);
+        assert!(
+            mine.get(&hash, &content()).is_none(),
+            "a cache committed with its salt was served to a different checkout"
+        );
+
+        // The directory it was written in still reads it.
+        assert!(theirs.get(&hash, &content()).is_some());
+    }
+
+    /// Warm caches still have to be warm, and a hit has to be the stored entry
+    /// rather than a coincidence. The message here is one no engine produces:
+    /// seeing it back proves the value came off the disk.
+    #[test]
+    fn a_legitimate_entry_is_a_hit_across_cache_instances() {
+        let dir = tempdir();
+        let hash = hash();
+        let first = Cache::open(dir.path(), &ruleset("a"), &PathScope::ScanRoot);
+        first.put(&hash, &entry());
+
+        retag(&first, &hash, |stored| {
+            stored.findings[0].message = "served from the cache".to_string();
+        });
+
+        // A second instance reads the salt back off the disk, which is what the
+        // next run of the binary does.
+        let second = Cache::open(dir.path(), &ruleset("a"), &PathScope::ScanRoot);
+        let hit = second
+            .get(&hash, &content())
+            .expect("a warm entry is a hit");
+        assert_eq!(hit.findings[0].message, "served from the cache");
+        assert_eq!(hit.findings[0].matched, SECRET, "match text is recovered");
+        assert_eq!(hit.findings.len(), 2);
+    }
+
+    /// No salt, an unreadable salt, or one that is not a salt: all of them are
+    /// a cold cache. None of them is an error, and none of them removes an
+    /// entry - a salt that comes back is a cache that comes back.
+    #[test]
+    fn a_missing_or_unusable_salt_is_a_cold_cache() {
+        let dir = tempdir();
+        let hash = hash();
+        let cache = Cache::open(dir.path(), &ruleset("a"), &PathScope::ScanRoot);
+        cache.put(&hash, &entry());
+        let good = fs::read_to_string(salt_path(&cache)).unwrap();
+        let entry_bytes = fs::read(cache.entry_path(&hash).unwrap()).unwrap();
+
+        for salt in [
+            None,
+            Some(String::new()),
+            Some("not hex at all\n".to_string()),
+            Some("ab\n".to_string()),
+            Some(format!("{}\n", "zz".repeat(SALT_LEN))),
+            Some(format!("{}\n", "ab".repeat(SALT_LEN + 1))),
+        ] {
+            match &salt {
+                Some(text) => write_salt(&cache, text),
+                None => fs::remove_file(salt_path(&cache)).unwrap(),
+            }
+
+            let cold = Cache::open(dir.path(), &ruleset("a"), &PathScope::ScanRoot);
+            assert!(cold.get(&hash, &content()).is_none(), "salt {salt:?}");
+            // Repeated misses stay misses and stay quiet.
+            assert!(cold.get(&hash, &content()).is_none(), "salt {salt:?}");
+            assert_eq!(
+                fs::read(cache.entry_path(&hash).unwrap()).unwrap(),
+                entry_bytes,
+                "a rejected entry must not be disturbed"
+            );
+        }
+
+        write_salt(&cache, &good);
+        let warm = Cache::open(dir.path(), &ruleset("a"), &PathScope::ScanRoot);
+        assert!(warm.get(&hash, &content()).is_some());
+    }
+
+    /// A cache directory with a salt this build will not use writes no entries
+    /// either: an entry it could not read back is not worth the bytes.
+    #[test]
+    fn an_unusable_salt_is_not_replaced_and_stops_writes() {
+        let dir = tempdir();
+        let hash = hash();
+        let cache = Cache::open(dir.path(), &ruleset("a"), &PathScope::ScanRoot);
+        cache.put(&hash, &entry());
+
+        let foreign = "not a salt\n";
+        write_salt(&cache, foreign);
+        fs::remove_file(cache.entry_path(&hash).unwrap()).unwrap();
+
+        let cache = Cache::open(dir.path(), &ruleset("a"), &PathScope::ScanRoot);
+        cache.put(&hash, &entry());
+        assert!(
+            !cache.entry_path(&hash).unwrap().exists(),
+            "an entry was written that could never be read back"
+        );
+        assert_eq!(
+            fs::read_to_string(salt_path(&cache)).unwrap(),
+            foreign,
+            "a salt this build did not write must not be overwritten"
+        );
+    }
+
+    #[test]
+    fn the_salt_is_written_once_and_is_random() {
+        let dir_a = tempdir();
+        let dir_b = tempdir();
+        let a = Cache::open(dir_a.path(), &ruleset("a"), &PathScope::ScanRoot);
+        let b = Cache::open(dir_b.path(), &ruleset("a"), &PathScope::ScanRoot);
+
+        a.put(&hash(), &entry());
+        let written = fs::read_to_string(salt_path(&a)).unwrap();
+        assert_eq!(written.trim().len(), SALT_LEN * 2);
+        assert!(unhex(written.trim()).is_some());
+
+        // Writing more entries does not rewrite it.
+        a.put(&content_hash(b"other"), &entry());
+        assert_eq!(fs::read_to_string(salt_path(&a)).unwrap(), written);
+
+        b.put(&hash(), &entry());
+        assert_ne!(
+            fs::read_to_string(salt_path(&b)).unwrap(),
+            written,
+            "two caches must not share a salt"
+        );
+    }
+
+    /// A scan of a tree with no cache still creates nothing, salt included.
+    #[test]
+    fn no_salt_is_created_by_reading() {
+        let dir = tempdir();
+        let cache = Cache::open(dir.path(), &ruleset("a"), &PathScope::ScanRoot);
+        assert!(cache.get(&hash(), &content()).is_none());
+        assert!(!cache.root().exists());
+        assert!(!salt_path(&cache).exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_salt_is_owner_only_and_a_wider_one_is_ignored() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempdir();
+        let hash = hash();
+        let cache = Cache::open(dir.path(), &ruleset("a"), &PathScope::ScanRoot);
+        cache.put(&hash, &entry());
+
+        let mode = fs::metadata(salt_path(&cache))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, SALT_MODE, "salt mode {:o}", mode & 0o777);
+
+        // A checkout produces a group- or world-readable file, which is the
+        // signal that this salt arrived with the tree rather than being written
+        // here.
+        for wider in [0o644, 0o640, 0o604, 0o666] {
+            fs::set_permissions(salt_path(&cache), fs::Permissions::from_mode(wider)).unwrap();
+            let cache = Cache::open(dir.path(), &ruleset("a"), &PathScope::ScanRoot);
+            assert!(
+                cache.get(&hash, &content()).is_none(),
+                "a {wider:o} salt was trusted"
+            );
+        }
+
+        fs::set_permissions(salt_path(&cache), fs::Permissions::from_mode(SALT_MODE)).unwrap();
+        let cache = Cache::open(dir.path(), &ruleset("a"), &PathScope::ScanRoot);
+        assert!(cache.get(&hash, &content()).is_some());
+    }
+
+    /// A salt this build cannot use is not a permanent dead end. Rejecting it
+    /// and never replacing it left the cache cold on every scan, forever, with
+    /// no diagnostic - the exclusive create could not overwrite the file and the
+    /// mode check could not accept it.
+    #[cfg(unix)]
+    #[test]
+    fn a_foreign_salt_is_replaced_and_the_cache_warms_again() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempdir();
+        let hash = hash();
+        let cache = Cache::open(dir.path(), &ruleset("a"), &PathScope::ScanRoot);
+        cache.put(&hash, &entry());
+
+        let path = salt_path(&cache);
+        let before = fs::read_to_string(&path).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+
+        // The entries under the old salt are misses, as they must be: nothing
+        // here starts trusting a salt it rejected.
+        let reopened = Cache::open(dir.path(), &ruleset("a"), &PathScope::ScanRoot);
+        assert!(reopened.get(&hash, &content()).is_none());
+
+        // The next write replaces the salt rather than giving up on it.
+        reopened.put(&hash, &entry());
+        let after = fs::read_to_string(&path).unwrap();
+        assert_ne!(after, before, "the rejected salt must not survive");
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            SALT_MODE
+        );
+
+        let warm = Cache::open(dir.path(), &ruleset("a"), &PathScope::ScanRoot);
+        assert!(
+            warm.get(&hash, &content()).is_some(),
+            "the cache must work again once the salt is this build's"
+        );
+    }
+
+    /// Moving a checkout is not tampering, but the entries were authenticated
+    /// where they were written, so the move costs a cold scan and nothing else.
+    #[test]
+    fn a_relocated_cache_is_a_cold_cache() {
+        let dir = tempdir();
+        let hash = hash();
+        let from = dir.path().join("before");
+        let to = dir.path().join("after");
+        fs::create_dir_all(&from).unwrap();
+
+        let cache = Cache::open(&from, &ruleset("a"), &PathScope::ScanRoot);
+        cache.put(&hash, &entry());
+        assert!(cache.get(&hash, &content()).is_some());
+
+        fs::rename(&from, &to).unwrap();
+        let moved = Cache::open(&to, &ruleset("a"), &PathScope::ScanRoot);
+        assert!(moved.get(&hash, &content()).is_none());
+
+        // And it warms right back up where it now lives.
+        moved.put(&hash, &entry());
+        let reopened = Cache::open(&to, &ruleset("a"), &PathScope::ScanRoot);
+        assert!(reopened.get(&hash, &content()).is_some());
+    }
+
+    #[test]
+    fn the_tag_covers_the_key_as_well_as_the_body() {
+        let dir = tempdir();
+        let cache = Cache::open(dir.path(), &ruleset("a"), &PathScope::ScanRoot);
+        cache.put(&hash(), &entry());
+        let salt = resolve_salt(cache.root(), false).unwrap();
+        let body = read_entry(&cache, &hash()).body_bytes().unwrap();
+
+        let tag = entry_tag(&salt, &cache.entry_key(&hash()), &body);
+        assert_eq!(tag, read_entry(&cache, &hash()).tag);
+        assert_eq!(tag.len(), 64);
+        assert_ne!(
+            tag,
+            entry_tag(&salt, &cache.entry_key(&content_hash(b"other")), &body),
+            "the tag must not travel between keys"
+        );
+        assert_ne!(
+            tag,
+            entry_tag(&[0u8; SALT_LEN], &cache.entry_key(&hash()), &body),
+            "the tag must not survive a different salt"
+        );
+    }
+
+    /// A salt is only as good as the randomness behind it: one derived from the
+    /// process id, the clock and the directory path is reproducible by anyone
+    /// who knows roughly when and where the cache was created, and reproducing
+    /// the salt is forging the entries.
+    #[test]
+    fn salt_bytes_come_from_a_live_random_source() {
+        let first = os_random_bytes();
+        let second = os_random_bytes();
+
+        assert_ne!(first, second, "the random source repeated itself");
+        assert_ne!(first, [0u8; SALT_LEN], "the random source produced nothing");
+
+        // And the salt for one fixed directory is not a function of that
+        // directory.
+        let root = Path::new("/fixed/cache/directory");
+        assert_ne!(generate_salt(root), generate_salt(root));
+    }
+
+    #[test]
+    fn unhex_accepts_exactly_one_salt() {
+        assert_eq!(unhex(&"00".repeat(SALT_LEN)), Some([0u8; SALT_LEN]));
+        assert_eq!(unhex(&"ff".repeat(SALT_LEN)), Some([0xffu8; SALT_LEN]));
+        assert_eq!(unhex(&"AB".repeat(SALT_LEN)), Some([0xabu8; SALT_LEN]));
+        assert_eq!(unhex(""), None);
+        assert_eq!(unhex(&"ab".repeat(SALT_LEN - 1)), None);
+        assert_eq!(unhex(&"ab".repeat(SALT_LEN + 1)), None);
+        assert_eq!(unhex(&"zz".repeat(SALT_LEN)), None);
+        assert_eq!(unhex(&format!("+1{}", "ab".repeat(SALT_LEN - 1))), None);
     }
 
     #[test]
