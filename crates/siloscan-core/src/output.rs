@@ -62,6 +62,23 @@ pub struct JsonReport<'a> {
     /// report, so a consumer resolves finding paths, skipped-file paths and
     /// metrics file keys the same way.
     pub anchor: Anchor,
+    /// How much of the tree an ignore file kept out of the scan, as
+    /// `{"files": N, "directories": N}`.
+    ///
+    /// The machine-readable half of the same statement the human listing makes:
+    /// a report with no findings and a non-zero count here is not a clean tree,
+    /// it is a tree the scan did not fully look at. A gate reading this report
+    /// can tell the two apart; without it, it cannot.
+    ///
+    /// Counted honestly and coarsely. An excluded directory counts as one, and
+    /// its contents are not walked and so are counted nowhere - `directories:
+    /// 1` may stand for a single empty folder or for a `node_modules` with
+    /// forty thousand files under it. It answers "was anything held back", not
+    /// "how much".
+    ///
+    /// Appended to the object, so this is an additive change: schema 1.2
+    /// readers that do not know the field parse a 1.2 report exactly as before.
+    pub ignored: crate::walk::Ignored,
 }
 
 /// Render the machine-readable report. `anchor` is the path convention the
@@ -84,6 +101,7 @@ pub fn to_json(report: &crate::scan::ScanReport, rules: &RuleSet, anchor: Anchor
         schema_version: SCHEMA_VERSION,
         metrics: &report.metrics,
         anchor,
+        ignored: report.ignored,
     };
     serde_json::to_string_pretty(&json_report).unwrap() // serialization cannot fail
 }
@@ -200,6 +218,7 @@ rules:
             baselined: vec![],
             suppressed: vec![],
             skipped: vec![],
+            ignored: Default::default(),
             graph: Default::default(),
             boundary_edges: Vec::new(),
             metrics,
@@ -249,6 +268,7 @@ rules:
             path: "src/main.rs".to_string(),
             line: 1,
             column: 1,
+            column_utf16: 1,
             matched: "test".to_string(),
             fingerprint: "abc123".to_string(),
         };
@@ -270,6 +290,7 @@ rules:
             path: "src/main.rs".to_string(),
             line: 5,
             column: 10,
+            column_utf16: 10,
             matched: "match".to_string(),
             fingerprint: "def456".to_string(),
         };
@@ -298,6 +319,7 @@ rules:
             path: "src/main.rs".to_string(),
             line: 7,
             column: 13,
+            column_utf16: 13,
             matched: SECRET.to_string(),
             fingerprint: fingerprint("secret.aws-key", "src/main.rs", SECRET, 0),
         }
@@ -311,6 +333,7 @@ rules:
             path: "src/main.rs".to_string(),
             line: 2,
             column: 4,
+            column_utf16: 4,
             matched: "needle".to_string(),
             fingerprint: fingerprint("style.needle", "src/main.rs", "needle", 0),
         }
@@ -383,6 +406,7 @@ rules:
             path: "src/main.rs".to_string(),
             line: 1,
             column: 1,
+            column_utf16: 1,
             matched: "20 duplicated lines (block 0123456789ab)".to_string(),
             fingerprint: "ff".to_string(),
         };

@@ -144,6 +144,7 @@ pub fn scan_graph(
                         path: path.clone(),
                         line: import.line,
                         column: import.column,
+                        column_utf16: import.column_utf16,
                         matched: import.raw.clone(),
                         fingerprint: fingerprint(&rule.id, path, &import.raw, occurrence),
                     },
@@ -518,6 +519,7 @@ mod tests {
                     raw: (*raw).to_string(),
                     line: *line,
                     column: *column,
+                    column_utf16: *column,
                 })
                 .collect(),
             decls: Vec::new(),

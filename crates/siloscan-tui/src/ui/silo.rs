@@ -503,6 +503,7 @@ mod tests {
             path: path.to_string(),
             line,
             column: 1,
+            column_utf16: 1,
             matched: matched.to_string(),
             fingerprint: format!("{path}:{line}"),
         }

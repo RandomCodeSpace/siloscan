@@ -202,6 +202,7 @@ mod tests {
             path: path.to_string(),
             line: 1,
             column: 1,
+            column_utf16: 1,
             matched: "matched".to_string(),
             fingerprint: fingerprint.to_string(),
         }

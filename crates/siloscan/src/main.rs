@@ -44,6 +44,12 @@ use siloscan_core::{cache, default_pack, output, output_sarif};
         .git/info/exclude are not consulted, so two checkouts of the same tree \
         scan the same way. The --respect-* flags opt each of those sources back \
         in.\n\n\
+        A scan that cannot be evaluated exits 2 rather than 0, because an empty \
+        report is indistinguishable from a clean tree: loading no rules at all, \
+        or loading a gate whose input is missing (a coverage rule with no \
+        --coverage-report, a boundary rule with no [silos]), is refused and \
+        names what was missing. Human output escapes control characters as \
+        \\xNN and Unicode bidi controls as \\u{XXXX}.\n\n\
         Subcommands take their own PATH and their own flags, and cannot be \
         combined with the scan options above them.",
     version,
@@ -151,7 +157,8 @@ struct ScanArgs {
     #[arg(long, value_name = "DIR")]
     rules: Vec<PathBuf>,
 
-    /// Do not load the built-in rule pack
+    /// Do not load the built-in rule pack (a run that ends up with no rules at
+    /// all checks nothing and is refused with exit 2)
     #[arg(long)]
     no_default_rules: bool,
 
@@ -168,11 +175,15 @@ struct ScanArgs {
     #[arg(long, value_name = "FILE")]
     baseline: Option<PathBuf>,
 
-    /// Repository config (defaults to the nearest `siloscan.toml` at or above PATH)
+    /// Repository config (defaults to the nearest `siloscan.toml` at PATH, or
+    /// above it only when a `.git` marker exists at or above PATH; pass this
+    /// explicitly for an exported tree that has none)
     #[arg(long, value_name = "FILE")]
     config: Option<PathBuf>,
 
-    /// Coverage report to feed coverage rules (lcov or cobertura)
+    /// Coverage report to feed coverage rules (lcov or cobertura); required
+    /// when any coverage rule is loaded, since a gate with no input reports
+    /// nothing and would read as a pass
     #[arg(long, value_name = "FILE")]
     coverage_report: Option<PathBuf>,
 
@@ -194,15 +205,20 @@ struct BaselineArgs {
     #[arg(long, value_name = "DIR")]
     rules: Vec<PathBuf>,
 
-    /// Do not load the built-in rule pack
+    /// Do not load the built-in rule pack (a run that ends up with no rules at
+    /// all checks nothing and is refused with exit 2)
     #[arg(long)]
     no_default_rules: bool,
 
-    /// Repository config (defaults to the nearest `siloscan.toml` at or above PATH)
+    /// Repository config (defaults to the nearest `siloscan.toml` at PATH, or
+    /// above it only when a `.git` marker exists at or above PATH; pass this
+    /// explicitly for an exported tree that has none)
     #[arg(long, value_name = "FILE")]
     config: Option<PathBuf>,
 
-    /// Coverage report to feed coverage rules (lcov or cobertura)
+    /// Coverage report to feed coverage rules (lcov or cobertura); required
+    /// when any coverage rule is loaded, since a gate with no input reports
+    /// nothing and would read as a pass
     #[arg(long, value_name = "FILE")]
     coverage_report: Option<PathBuf>,
 
@@ -223,7 +239,8 @@ struct TestArgs {
     #[arg(long, value_name = "DIR")]
     rules: Vec<PathBuf>,
 
-    /// Do not load the built-in rule pack
+    /// Do not load the built-in rule pack (a run that ends up with no rules at
+    /// all checks nothing and is refused with exit 2)
     #[arg(long)]
     no_default_rules: bool,
 }
@@ -279,7 +296,9 @@ fn run_cache_prune(args: CacheArgs) {
     require_root(&args.path);
     let removed = cache::prune(&state_root(&args.path));
     let plural = if removed == 1 { "entry" } else { "entries" };
-    println!("pruned {removed} cache {plural}");
+    let mut out = io::stdout().lock();
+    emit(&mut out, format_args!("pruned {removed} cache {plural}"));
+    let _ = out.flush();
 }
 
 /// Parses the command line, and turns the one conflict this CLI declares into a
@@ -302,7 +321,7 @@ fn parse_cli() -> Cli {
             // too, and there the path is not the problem - the scan option in
             // front of the subcommand is. Clap has already named the arguments
             // it refused, so this says what the rule is and what the shape is.
-            eprintln!(
+            emit_err(format_args!(
                 "\nA subcommand comes first and carries its own path and flags:\n\
                  \x20 {bin} baseline <PATH>\n\
                  \x20 {bin} test <PATH>\n\
@@ -310,7 +329,7 @@ fn parse_cli() -> Cli {
                  Scan options and the top-level PATH belong to a scan and cannot \
                  precede a subcommand.\n\
                  Run `{bin} <COMMAND> --help` for what each subcommand accepts."
-            );
+            ));
             process::exit(2);
         }
         // Help, version and every other parse failure keep clap's own reporting
@@ -394,6 +413,14 @@ fn run_scan(args: ScanArgs) {
                         report.suppressed.len()
                     ),
                 );
+            }
+            // Where the scan did not look, said out loud. A tree whose only
+            // credential sits behind a `.gitignore` line prints "0 findings"
+            // either way; this is the line that stops that reading as "clean".
+            // Scanner-generated wording and two integers - no scanned text - so
+            // it needs no `safe()`.
+            if let Some(line) = report.ignored.summary_line() {
+                emit(&mut out, format_args!("{line}"));
             }
             emit(
                 &mut out,
@@ -711,7 +738,7 @@ fn load_coverage(path: Option<&Path>) -> Result<Option<CoverageReport>, String> 
 }
 
 /// Validates the scan root and loads the built-in pack plus every `--rules`
-/// directory. Any failure here is exit 2.
+/// directory. Any failure here is exit 2, and so is loading nothing.
 fn load_rules(root: &Path, dirs: &[PathBuf], no_default_rules: bool) -> RuleSet {
     require_root(root);
 
@@ -749,7 +776,44 @@ fn load_rules(root: &Path, dirs: &[PathBuf], no_default_rules: bool) -> RuleSet 
         }
     }
 
+    if rules.is_empty() {
+        fail(&no_rules_message(dirs, no_default_rules));
+    }
+
     RuleSet { rules, sources }
+}
+
+/// Why a run that loaded nothing is exit 2 rather than a clean scan.
+///
+/// A scan with no rules cannot report a finding, so it exits 0 having proven
+/// nothing, and every later run does the same: a `--rules` path with a typo in
+/// it, a rule directory that never made it into the container, a config naming a
+/// directory that moved, all of them read as a passing gate forever. A gate that
+/// could not evaluate has to fail.
+///
+/// The message names every directory that was searched and says whether the
+/// built-in pack was in play, because those are the two things the user has to
+/// look at and the difference between "my path is wrong" and "I disabled the
+/// pack and forgot the replacement". Directory names come from the command line
+/// or from a config inside the scanned tree, so they are quoted through [`fail`]
+/// like any other scanned text - which is also why this stays one line.
+fn no_rules_message(dirs: &[PathBuf], no_default_rules: bool) -> String {
+    let searched = if dirs.is_empty() {
+        "no rule directories were given".to_string()
+    } else {
+        let list = dirs
+            .iter()
+            .map(|dir| dir.display().to_string())
+            .collect::<Vec<String>>()
+            .join(", ");
+        format!("searched: {list}")
+    };
+    let pack = if no_default_rules {
+        "the built-in pack is disabled by --no-default-rules"
+    } else {
+        "the built-in pack loaded no rules"
+    };
+    format!("error: no rules loaded, so nothing would be checked: {pack}; {searched}")
 }
 
 /// An explicit `--baseline` file must exist; the default location is optional.
@@ -797,6 +861,25 @@ fn emit(out: &mut impl Write, args: std::fmt::Arguments) {
     let _ = writeln!(out, "{args}");
 }
 
+/// The same for stderr, and for the same reason.
+///
+/// `eprintln!` panics on a closed stderr exactly as `println!` does on a closed
+/// stdout, and the panic exits 101 - a code this CLI does not promise and CI
+/// cannot interpret. That was survivable while stderr was almost always empty;
+/// a scan now reports every file it skipped, so the write happens on ordinary
+/// runs and `siloscan . 2>&1 | head` was reaching it. Every stderr write in this
+/// binary goes through here: the skip warnings, the exit-2 messages and the
+/// subcommand usage note. Clap's own errors do not, because clap already
+/// swallows the broken pipe itself.
+///
+/// The lock is taken per line rather than held, since the callers are a handful
+/// of lines each and one of them ends the process.
+fn emit_err(args: std::fmt::Arguments) {
+    let mut err = io::stderr().lock();
+    let _ = writeln!(err, "{args}");
+    let _ = err.flush();
+}
+
 /// Individual `warning: skipped` lines before the rest are counted instead.
 ///
 /// One line per skipped file is right for a source tree and wrong for an asset
@@ -813,20 +896,20 @@ const MAX_SKIP_WARNINGS: usize = 10;
 /// the human channel and is allowed to summarise.
 fn warn_skipped(skipped: &[scan::SkippedFile]) {
     for entry in skipped.iter().take(MAX_SKIP_WARNINGS) {
-        eprintln!(
+        emit_err(format_args!(
             "warning: skipped {}: {}",
             safe(&entry.path),
             safe(&entry.reason)
-        );
+        ));
     }
     if let Some(rest) = skipped
         .len()
         .checked_sub(MAX_SKIP_WARNINGS)
         .filter(|n| *n > 0)
     {
-        eprintln!(
+        emit_err(format_args!(
             "warning: ... and {rest} more files skipped (see --format json for the full list)"
-        );
+        ));
     }
 }
 
@@ -834,7 +917,7 @@ fn warn_skipped(skipped: &[scan::SkippedFile]) {
 /// path or a rule file, so the sanitising happens here once rather than at
 /// twenty call sites.
 fn fail(message: &str) -> ! {
-    eprintln!("{}", safe(message));
+    emit_err(format_args!("{}", safe(message)));
     process::exit(2);
 }
 
@@ -853,6 +936,16 @@ rules:
     boundary:
       from: api
       deny: [\"db\"]
+";
+
+    const SIMPLE_RULE: &str = "\
+version: 1
+rules:
+  - id: test.needle
+    severity: error
+    message: m
+    regex:
+      pattern: 'needle'
 ";
 
     fn tempdir() -> tempfile::TempDir {
@@ -1226,6 +1319,53 @@ rules:
             "{rendered:?}"
         );
         assert!(rendered.contains("plain text"));
+    }
+
+    /// The exit-2 message for a run that loaded nothing has to name both halves
+    /// of the mistake, and has to survive `fail`, which renders it through
+    /// [`safe`]: a newline in it would print as `\x0a` instead of breaking the
+    /// line.
+    #[test]
+    fn the_no_rules_error_names_what_was_searched() {
+        let none = no_rules_message(&[], true);
+        assert!(none.starts_with("error: "), "{none}");
+        assert!(none.contains("no rules loaded"), "{none}");
+        assert!(none.contains("--no-default-rules"), "{none}");
+        assert!(none.contains("no rule directories were given"), "{none}");
+
+        let dirs = no_rules_message(&[PathBuf::from("rules/a"), PathBuf::from("rules/b")], true);
+        assert!(dirs.contains("searched: rules/a, rules/b"), "{dirs}");
+
+        let pack = no_rules_message(&[], false);
+        assert!(pack.contains("built-in pack loaded no rules"), "{pack}");
+
+        for message in [none, dirs, pack] {
+            assert!(!message.contains('\n'), "{message}");
+            assert_eq!(safe(&message), message);
+        }
+    }
+
+    /// The rule sets that are allowed through: the built-in pack on its own, and
+    /// `--no-default-rules` with a directory that actually holds a rule. Neither
+    /// of these may become collateral of rejecting the empty set.
+    #[test]
+    fn a_non_empty_rule_set_still_loads() {
+        let dir = tempdir();
+        write(dir.path(), "rules/needle.yaml", SIMPLE_RULE);
+
+        let only_dir = load_rules(dir.path(), &[dir.path().join("rules")], true);
+        assert_eq!(only_dir.rules.len(), 1);
+        assert_eq!(only_dir.rules[0].id, "test.needle");
+        assert_eq!(only_dir.sources.len(), 1);
+
+        let pack_only = load_rules(dir.path(), &[], false);
+        assert!(
+            !pack_only.rules.is_empty(),
+            "the built-in pack is not empty"
+        );
+
+        let both = load_rules(dir.path(), &[dir.path().join("rules")], false);
+        assert_eq!(both.rules.len(), pack_only.rules.len() + 1);
     }
 
     #[test]

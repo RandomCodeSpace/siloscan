@@ -248,6 +248,7 @@ mod tests {
             path: path.to_string(),
             line,
             column,
+            column_utf16: column,
             matched: "needle".to_string(),
             fingerprint: format!("{rule_id}:{path}:{line}:{column}"),
         }
@@ -279,6 +280,7 @@ mod tests {
                 path: "blob.bin".to_string(),
                 reason: "binary".to_string(),
             }],
+            ignored: Default::default(),
             graph: Default::default(),
             boundary_edges: Vec::new(),
             metrics: Default::default(),
@@ -360,6 +362,7 @@ mod tests {
                 baselined: Vec::new(),
                 suppressed: Vec::new(),
                 skipped: Vec::new(),
+                ignored: Default::default(),
                 graph: Default::default(),
                 boundary_edges: Vec::new(),
                 metrics: Default::default(),

@@ -218,7 +218,10 @@ fn finding(rule: &CompiledRule, path: &str, matched: String, identity: &str) -> 
         message: rule.message.clone(),
         path: path.to_string(),
         line: 1,
+        // A duplicated block is reported at the start of its file, so both
+        // columns are 1 and neither depends on the file's bytes.
         column: 1,
+        column_utf16: 1,
         matched,
         fingerprint: fingerprint(&rule.id, path, identity, 0),
     }

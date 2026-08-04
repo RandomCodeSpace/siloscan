@@ -4,6 +4,25 @@
 //! environment: no home-directory config, no environment variables. A scan of
 //! the same tree therefore resolves the same config on every machine.
 //!
+//! Discovery ascends from the scan root and stops at a repository boundary - a
+//! `.git` entry at or above the scan root - or at the filesystem root,
+//! whichever comes first. A `siloscan.toml` found above the scan root in a tree
+//! with no repository marker is *not* adopted: the ascent reaches the
+//! filesystem root, and what it found on the way is discarded rather than used.
+//!
+//! The consequence is worth stating plainly, because it is the difference
+//! between a scan that is configured and one that silently is not: an exported
+//! tarball, a `git archive` checkout, or any copy of a subtree without its
+//! `.git` scans with no config at all. Silos, source roots and the anchor are
+//! then undefined, and rules that need them are refused rather than quietly
+//! skipped. Pass `--config` explicitly for those trees.
+//!
+//! The boundary is deliberate. Without it, a config anywhere above a scan root
+//! (a stray file in `/tmp`, a home directory, a shared build agent's working
+//! directory) would reach into the scan and change what it looks at, and the
+//! same tree would scan differently depending on where it happened to be
+//! unpacked.
+//!
 //! A root config may pull in module-level configs with `include`. An included
 //! file contributes silos, source roots and rule directories and nothing else,
 //! and every path it declares is relative to the included file itself; `load`
@@ -224,6 +243,15 @@ pub fn load(path: &Path) -> Result<Config, String> {
 
     check_silo_names(config.silos.keys(), path)?;
 
+    // The tree being scanned is untrusted input, and its `siloscan.toml` is
+    // discovered and loaded without anyone naming it, so a path declared inside
+    // it may not point outside the config root: an absolute path or a `..`
+    // climb would read a directory the caller never pointed the scanner at and
+    // echo what it found there in load errors. The escape hatch is `--rules` on
+    // the command line, where the person typing the path chose it.
+    config.source_roots = contain(&config.source_roots, path, "source_roots")?;
+    config.rules = contain(&config.rules, path, "rules")?;
+
     if config.duplication.min_lines < 2 {
         return Err(format!(
             "{}: duplication.min_lines must be at least 2, got {}",
@@ -304,7 +332,12 @@ fn merge_include(
     merged: &mut Vec<PathBuf>,
 ) -> Result<(), String> {
     let prefix = include_prefix(root_path, entry)?;
-    let file = config.config_dir.join(entry);
+    let root_dir = config.config_dir.clone();
+    let file = root_dir.join(entry);
+    // The lexical guard in `include_prefix` is not the whole of it: a symlink
+    // inside the tree is a path with no `..` in it that still lands outside the
+    // config root. See `confine`.
+    confine(&root_dir, &file, root_path, "include", entry)?;
 
     if merged.contains(&file) {
         return Err(format!(
@@ -360,35 +393,145 @@ fn merge_include(
     }
 
     for source_root in &raw.source_roots {
-        config.source_roots.push(rebase(
+        config.source_roots.push(declared_path(
+            &root_dir,
             &prefix,
             source_root,
             &file,
-            "source root",
-            Rebased::Path,
+            "source_roots",
         )?);
     }
 
-    // Rule directories are filesystem paths rather than match patterns, so one
-    // outside the config root (a shared rule pack next to the repository) is
-    // legitimate and stays as a relative path with leading `..`.
+    // Rule directories are held to the same boundary as everything else a
+    // config declares. An included file is as much part of the untrusted tree
+    // as the root config is, so letting it name a directory outside the config
+    // root would leave the root guard bypassable by one `include` line.
     for dir in &raw.rules {
-        config.rules.push(rebase(
-            &prefix,
-            dir,
-            &file,
-            "rules directory",
-            Rebased::EscapingPath,
-        )?);
+        config
+            .rules
+            .push(declared_path(&root_dir, &prefix, dir, &file, "rules")?);
     }
 
     Ok(())
 }
 
+/// Resolve every entry of a path-valued key declared by the root config,
+/// confined to the config root.
+fn contain(entries: &[String], file: &Path, key: &str) -> Result<Vec<String>, String> {
+    let root_dir = config_dir_of(file);
+    entries
+        .iter()
+        .map(|entry| declared_path(&root_dir, &[], entry, file, key))
+        .collect()
+}
+
+/// One filesystem path declared inside a config file: resolved against
+/// `prefix`, and an error when it names anything outside the config root -
+/// lexically, and then again on the filesystem (see [`confine`]). `key` is the
+/// config key it came from, so the message points at the line to change.
+///
+/// `root_dir` is the root config's directory, which every rebased path is
+/// relative to; `file` is the config file that declared the entry, which is the
+/// one an error names.
+fn declared_path(
+    root_dir: &Path,
+    prefix: &[String],
+    rel: &str,
+    file: &Path,
+    key: &str,
+) -> Result<String, String> {
+    if is_rooted(rel) {
+        return Err(format!(
+            "{}: {key} {rel:?} must be a relative path inside the config root",
+            file.display()
+        ));
+    }
+    let rebased = rebase(prefix, rel, file, key, Rebased::Path)?;
+    confine(root_dir, &root_dir.join(&rebased), file, key, rel)?;
+    Ok(rebased)
+}
+
+/// Refuse a path that leaves the config root once the filesystem has its say.
+///
+/// [`rebase`] and [`include_prefix`] resolve `..` textually, which a symlink
+/// defeats: with `link -> ../outside` inside the tree, `rules = ["link"]` holds
+/// no `..` at all and still reads a directory the scanner was never pointed at.
+/// The symlink and the config that names it are both content of the untrusted
+/// tree, so this is the same attack the lexical guard exists to stop, one
+/// indirection later. The escape hatch stays `--rules` on the command line,
+/// where the person typing the path chose it.
+///
+/// Both sides are resolved to their deepest existing ancestor rather than
+/// canonicalised outright, because [`fs::canonicalize`] fails on a path that
+/// does not exist and a rule directory that is simply missing must still
+/// produce the missing-directory error the user can act on rather than a
+/// containment error that misnames the problem. Every component that exists is
+/// resolved, so a symlink anywhere along the path is followed and caught, and
+/// only a tail that exists nowhere is appended textually - a tail that reads
+/// nothing.
+///
+/// A config root that cannot be resolved is refused rather than waved through:
+/// containment that cannot be evaluated does not get to pass.
+fn confine(root_dir: &Path, path: &Path, file: &Path, key: &str, rel: &str) -> Result<(), String> {
+    let escaped = || {
+        format!(
+            "{}: {key} {rel:?} resolves outside the config root",
+            file.display()
+        )
+    };
+    let Some(root) = resolve_existing(root_dir) else {
+        return Err(escaped());
+    };
+    match resolve_existing(path) {
+        Some(resolved) if resolved.starts_with(&root) => Ok(()),
+        Some(_) => Err(escaped()),
+        // Nothing of the path exists, so it reads nothing and names nothing
+        // outside the root; whatever wanted it reports its own absence.
+        None => Ok(()),
+    }
+}
+
+/// `path` with every component that exists resolved through symlinks, and the
+/// non-existent tail appended as written.
+///
+/// `None` when not even the outermost component resolves, which for a path
+/// built on a config root that was just read from disk means the root itself
+/// went away.
+fn resolve_existing(path: &Path) -> Option<PathBuf> {
+    let mut base = path.to_path_buf();
+    let mut tail: Vec<std::ffi::OsString> = Vec::new();
+    loop {
+        if let Ok(mut resolved) = fs::canonicalize(&base) {
+            for name in tail.iter().rev() {
+                resolved.push(name);
+            }
+            return Some(resolved);
+        }
+        let name = base.file_name()?.to_os_string();
+        tail.push(name);
+        if !base.pop() {
+            return None;
+        }
+    }
+}
+
+/// True when an entry names a filesystem root rather than something below the
+/// config root: absolute on this platform, a leading separator in either
+/// spelling, or a Windows drive prefix. The last two are checked as text
+/// because a config written on one platform is read on every other, and a path
+/// that is absolute where it was written must not become a relative one here.
+fn is_rooted(rel: &str) -> bool {
+    if Path::new(rel).is_absolute() || rel.starts_with('/') || rel.starts_with('\\') {
+        return true;
+    }
+    let bytes = rel.as_bytes();
+    bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':'
+}
+
 /// The directory of an included file, as forward-slash path components
 /// relative to the root config directory.
 fn include_prefix(root_path: &Path, entry: &str) -> Result<Vec<String>, String> {
-    if Path::new(entry).is_absolute() {
+    if is_rooted(entry) {
         return Err(format!(
             "{}: include {entry:?} must be a relative path",
             root_path.display()
@@ -404,15 +547,19 @@ fn include_prefix(root_path: &Path, entry: &str) -> Result<Vec<String>, String> 
         ));
     }
 
+    // An included file lives inside the config root like everything else the
+    // config names. Reading one above it would pull an arbitrary TOML file from
+    // outside the scanned tree into the scan and quote it back in load errors.
     let mut parts: Vec<String> = Vec::new();
     for segment in segments {
         match segment {
             "" | "." => {}
             ".." => {
-                if parts.last().is_some_and(|last| last != "..") {
-                    parts.pop();
-                } else {
-                    parts.push("..".to_string());
+                if parts.pop().is_none() {
+                    return Err(format!(
+                        "{}: include {entry:?} resolves outside the config root",
+                        root_path.display()
+                    ));
                 }
             }
             other => parts.push(other.to_string()),
@@ -421,18 +568,16 @@ fn include_prefix(root_path: &Path, entry: &str) -> Result<Vec<String>, String> 
     Ok(parts)
 }
 
-/// What an entry contributed by an included file is, which decides how it
-/// splits into segments and whether it may climb above the config root.
-#[derive(Clone, Copy, PartialEq)]
+/// What an entry declared by a config file is, which decides how it splits into
+/// segments.
+#[derive(Clone, Copy)]
 enum Rebased {
     /// A silo glob. Splits on `/` only: `\` is globset's escape character, so
     /// treating it as a separator would rewrite the pattern - `a\[0\].rs` would
     /// become `a/[0/].rs`, a silently different glob.
     SiloGlob,
-    /// A filesystem path that must stay inside the config root.
+    /// A filesystem path.
     Path,
-    /// A filesystem path that may point outside the config root.
-    EscapingPath,
 }
 
 impl Rebased {
@@ -440,21 +585,16 @@ impl Rebased {
     fn separators(self) -> &'static [char] {
         match self {
             Rebased::SiloGlob => &['/'],
-            Rebased::Path | Rebased::EscapingPath => &['/', '\\'],
+            Rebased::Path => &['/', '\\'],
         }
-    }
-
-    /// Whether the result may climb above the config root.
-    fn allows_escape(self) -> bool {
-        self == Rebased::EscapingPath
     }
 }
 
-/// Join `prefix` with a path declared inside an included file, resolving `.`
-/// and `..` lexically. Unless `kind` allows escaping, a result that climbs above
-/// the config root is an error: such a path could never match a
-/// repository-relative path, and silently keeping it would be a rule that never
-/// fires.
+/// Join `prefix` with an entry declared inside a config file, resolving `.` and
+/// `..` lexically. A result that climbs above the config root is an error. Such
+/// an entry is either a pattern that could never match a repository-relative
+/// path, where silently keeping it would be a rule that never fires, or a
+/// directory outside the tree the scanner was pointed at.
 fn rebase(
     prefix: &[String],
     rel: &str,
@@ -462,7 +602,6 @@ fn rebase(
     subject: &str,
     kind: Rebased,
 ) -> Result<String, String> {
-    let allow_escape = kind.allows_escape();
     let escaped = |rel: &str| {
         format!(
             "{}: {subject} {rel:?} resolves outside the config root",
@@ -478,14 +617,13 @@ fn rebase(
                 Some(&last) if last != ".." => {
                     parts.pop();
                 }
-                _ if allow_escape => parts.push(".."),
                 _ => return Err(escaped(rel)),
             },
             other => parts.push(other),
         }
     }
 
-    if !allow_escape && parts.first() == Some(&"..") {
+    if parts.first() == Some(&"..") {
         return Err(escaped(rel));
     }
     if parts.is_empty() {
@@ -509,6 +647,53 @@ impl Config {
             .iter()
             .map(|rel| self.config_dir.join(rel))
             .collect()
+    }
+
+    /// Directories above the scan root whose ignore files this config brings
+    /// into scope, outermost first: the config root and every directory between
+    /// it and `scan_root`, the scan root itself excluded - a walk reads the
+    /// ignore files inside its own root already. Empty under
+    /// `anchor = "scan-root"`, when no config was loaded from disk, and when
+    /// the scan root is not inside the config root.
+    ///
+    /// `anchor = "config"` declares the config root as the project boundary, so
+    /// the project's own ignore files are in-scope by definition, and this is
+    /// exactly what makes module and root scans produce comparable results: a
+    /// file the repository ignores must be absent from a module scan too,
+    /// otherwise it shows up only there and a baseline written from the
+    /// repository root does not cover it. Sources outside the config root stay
+    /// excluded - this widens the boundary to the declared project and no
+    /// further.
+    pub fn project_ignore_dirs(&self, scan_root: &Path) -> Vec<PathBuf> {
+        if self.anchor != Anchor::Config || self.config_dir.as_os_str().is_empty() {
+            return Vec::new();
+        }
+
+        // Both sides are canonicalised, so `.`, `..` and symlinks in either
+        // argument do not decide whether one contains the other.
+        let canonical = |path: &Path| path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        let base = canonical(&self.config_dir);
+        let mut scanned = canonical(scan_root);
+        if !scanned.is_dir() {
+            // A single-file scan root: the directory holding it is what sits
+            // under the config root.
+            match scanned.parent() {
+                Some(parent) => scanned = parent.to_path_buf(),
+                None => return Vec::new(),
+            }
+        }
+
+        let Ok(tail) = scanned.strip_prefix(&base) else {
+            return Vec::new();
+        };
+
+        let mut dirs = Vec::new();
+        let mut dir = base;
+        for segment in tail.components() {
+            dirs.push(dir.clone());
+            dir.push(segment);
+        }
+        dirs
     }
 
     /// Compiled silo globs, sorted by silo name.
@@ -1061,6 +1246,250 @@ api = ["src/a\\[0\\].rs"]
     fn anchor_round_trips_through_its_spelling() {
         assert_eq!(Anchor::ScanRoot.as_str(), "scan-root");
         assert_eq!(Anchor::Config.as_str(), "config");
+    }
+
+    #[test]
+    fn root_rules_leaving_the_config_root_is_fatal() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write(dir.path(), CONFIG_NAME, "rules = [\"../outside\"]\n");
+        let err = load(&path).unwrap_err();
+
+        assert!(err.contains("rules"), "{err}");
+        assert!(err.contains("../outside"), "{err}");
+        assert!(err.contains("outside the config root"), "{err}");
+    }
+
+    #[test]
+    fn root_rules_with_an_absolute_path_is_fatal() {
+        let dir = tempfile::tempdir().unwrap();
+        for entry in ["/etc/siloscan-rules", "\\\\server\\rules", "C:/rules"] {
+            let path = write(dir.path(), CONFIG_NAME, &format!("rules = [{entry:?}]\n"));
+            let err = load(&path).unwrap_err();
+
+            assert!(err.contains("rules"), "{entry}: {err}");
+            assert!(err.contains("relative path"), "{entry}: {err}");
+        }
+    }
+
+    #[test]
+    fn root_source_roots_leaving_the_config_root_is_fatal() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write(dir.path(), CONFIG_NAME, "source_roots = [\"../outside\"]\n");
+        let err = load(&path).unwrap_err();
+
+        assert!(err.contains("source_roots"), "{err}");
+        assert!(err.contains("../outside"), "{err}");
+
+        let path = write(dir.path(), "other.toml", "source_roots = [\"/srv\"]\n");
+        let err = load(&path).unwrap_err();
+        assert!(err.contains("source_roots"), "{err}");
+        assert!(err.contains("relative path"), "{err}");
+    }
+
+    #[test]
+    fn root_paths_inside_the_config_root_are_normalised() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write(
+            dir.path(),
+            CONFIG_NAME,
+            "rules = [\"./rules/local\", \"a/../b\"]\nsource_roots = [\"./src\"]\n",
+        );
+        let config = load(&path).expect("should load");
+
+        assert_eq!(config.rules, vec!["rules/local", "b"]);
+        assert_eq!(config.source_roots, vec!["src"]);
+    }
+
+    #[test]
+    fn include_rules_leaving_the_config_root_is_fatal() {
+        // The root guard would be one `include` line away from useless if an
+        // included file could still name a directory outside the config root.
+        let dir = tempfile::tempdir().unwrap();
+        let path = with_include(
+            dir.path(),
+            "include = [\"modules/api/siloscan.toml\"]\n",
+            "rules = [\"../../../shared-rules\"]\n",
+        );
+        let err = load(&path).unwrap_err();
+
+        assert!(err.contains("rules"), "{err}");
+        assert!(err.contains("outside the config root"), "{err}");
+        assert!(err.contains("modules/api"), "{err}");
+    }
+
+    /// `link` inside `dir`, pointing at `target`. Unix only: the symlink escape
+    /// these tests cover needs a symlink to exist.
+    #[cfg(unix)]
+    fn symlink(dir: &Path, link: &str, target: &Path) {
+        std::os::unix::fs::symlink(target, dir.join(link)).unwrap();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn root_rules_through_a_symlink_out_of_the_config_root_is_fatal() {
+        // The lexical guard sees `"link"`, a path with no `..` in it. Both the
+        // symlink and the config naming it are content of the untrusted tree.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        fs::create_dir_all(root.join("outside/rules")).unwrap();
+        fs::create_dir_all(root.join("tree")).unwrap();
+        symlink(&root.join("tree"), "link", &root.join("outside/rules"));
+
+        let path = write(&root.join("tree"), CONFIG_NAME, "rules = [\"link\"]\n");
+        let err = load(&path).unwrap_err();
+
+        assert!(err.contains("rules"), "{err}");
+        assert!(err.contains("\"link\""), "{err}");
+        assert!(err.contains("outside the config root"), "{err}");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn root_source_roots_through_a_symlink_out_of_the_config_root_is_fatal() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        fs::create_dir_all(root.join("outside/src")).unwrap();
+        fs::create_dir_all(root.join("tree")).unwrap();
+        symlink(&root.join("tree"), "link", &root.join("outside/src"));
+
+        let path = write(
+            &root.join("tree"),
+            CONFIG_NAME,
+            "source_roots = [\"link/nested\"]\n",
+        );
+        let err = load(&path).unwrap_err();
+
+        assert!(err.contains("source_roots"), "{err}");
+        assert!(err.contains("outside the config root"), "{err}");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn include_through_a_symlink_out_of_the_config_root_is_fatal() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        fs::create_dir_all(root.join("outside")).unwrap();
+        fs::create_dir_all(root.join("tree")).unwrap();
+        write(&root.join("outside"), CONFIG_NAME, "rules = [\"pack\"]\n");
+        symlink(&root.join("tree"), "link", &root.join("outside"));
+
+        let path = write(
+            &root.join("tree"),
+            CONFIG_NAME,
+            "include = [\"link/siloscan.toml\"]\n",
+        );
+        let err = load(&path).unwrap_err();
+
+        assert!(err.contains("include"), "{err}");
+        assert!(err.contains("outside the config root"), "{err}");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_symlink_that_stays_inside_the_config_root_still_loads() {
+        // Containment is about where a path lands, not about symlinks: one that
+        // resolves back inside the tree is as legitimate as a real directory.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        fs::create_dir_all(root.join("real/rules")).unwrap();
+        symlink(&root, "link", &root.join("real/rules"));
+
+        let path = write(&root, CONFIG_NAME, "rules = [\"link\", \"real/rules\"]\n");
+        let config = load(&path).expect("should load");
+        assert_eq!(config.rules, vec!["link", "real/rules"]);
+    }
+
+    #[test]
+    fn a_real_subdirectory_of_the_config_root_still_loads() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        fs::create_dir_all(root.join("modules/api/rules")).unwrap();
+        fs::create_dir_all(root.join("src")).unwrap();
+
+        let path = write(
+            &root,
+            CONFIG_NAME,
+            "rules = [\"modules/api/rules\"]\nsource_roots = [\"src\"]\n",
+        );
+        let config = load(&path).expect("should load");
+
+        assert_eq!(config.rules, vec!["modules/api/rules"]);
+        assert_eq!(config.source_roots, vec!["src"]);
+    }
+
+    #[test]
+    fn include_entry_leaving_the_config_root_is_fatal() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write(
+            dir.path(),
+            CONFIG_NAME,
+            "include = [\"../elsewhere/siloscan.toml\"]\n",
+        );
+        let err = load(&path).unwrap_err();
+        assert!(err.contains("outside the config root"), "{err}");
+    }
+
+    /// A config root holding a module directory, with the config anchored to
+    /// the config root unless `anchor` says otherwise.
+    fn anchored(dir: &Path, anchor: &str) -> Config {
+        fs::create_dir_all(dir.join("modules/api/src")).unwrap();
+        let path = write(dir, CONFIG_NAME, anchor);
+        load(&path).expect("should load")
+    }
+
+    #[test]
+    fn config_anchor_brings_the_directories_above_the_scan_root_into_scope() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let config = anchored(&root, "anchor = \"config\"\n");
+
+        assert_eq!(
+            config.project_ignore_dirs(&root.join("modules/api")),
+            vec![root.clone(), root.join("modules")]
+        );
+        // The scan root's own ignore files are the walk's business, not this
+        // list's: scanning the config root itself adds nothing.
+        assert!(config.project_ignore_dirs(&root).is_empty());
+    }
+
+    #[test]
+    fn scan_root_anchor_brings_nothing_above_the_scan_root_into_scope() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let config = anchored(&root, "");
+
+        assert_eq!(config.anchor, Anchor::ScanRoot);
+        assert!(
+            config
+                .project_ignore_dirs(&root.join("modules/api"))
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn project_ignore_dirs_stop_at_the_config_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        fs::create_dir_all(root.join("inside")).unwrap();
+        fs::create_dir_all(root.join("outside")).unwrap();
+        let config = anchored(&root.join("inside"), "anchor = \"config\"\n");
+
+        // A scan root the config root does not contain gets nothing.
+        assert!(config.project_ignore_dirs(&root.join("outside")).is_empty());
+        assert!(config.project_ignore_dirs(&root).is_empty());
+    }
+
+    #[test]
+    fn project_ignore_dirs_of_a_single_file_scan_root_use_its_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let config = anchored(&root, "anchor = \"config\"\n");
+        fs::write(root.join("modules/api/src/a.rs"), "").unwrap();
+
+        assert_eq!(
+            config.project_ignore_dirs(&root.join("modules/api/src/a.rs")),
+            vec![root.clone(), root.join("modules"), root.join("modules/api")]
+        );
     }
 
     #[test]

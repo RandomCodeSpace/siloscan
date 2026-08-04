@@ -229,6 +229,7 @@ mod tests {
             path: path.to_string(),
             line,
             column: 9,
+            column_utf16: 9,
             matched: "needle".to_string(),
             fingerprint: fingerprint.to_string(),
         }

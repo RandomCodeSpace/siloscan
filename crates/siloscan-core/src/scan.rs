@@ -44,6 +44,16 @@ pub struct ScanReport {
     /// binary, or past the parse size cap. Sorted by path, so it is the same
     /// list whatever order the workers finished in.
     pub skipped: Vec<SkippedFile>,
+    /// How much of the tree an ignore file kept out of the scan.
+    ///
+    /// A count and not a list: enumerating an ignored `node_modules` would
+    /// swamp the report, and the point is only that a reader can tell "clean"
+    /// from "did not look". An excluded directory is one entry - see
+    /// [`walk::Ignored`] for exactly what is counted, and what is not.
+    ///
+    /// Zero on a scan whose walk consulted no ignore source, since nothing
+    /// could have been excluded by one.
+    pub ignored: walk::Ignored,
     /// Per-file semantic facts for every file that produced a parse tree.
     ///
     /// Files are parsed only when a loaded ast or boundary rule needs a tree,
@@ -81,6 +91,22 @@ pub struct ScanOptions<'a> {
     pub cache: Option<&'a crate::cache::Cache>,
     /// Repository config. Boundary rules are inert without one: silo
     /// membership is defined by the config and nowhere else.
+    ///
+    /// It is the caller's, never rediscovered here, and `None` means exactly
+    /// that: no config, whether none exists or none was found. Where a caller
+    /// got one from is worth knowing, because [`crate::config::discover`] stops
+    /// ascending at a repository boundary or at the filesystem root, whichever
+    /// comes first: an exported tarball with a `siloscan.toml` above the scan
+    /// root and no `.git` anywhere discovers no config at all. That boundary is
+    /// deliberate - a stray config in `$HOME` or `/` must not reach a scan -
+    /// and it is stated here because passing `None` for that reason looks
+    /// identical to passing `None` on purpose.
+    ///
+    /// What it costs: `silo`-scoped duplication rules and a config `anchor`
+    /// fail the scan without a config rather than report an empty result that
+    /// reads like a passing gate (`duplication_setup`, [`Anchoring::resolve`]).
+    /// Boundary rules are the exception - without a config they are inert and
+    /// silent, which is the same hole in a different place.
     pub config: Option<&'a crate::config::Config>,
     /// Parsed coverage report. Coverage rules are inert without one: absence
     /// of data is not evidence of an uncovered file.
@@ -287,6 +313,12 @@ pub fn scan_opts(
 ) -> Result<ScanReport, String> {
     let silo_sets = boundary_setup(root, rules, options.config)?;
     duplication_setup(root, rules, options.config)?;
+    // A coverage rule with no report to read produces no findings, which is
+    // indistinguishable from a passing gate. Refused here rather than in the
+    // CLI so that every caller - the CLI, the TUI, a library consumer - gets
+    // the same refusal from the one place that knows both the rules and the
+    // report.
+    crate::coverage::require_report(&rules.rules, options.coverage)?;
     // Derived from the scan root and the config alone, so a caller that resolved
     // it separately - to key a cache, or to label a report - resolved the same
     // value. There is no way for the two to disagree.
@@ -449,7 +481,20 @@ fn run_with_workers(
     let mut contents: BTreeMap<String, String> = BTreeMap::new();
     let mut file_metrics: BTreeMap<String, FileMetrics> = BTreeMap::new();
 
-    let files = walk::collect_files_with(root, &options.ignore);
+    // The walk counts what it excluded as it goes. Reported whatever the scan
+    // finds: a tree whose one credential sits behind a `.gitignore` line must
+    // not be reportable as a tree with nothing in it.
+    let walk::WalkResult {
+        files,
+        ignored: ignored_entries,
+    } = walk::collect_files_counted_in_project(
+        root,
+        &options.ignore,
+        &options
+            .config
+            .map(|config| config.project_ignore_dirs(root))
+            .unwrap_or_default(),
+    );
     let files_total = files.len();
     on_progress(Progress {
         files_total,
@@ -556,6 +601,11 @@ fn run_with_workers(
     }
     if let Some(coverage) = options.coverage {
         let resolved = crate::coverage::resolve(coverage, &paths);
+        // A report that lands on nothing is a coverage gate that measures
+        // nothing, which is the missing-report hole with a file in the way of
+        // seeing it. It can only be checked here, once the walk has said what
+        // the scanned paths are.
+        crate::coverage::require_resolved(&rules.rules, coverage, &resolved)?;
         whole_tree.extend(crate::coverage::scan_coverage(
             &rules.rules,
             &resolved,
@@ -596,6 +646,10 @@ fn run_with_workers(
         baselined,
         suppressed,
         skipped,
+        // Named apart from the `ignored` half of the suppression split above,
+        // which is findings a marker silenced rather than files a walk never
+        // read.
+        ignored: ignored_entries,
         graph,
         boundary_edges,
         metrics,
@@ -693,7 +747,10 @@ fn duplicate_block_findings(duplication: &DuplicationResult) -> Vec<Finding> {
                 message,
                 path: copy.path.clone(),
                 line: copy.start_line,
+                // Reported at the start of the duplicated block's first line,
+                // so both columns are 1 regardless of what that line holds.
                 column: 1,
+                column_utf16: 1,
                 matched: matched.clone(),
                 fingerprint: crate::findings::fingerprint(
                     DUPLICATE_BLOCK_RULE_ID,
@@ -1443,6 +1500,141 @@ rules:
         assert_eq!(widened.fingerprint, honored.findings[0].fingerprint);
     }
 
+    /// The 1.2.0 repro: a live credential behind one in-root `.gitignore` line
+    /// produced no finding, no skipped entry and no count - a report
+    /// indistinguishable from a tree that has nothing in it. The file is still
+    /// out of the scan; what changed is that the report says so.
+    #[test]
+    fn an_ignored_file_is_counted_in_the_report() {
+        let dir = tempdir();
+        write(dir.path(), ".gitignore", b".env\n");
+        write(dir.path(), ".env", b"needle\n");
+        write(dir.path(), "src/main.rs", b"fn main() {}\n");
+
+        let report = scan(dir.path(), &ruleset(), None);
+
+        assert!(report.findings.is_empty());
+        assert_eq!(
+            report.ignored,
+            walk::Ignored {
+                files: 1,
+                directories: 0
+            }
+        );
+        let line = report
+            .ignored
+            .summary_line()
+            .expect("the human summary has a line to print");
+        assert!(line.contains("ignored by .gitignore/.ignore"), "{line}");
+    }
+
+    /// A count of zero and no line: "clean" has to stay distinguishable from
+    /// "did not look", which means it must not carry the wording either.
+    #[test]
+    fn a_tree_with_nothing_ignored_reports_zero_and_no_line() {
+        let dir = tempdir();
+        write(dir.path(), "src/main.rs", b"needle\n");
+
+        let report = scan(dir.path(), &ruleset(), None);
+
+        assert_eq!(report.findings.len(), 1);
+        assert!(report.ignored.is_empty());
+        assert_eq!(report.ignored.summary_line(), None);
+    }
+
+    /// An ignored directory is counted once, from the outside. The walk does
+    /// not descend into it, so the number cannot grow with what is inside.
+    #[test]
+    fn an_ignored_directory_is_counted_once() {
+        let dir = tempdir();
+        write(dir.path(), ".gitignore", b"node_modules/\n");
+        for i in 0..5 {
+            write(
+                dir.path(),
+                &format!("node_modules/pkg/f{i}.js"),
+                b"const needle = 1;\n",
+            );
+        }
+        write(dir.path(), "src/main.rs", b"needle\n");
+
+        let report = scan(dir.path(), &ruleset(), None);
+
+        assert_eq!(report.findings.len(), 1);
+        assert_eq!(
+            report.ignored,
+            walk::Ignored {
+                files: 0,
+                directories: 1
+            }
+        );
+    }
+
+    /// The count is part of the report, so it obeys the report's rule: the
+    /// worker count may not change a byte of it.
+    #[test]
+    fn the_ignored_count_does_not_depend_on_the_worker_count() {
+        let dir = tempdir();
+        write(dir.path(), ".gitignore", b"*.log\nbuild/\n");
+        synthetic_tree(dir.path(), 60);
+        for name in ["a.log", "b.log", "src/c.log"] {
+            write(dir.path(), name, b"needle\n");
+        }
+        write(dir.path(), "build/out/app.js", b"needle\n");
+
+        let rules = ruleset();
+        let options = ScanOptions::default();
+        let counted = |workers| {
+            run_with_workers(
+                dir.path(),
+                &rules,
+                &options,
+                None,
+                &Anchoring::default(),
+                &mut |_| {},
+                workers,
+            )
+            .ignored
+        };
+
+        let expected = walk::Ignored {
+            files: 3,
+            directories: 1,
+        };
+        assert_eq!(counted(1), expected);
+        assert_eq!(counted(8), expected);
+    }
+
+    /// Nothing about the count may move with cache state: the cache lives in
+    /// `.siloscan`, which the walker excludes as policy and never counts, and
+    /// the walk runs before any entry is looked up.
+    #[test]
+    fn the_ignored_count_is_the_same_cold_and_warm() {
+        let dir = tempdir();
+        write(dir.path(), ".gitignore", b"secret.txt\nvendor/\n");
+        write(dir.path(), "secret.txt", b"needle\n");
+        write(dir.path(), "vendor/dep.rs", b"needle\n");
+        write(dir.path(), "src/main.rs", b"needle\n");
+
+        let rules = ruleset();
+        let cache = cache_for(dir.path(), &rules);
+        let cold = cached_scan(dir.path(), &rules, &cache);
+        let warm = cached_scan(dir.path(), &rules, &cache);
+
+        let expected = walk::Ignored {
+            files: 1,
+            directories: 1,
+        };
+        assert_eq!(cold.ignored, expected);
+        assert_eq!(warm.ignored, expected);
+        // The cache directory now exists in the scanned tree, and it is neither
+        // scanned nor counted.
+        assert!(dir.path().join(".siloscan").exists());
+        assert_eq!(
+            serde_json::to_string(&cold).unwrap(),
+            serde_json::to_string(&warm).unwrap()
+        );
+    }
+
     #[test]
     fn scans_a_tree_end_to_end() {
         let dir = tempdir();
@@ -1806,6 +1998,96 @@ rules:
         );
     }
 
+    /// End-to-end determinism across every cache state a scan can meet, on a
+    /// tree whose one file holds a live-looking credential.
+    ///
+    /// Three runs: a cold cache, the warm cache that run left behind, and a
+    /// cache whose entries have been rewritten to claim the file is clean. All
+    /// three reports have to be byte-identical, and all three have to name the
+    /// credential.
+    ///
+    /// The third run is the one that matters. A cache lives inside the scanned
+    /// tree, so a repository can commit entries into it; an entry saying
+    /// `findings: []` for a file holding a credential is the cheapest possible
+    /// way to make a scanner report a clean tree. The entry is authenticated
+    /// under a salt the repository cannot know, so a rewritten one fails to
+    /// authenticate, misses, and the file is scanned for real. "Cannot be read"
+    /// resolves to "scan it", never to "it was clean".
+    #[test]
+    fn no_cache_state_can_change_what_a_scan_reports() {
+        let dir = tempdir();
+        write(dir.path(), "a.rs", b"let key = \"tok_abc123\";\n");
+        write(dir.path(), "src/b.rs", b"let clean = 1;\n");
+
+        let rules = RuleSet {
+            rules: load_str(SECRET_RULES, "secret").unwrap(),
+            sources: vec![("secret".to_string(), SECRET_RULES.to_string())],
+        };
+
+        let cache = cache_for(dir.path(), &rules);
+        let cold = cached_scan(dir.path(), &rules, &cache);
+        let warm = cached_scan(dir.path(), &rules, &cache);
+
+        // The cold run populated the cache, or the run below proves nothing.
+        let entries = cache_entry_paths(dir.path());
+        assert!(!entries.is_empty(), "the cold run wrote no cache entries");
+
+        // Every entry now claims its file is clean. At least one of them said
+        // otherwise a moment ago - without that, emptying `findings` would be
+        // a no-op and this test would pass on a scanner that trusted it.
+        let mut emptied_a_real_finding = false;
+        for path in &entries {
+            let text = std::fs::read_to_string(path).unwrap();
+            let mut entry: serde_json::Value = serde_json::from_str(&text).unwrap();
+            emptied_a_real_finding |= entry["findings"]
+                .as_array()
+                .is_some_and(|findings| !findings.is_empty());
+            entry["findings"] = serde_json::Value::Array(Vec::new());
+            std::fs::write(path, serde_json::to_string(&entry).unwrap()).unwrap();
+        }
+        assert!(
+            emptied_a_real_finding,
+            "no cached entry carried a finding, so the rewrite proves nothing"
+        );
+        let poisoned = cached_scan(dir.path(), &rules, &cache);
+
+        let cold_json = serde_json::to_string(&cold).unwrap();
+        assert_eq!(cold_json, serde_json::to_string(&warm).unwrap());
+        assert_eq!(
+            cold_json,
+            serde_json::to_string(&poisoned).unwrap(),
+            "a rewritten cache entry changed the report"
+        );
+
+        for report in [&cold, &warm, &poisoned] {
+            assert_eq!(report.findings.len(), 1, "{:?}", report.findings);
+            assert_eq!(report.findings[0].rule_id, "test.token");
+            assert_eq!(report.findings[0].matched, "tok_abc123");
+        }
+    }
+
+    /// Every cache entry file under a scan root, sorted.
+    fn cache_entry_paths(root: &Path) -> Vec<std::path::PathBuf> {
+        fn walk(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                return;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    walk(&path, out);
+                } else if path.extension().is_some_and(|ext| ext == "json") {
+                    out.push(path);
+                }
+            }
+        }
+
+        let mut out = Vec::new();
+        walk(&root.join(crate::cache::CACHE_DIR), &mut out);
+        out.sort();
+        out
+    }
+
     #[test]
     fn edited_content_invalidates_the_cached_entry() {
         let dir = tempdir();
@@ -2134,6 +2416,7 @@ db = ["src/db/**"]
                     lines_covered: 1,
                 },
             )]),
+            source: String::new(),
         };
         let options = ScanOptions {
             coverage: Some(&coverage),
@@ -2170,6 +2453,7 @@ db = ["src/db/**"]
                     lines_covered: 0,
                 },
             )]),
+            source: String::new(),
         };
         let options = ScanOptions {
             coverage: Some(&coverage),

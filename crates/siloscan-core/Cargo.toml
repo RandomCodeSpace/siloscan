@@ -11,6 +11,7 @@ readme = "README.md"
 description = "Core library for siloscan: rule loading, scanning engines, findings"
 
 [dependencies]
+getrandom = "0.4.3"
 globset = "0.4.19"
 ignore = "0.4.32"
 regex = "1.13.1"
