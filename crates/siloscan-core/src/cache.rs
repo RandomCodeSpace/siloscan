@@ -679,8 +679,8 @@ fn entry_version(path: &Path) -> Option<String> {
 /// The salt this cache directory's entries are authenticated with, or `None`
 /// when there is none to be had. With `create`, a directory that exists and has
 /// no salt gets one; without it, nothing is written and nothing is created.
-/// Either way a platform with no OS random source has no salt at all
-/// ([`generate_salt`]), and the cache that would have used it stays cold.
+/// Either way a directory whose salt cannot be read or made has no salt at all,
+/// and the cache that would have used it stays cold.
 ///
 /// The value returned is not the file's bytes but those bytes bound to the
 /// directory's absolute location, so an entry authenticates for one checkout at
@@ -729,10 +729,9 @@ fn resolve_salt(root: &Path, create: bool) -> Option<[u8; SALT_LEN]> {
 ///   this build reads are ones it wrote. A committed `.salt` is simply never
 ///   read: only the stream is. On a volume with no stream support - FAT32,
 ///   exFAT, some network shares - creating it fails and the cache stays cold,
-///   which is a correct cache. Provenance is all this settles: Windows has no
-///   OS random source this build can reach without a dependency, so
-///   [`generate_salt`] produces nothing there, no salt is ever written, and
-///   the cache is cold on every scan until one exists.
+///   which is a correct cache. Provenance is all this settles; the bytes
+///   themselves come from the OS random source like everywhere else
+///   ([`generate_salt`]).
 /// - anything else: `None`. A gate that cannot be evaluated does not get to
 ///   pass, so a platform where provenance cannot be established trusts no salt,
 ///   writes none, and scans cold every time.
@@ -776,11 +775,11 @@ fn read_salt(root: &Path) -> Option<[u8; SALT_LEN]> {
 
 /// Write a fresh salt into an existing cache directory and return it.
 ///
-/// `None` when this platform has no OS random source ([`generate_salt`]), when
-/// it offers no way to tell a salt this build wrote from one that arrived with
-/// the tree ([`salt_file`]), or when the directory does not exist. In every one
-/// of those the cache simply has no salt, which makes it cold rather than
-/// weakly keyed.
+/// `None` when the OS random source will not answer ([`generate_salt`]), when
+/// this platform offers no way to tell a salt this build wrote from one that
+/// arrived with the tree ([`salt_file`]), or when the directory does not exist.
+/// In every one of those the cache simply has no salt, which makes it cold
+/// rather than weakly keyed.
 ///
 /// The file is created exclusively, so a concurrent writer cannot be
 /// overwritten - losing that race means reading the winner's salt instead. A
@@ -880,7 +879,7 @@ fn foreign_salt(_path: &Path) -> bool {
 }
 
 /// [`SALT_LEN`] bytes straight from the operating system's random source, or
-/// `None` on a platform where this build cannot reach one.
+/// `None` when that source cannot be reached or does not answer in full.
 ///
 /// The kernel's bytes are the salt. Nothing is folded in beside them and
 /// nothing is derived from them, because a salt an attacker can guess is a tag
@@ -890,29 +889,29 @@ fn foreign_salt(_path: &Path) -> bool {
 /// so none of them is entropy and none of them belongs here - not even as
 /// padding, which a salt that is already random end to end does not need.
 ///
-/// `/dev/urandom` is the only OS random source reachable from `std` without a
-/// dependency, so it is the only one used. On a target that does not have it -
-/// Windows included - the answer is `None`, and `None` means no salt exists
+/// The source is `getrandom`, which asks each target for the random source that
+/// target actually has - `getrandom(2)` on Linux, `getentropy` on the BSDs and
+/// macOS, `ProcessPrng` on Windows - rather than the one file `std` alone can
+/// reach. `std` exposes no OS random API on stable, so this is a dependency or
+/// it is nothing, and on every platform this project ships a binary for it is a
+/// working salt instead of a permanently cold cache.
+///
+/// When the source errors the answer is `None`, and `None` means no salt exists
 /// rather than a weaker one being invented: [`create_salt`] writes nothing,
 /// [`resolve_salt`] yields nothing, every entry is a miss and every scan runs
 /// cold. That is the safe direction to fail in. A cold scan is what the first
 /// run of any build does, it produces the same report a warm one would, and it
 /// costs time and only time.
 ///
-/// The bytes are collected rather than read into a buffer this function
-/// declares, so every byte of a salt arrives from the device and none of it
-/// originates in this source file. A read that ends short of [`SALT_LEN`] is
-/// `None` for the same reason a missing device is: a partial salt is not a
-/// salt.
+/// The buffer handed to the source is uninitialized rather than zeroed, and the
+/// salt is built from the bytes the call returns, so every byte of a salt
+/// arrives from the operating system and no value written in this file can
+/// reach the tag. A partial fill is not a partial salt: `fill_uninit` reports
+/// any short read as an error, and an error here is `None`.
 fn generate_salt() -> Option<[u8; SALT_LEN]> {
-    let urandom = fs::File::open("/dev/urandom").ok()?;
-    let mut salt = Vec::with_capacity(SALT_LEN);
-    urandom
-        .take(SALT_LEN as u64)
-        .read_to_end(&mut salt)
-        .ok()
-        .filter(|read| *read == SALT_LEN)?;
-    salt.try_into().ok()
+    let mut buffer = [const { std::mem::MaybeUninit::<u8>::uninit() }; SALT_LEN];
+    let filled = getrandom::fill_uninit(&mut buffer).ok()?;
+    <[u8; SALT_LEN]>::try_from(&*filled).ok()
 }
 
 /// The [`SALT_LEN`]-byte value `text` spells in lowercase or uppercase hex, or
@@ -2008,12 +2007,15 @@ mod tests {
     /// the salt is forging the entries. The OS source is the only input, so a
     /// salt is a function of nothing this process, this machine or this
     /// directory can be asked about.
-    #[cfg(unix)]
+    ///
+    /// Ungated: every platform this ships on has an OS random source, so a
+    /// platform that cannot produce a salt here is a platform whose cache is
+    /// broken, and a failure is what should say so.
     #[test]
     fn salt_bytes_come_from_the_os_random_source() {
         let mut seen = std::collections::HashSet::new();
         for _ in 0..16 {
-            let salt = generate_salt().expect("unix has /dev/urandom");
+            let salt = generate_salt().expect("this platform has an OS random source");
             assert!(
                 salt.iter().any(|byte| *byte != 0),
                 "the random source produced nothing"
@@ -2022,18 +2024,29 @@ mod tests {
         }
     }
 
-    /// Fail closed: where the OS random source cannot be reached there is no
-    /// salt, and no salt is a cold cache - never a guessable one stitched
-    /// together out of the clock and the path.
-    #[cfg(not(unix))]
+    /// Fail closed: a salt that cannot be made is not made up. Every step that
+    /// wants one takes `None` for an answer and leaves the directory exactly as
+    /// it found it - no file, no fallback stitched together out of the clock
+    /// and the path.
+    ///
+    /// The random source refusing is one way into that `None` and cannot be
+    /// staged from a test without either `unsafe` or a fault-injecting
+    /// dependency, neither of which is worth a branch that is one `ok()?`. A
+    /// missing directory is the other way in, it reaches the same `None` in the
+    /// same function, and everything downstream of it is what this asserts.
     #[test]
-    fn no_os_random_source_means_no_salt() {
-        assert!(generate_salt().is_none());
+    fn a_salt_that_cannot_be_made_is_never_invented() {
+        let dir = tempdir();
+        let root = dir.path().join("gone");
+
+        assert!(create_salt(&root).is_none());
+        assert!(resolve_salt(&root, true).is_none());
+        assert!(!root.exists(), "a failed salt left something behind");
     }
 
     /// The failure direction the whole design turns on, from the outside: a
-    /// cache directory that cannot produce a salt writes no entries and serves
-    /// none, so the scan is cold and correct rather than warm and forged.
+    /// cache directory with no salt writes no entries and serves none, so the
+    /// scan is cold and correct rather than warm and forged.
     #[test]
     fn a_cache_with_no_salt_writes_nothing_and_serves_nothing() {
         let dir = tempdir();
