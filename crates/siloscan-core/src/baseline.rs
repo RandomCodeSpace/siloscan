@@ -1,3 +1,18 @@
+//! Accepted findings, recorded so a scan can report only what is new.
+//!
+//! Membership is decided by fingerprint alone. A stored entry's path is
+//! carried through verbatim from the finding that produced it and is never
+//! rewritten on read or write: there is no translation layer here, and there
+//! must not be one.
+//!
+//! That makes a baseline bound to the path convention of the scan that wrote
+//! it. A fingerprint hashes the finding's path, so the same finding fingerprints
+//! differently under `anchor = "scan-root"` and `anchor = "config"`, and every
+//! entry written under one convention misses under the other. Switching the
+//! anchor therefore requires re-baselining: set the key, run `siloscan
+//! baseline` once, commit the result. That single explicit re-write is the
+//! whole migration, which is why nothing here tries to be clever about it.
+
 use std::collections::HashSet;
 use std::fs;
 use std::io;
@@ -16,7 +31,9 @@ const SUPPORTED_VERSION: u32 = 1;
 pub struct BaselineEntry {
     pub fingerprint: String,
     pub rule_id: String,
-    /// Repo-relative path using forward slashes.
+    /// The finding's path, forward-slashed, in the convention the scan that
+    /// wrote this entry used. Recorded for readability; matching never reads
+    /// it.
     pub path: String,
 }
 

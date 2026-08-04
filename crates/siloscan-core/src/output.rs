@@ -1,5 +1,7 @@
 use serde::Serialize;
 
+use crate::config::Anchor;
+
 /// Version of the machine-readable JSON report contract.
 ///
 /// Single source of truth: every consumer (CLI, TUI, downstream tooling)
@@ -17,9 +19,17 @@ pub struct JsonReport<'a> {
     pub skipped: &'a [crate::scan::SkippedFile],
     pub schema_version: &'static str,
     pub metrics: &'a crate::metrics::Metrics,
+    /// Convention every path in this report is expressed in: `"scan-root"`
+    /// (the default) or `"config"`. One convention holds for the whole
+    /// report, so a consumer resolves finding paths, skipped-file paths and
+    /// metrics file keys the same way.
+    pub anchor: Anchor,
 }
 
-pub fn to_json(report: &crate::scan::ScanReport) -> String {
+/// Render the machine-readable report. `anchor` is the path convention the
+/// scan ran under and is recorded verbatim: it does not rewrite any path, it
+/// tells the consumer what the paths already mean.
+pub fn to_json(report: &crate::scan::ScanReport, anchor: Anchor) -> String {
     let json_report = JsonReport {
         version: env!("CARGO_PKG_VERSION"),
         findings: &report.findings,
@@ -28,6 +38,7 @@ pub fn to_json(report: &crate::scan::ScanReport) -> String {
         skipped: &report.skipped,
         schema_version: SCHEMA_VERSION,
         metrics: &report.metrics,
+        anchor,
     };
     serde_json::to_string_pretty(&json_report).unwrap() // serialization cannot fail
 }
@@ -54,6 +65,20 @@ mod tests {
     use crate::metrics::{FileMetrics, Metrics};
     use crate::rules::Severity;
     use crate::scan::{ScanReport, SkippedFile};
+
+    /// Single construction point for the report, so a new `ScanReport` field
+    /// is one edit rather than one per test.
+    fn report(findings: Vec<Finding>, metrics: Metrics) -> ScanReport {
+        ScanReport {
+            findings,
+            baselined: vec![],
+            suppressed: vec![],
+            skipped: vec![],
+            graph: Default::default(),
+            boundary_edges: Vec::new(),
+            metrics,
+        }
+    }
 
     fn metrics_fixture() -> Metrics {
         let mut metrics = Metrics::default();
@@ -92,17 +117,9 @@ mod tests {
             matched: "test".to_string(),
             fingerprint: "abc123".to_string(),
         };
-        let report = ScanReport {
-            findings: vec![finding],
-            baselined: vec![],
-            suppressed: vec![],
-            skipped: vec![],
-            graph: Default::default(),
-            boundary_edges: Vec::new(),
-            metrics: Default::default(),
-        };
+        let report = report(vec![finding], Metrics::default());
 
-        let json = to_json(&report);
+        let json = to_json(&report, Anchor::ScanRoot);
         assert!(json.contains("findings"));
         assert!(json.contains("baselined"));
         assert!(json.contains("suppressed"));
@@ -125,34 +142,21 @@ mod tests {
             path: "ignored/file.rs".to_string(),
             reason: "excluded by rule".to_string(),
         };
-        let report = ScanReport {
-            findings: vec![finding.clone()],
-            baselined: vec![finding.clone()],
-            suppressed: vec![finding],
-            skipped: vec![skipped],
-            graph: Default::default(),
-            boundary_edges: Vec::new(),
-            metrics: metrics_fixture(),
-        };
+        let mut report = report(vec![finding.clone()], metrics_fixture());
+        report.baselined = vec![finding.clone()];
+        report.suppressed = vec![finding];
+        report.skipped = vec![skipped];
 
-        let json1 = to_json(&report);
-        let json2 = to_json(&report);
+        let json1 = to_json(&report, Anchor::ScanRoot);
+        let json2 = to_json(&report, Anchor::ScanRoot);
         assert_eq!(json1, json2);
     }
 
     #[test]
     fn json_report_declares_schema_version() {
-        let report = ScanReport {
-            findings: vec![],
-            baselined: vec![],
-            suppressed: vec![],
-            skipped: vec![],
-            graph: Default::default(),
-            boundary_edges: Vec::new(),
-            metrics: Default::default(),
-        };
+        let report = report(vec![], Metrics::default());
 
-        let json = to_json(&report);
+        let json = to_json(&report, Anchor::ScanRoot);
         assert!(
             json.contains("\"schema_version\": \"1.1\""),
             "report must carry the schema version: {json}"
@@ -161,18 +165,38 @@ mod tests {
     }
 
     #[test]
-    fn json_report_carries_metrics_in_stable_key_order() {
-        let report = ScanReport {
-            findings: vec![],
-            baselined: vec![],
-            suppressed: vec![],
-            skipped: vec![],
-            graph: Default::default(),
-            boundary_edges: Vec::new(),
-            metrics: metrics_fixture(),
-        };
+    fn json_report_declares_the_path_anchor() {
+        let report = report(vec![], Metrics::default());
 
-        let json = to_json(&report);
+        let json = to_json(&report, Anchor::ScanRoot);
+        assert!(
+            json.contains("\"anchor\": \"scan-root\""),
+            "report must declare the path anchor: {json}"
+        );
+
+        let json = to_json(&report, Anchor::Config);
+        assert!(
+            json.contains("\"anchor\": \"config\""),
+            "config-anchored report must say so: {json}"
+        );
+    }
+
+    #[test]
+    fn default_anchor_is_scan_root() {
+        let report = report(vec![], Metrics::default());
+
+        let json = to_json(&report, Anchor::default());
+        assert!(
+            json.contains("\"anchor\": \"scan-root\""),
+            "the absent anchor key must mean scan-root: {json}"
+        );
+    }
+
+    #[test]
+    fn json_report_carries_metrics_in_stable_key_order() {
+        let report = report(vec![], metrics_fixture());
+
+        let json = to_json(&report, Anchor::ScanRoot);
         assert!(json.contains("\"metrics\""));
         assert!(json.contains("\"totals\""));
 

@@ -6,6 +6,7 @@ use std::sync::mpsc;
 use globset::GlobSet;
 use serde::Serialize;
 
+use crate::config::Anchor;
 use crate::findings::Finding;
 use crate::graph::FileFacts;
 use crate::metrics::{DUPLICATE_BLOCK_RULE_ID, DuplicationResult, FileMetrics, Metrics};
@@ -55,6 +56,129 @@ pub struct ScanOptions<'a> {
     pub coverage: Option<&'a crate::coverage::CoverageReport>,
 }
 
+/// The path convention a scan reports under.
+///
+/// Every path a scan produces - a finding's `path`, a skipped file's, a metrics
+/// key, a graph key - is built in one place, [`Anchoring::relative`], and every
+/// fingerprint is derived from what that place returned. `prefix` is what it
+/// prepends: empty under [`Anchor::ScanRoot`], and under [`Anchor::Config`] the
+/// scan root's own path from the directory holding the config. Anchoring a whole
+/// scan is therefore one string, which is what keeps fingerprints and displayed
+/// paths from ever describing a file differently.
+///
+/// The consequence worth having: a scan of `modules/api` and a scan of the whole
+/// repository both call a file `modules/api/src/a.rs`, so they fingerprint it
+/// identically and one baseline serves both.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Anchoring {
+    anchor: Anchor,
+    prefix: String,
+}
+
+impl Anchoring {
+    /// The convention a scan of `root` under `config` runs in.
+    ///
+    /// Fails when `anchor = "config"` cannot be honoured: no config was loaded
+    /// from disk to measure from, or the scan root lies outside the config root.
+    /// Both are refused rather than quietly downgraded to scan-root paths, which
+    /// would hand out fingerprints under a convention nobody asked for.
+    pub fn resolve(
+        root: &Path,
+        config: Option<&crate::config::Config>,
+    ) -> Result<Anchoring, String> {
+        // No config means no anchor key, and the absent key means scan-root.
+        let Some(config) = config else {
+            return Ok(Anchoring::default());
+        };
+
+        match config.anchor {
+            Anchor::ScanRoot => Ok(Anchoring::default()),
+            Anchor::Config => {
+                let config_root = config.config_root();
+                if config_root.as_os_str().is_empty() {
+                    return Err(format!(
+                        "anchor = {:?} needs a {} on disk to measure paths from",
+                        Anchor::Config.as_str(),
+                        crate::config::CONFIG_NAME
+                    ));
+                }
+                Ok(Anchoring {
+                    anchor: Anchor::Config,
+                    prefix: descent(config_root, measured_from(root))?,
+                })
+            }
+        }
+    }
+
+    /// The convention, for the report field that declares it to consumers.
+    pub fn anchor(&self) -> Anchor {
+        self.anchor
+    }
+
+    /// Path from the anchor directory down to the directory scanned paths are
+    /// measured from. Empty when they are the same directory, which is every
+    /// scan-root-anchored run and a config-anchored run of the config root.
+    pub fn prefix(&self) -> &str {
+        &self.prefix
+    }
+
+    /// The scan root itself, in this convention.
+    ///
+    /// Findings that describe the scan as a whole rather than a file sit here.
+    /// That is `"."` under scan-root anchoring, and under config anchoring it is
+    /// the scan root's path from the config root - still `"."` when the two are
+    /// the same directory.
+    pub fn scan_root_path(&self) -> &str {
+        if self.prefix.is_empty() {
+            "."
+        } else {
+            &self.prefix
+        }
+    }
+
+    /// A scanned file's path in this convention: the scan-root-relative path
+    /// with the prefix in front of it.
+    fn relative(&self, root: &Path, path: &Path) -> String {
+        let rel = relative(root, path);
+        if self.prefix.is_empty() {
+            rel
+        } else {
+            format!("{}/{rel}", self.prefix)
+        }
+    }
+}
+
+/// The directory a scan root's relative paths are measured from: the root itself
+/// for a directory, and the containing directory for a single-file scan, which
+/// reports that file by name.
+fn measured_from(root: &Path) -> &Path {
+    if root.is_dir() {
+        return root;
+    }
+    match root.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    }
+}
+
+/// Forward-slash path from `base` down to `dir`, empty when they are the same
+/// directory. Both sides are canonicalised, so `.`, `..` and symlinks in either
+/// argument do not decide whether one contains the other.
+fn descent(base: &Path, dir: &Path) -> Result<String, String> {
+    let canonical = |path: &Path| path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let (base_abs, dir_abs) = (canonical(base), canonical(dir));
+
+    match dir_abs.strip_prefix(&base_abs) {
+        Ok(tail) => Ok(join_slashes(tail)),
+        Err(_) => Err(format!(
+            "anchor = {:?} measures every path from {}, which does not contain the scan root {}",
+            Anchor::Config.as_str(),
+            base.display(),
+            dir.display()
+        )),
+    }
+}
+
 /// Scan progress snapshot. `findings` counts raw matches as scanned, before
 /// inline suppression and baseline partitioning, so it only ever grows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -84,18 +208,27 @@ pub fn scan_with_progress(
         baseline,
         ..ScanOptions::default()
     };
-    // Silo validation is the only fallible step and needs a config, which the
-    // default options do not carry, so this path cannot fail.
-    run(root, rules, &options, None, on_progress)
+    // Silo validation and anchoring are the only fallible steps and both need a
+    // config, which the default options do not carry, so this path cannot fail:
+    // no config means no anchor key, and the absent key means scan-root.
+    run(
+        root,
+        rules,
+        &options,
+        None,
+        &Anchoring::default(),
+        on_progress,
+    )
 }
 
 /// The scanner proper. Every file is read once, parsed at most once, and run
 /// through every engine; a cache hit replaces the read-to-engine step only.
 ///
-/// Fails when a boundary rule names a silo the config does not define, and when
+/// Fails when a boundary rule names a silo the config does not define, when
 /// boundary or silo-scoped duplication rules would run against a scan root below
-/// the directory holding the config: a typo or a partial scan would otherwise
-/// silently disable the rule.
+/// the directory holding the config (a typo or a partial scan would otherwise
+/// silently disable the rule), and when the config's `anchor` cannot be honoured
+/// for this scan root.
 pub fn scan_opts(
     root: &Path,
     rules: &RuleSet,
@@ -104,7 +237,18 @@ pub fn scan_opts(
 ) -> Result<ScanReport, String> {
     let silo_sets = boundary_setup(root, rules, options.config)?;
     duplication_setup(root, rules, options.config)?;
-    Ok(run(root, rules, options, silo_sets, on_progress))
+    // Derived from the scan root and the config alone, so a caller that resolved
+    // it separately - to key a cache, or to label a report - resolved the same
+    // value. There is no way for the two to disagree.
+    let anchoring = Anchoring::resolve(root, options.config)?;
+    Ok(run(
+        root,
+        rules,
+        options,
+        silo_sets,
+        &anchoring,
+        on_progress,
+    ))
 }
 
 /// A duplication rule scoped to silos needs a config that defines silos to know
@@ -130,14 +274,14 @@ fn duplication_setup(
     let Some(rule) = silo_scoped else {
         return Ok(());
     };
-    if !config.is_some_and(|config| !config.silos.is_empty()) {
+    let Some(config) = config.filter(|config| !config.silos.is_empty()) else {
         return Err(format!(
             "rule {}: duplication scope silo needs a {} defining [silos]",
             rule.id,
             crate::config::CONFIG_NAME
         ));
-    }
-    require_config_root(root, "silo-scoped duplication rules")
+    };
+    require_config_root(root, config, "silo-scoped duplication rules")
 }
 
 /// Compiled silo globs, once it is established that at least one boundary rule
@@ -168,23 +312,30 @@ fn boundary_setup(
     if !any || config.silos.is_empty() {
         return Ok(None);
     }
-    require_config_root(root, "boundary rules")?;
+    require_config_root(root, config, "boundary rules")?;
     config.silo_sets().map(Some)
 }
 
 /// Silo globs are relative to the directory holding the config, while scanned
 /// paths are relative to the scan root. Scanning below the config's directory
 /// would match every file against the wrong path and report nothing at all, so
-/// it is refused rather than silently passed. A config that is not on disk
-/// (built in memory by a caller) cannot be located and is trusted. `subject`
-/// names the rules that forced the check.
-fn require_config_root(root: &Path, subject: &str) -> Result<(), String> {
-    let Some(dir) =
-        crate::config::discover(root).and_then(|path| path.parent().map(Path::to_owned))
-    else {
-        return Ok(());
-    };
-    if same_dir(&dir, root) {
+/// it is refused rather than silently passed.
+///
+/// The directory measured against is the loaded config's own, never one
+/// rediscovered from the scan root: those differ whenever the config was named
+/// explicitly, and a module holding its own `siloscan.toml` would otherwise wave
+/// the scan through against a partial file population - a partial boundary graph
+/// and a silo aggregate measured over part of its silo, both reported as if they
+/// covered the whole. A config that is not on disk (built in memory by a caller)
+/// cannot be located and is trusted. `subject` names the rules that forced the
+/// check.
+fn require_config_root(
+    root: &Path,
+    config: &crate::config::Config,
+    subject: &str,
+) -> Result<(), String> {
+    let dir = config.config_root();
+    if dir.as_os_str().is_empty() || same_dir(dir, root) {
         return Ok(());
     }
     Err(format!(
@@ -205,9 +356,18 @@ fn run(
     rules: &RuleSet,
     options: &ScanOptions,
     silo_sets: Option<Vec<(String, GlobSet)>>,
+    anchoring: &Anchoring,
     on_progress: &mut dyn FnMut(Progress),
 ) -> ScanReport {
-    run_with_workers(root, rules, options, silo_sets, on_progress, workers())
+    run_with_workers(
+        root,
+        rules,
+        options,
+        silo_sets,
+        anchoring,
+        on_progress,
+        workers(),
+    )
 }
 
 /// Workers for the per-file phase: one per available core, bounded. Falls back
@@ -227,6 +387,7 @@ fn run_with_workers(
     rules: &RuleSet,
     options: &ScanOptions,
     silo_sets: Option<Vec<(String, GlobSet)>>,
+    anchoring: &Anchoring,
     on_progress: &mut dyn FnMut(Progress),
     workers: usize,
 ) -> ScanReport {
@@ -234,7 +395,9 @@ fn run_with_workers(
     let mut suppressed: Vec<Finding> = Vec::new();
     let mut skipped: Vec<SkippedFile> = Vec::new();
     let mut graph = crate::graph::Graph::default();
-    // Repo-relative path -> the file it came from, for every scannable file.
+    // Anchored path -> the file it came from, for every scannable file. Every
+    // key below is anchored the same way, because they all come from the one
+    // `path_rel` each file was given.
     let mut scanned: BTreeMap<String, PathBuf> = BTreeMap::new();
     // Contents of every text file, kept until the duplication pass: it compares
     // every file against every other and so needs them all at once. Holding
@@ -251,7 +414,15 @@ fn run_with_workers(
         findings: 0,
     });
 
-    for result in scan_files(root, rules, options, &files, on_progress, workers) {
+    for result in scan_files(
+        root,
+        rules,
+        options,
+        anchoring,
+        &files,
+        on_progress,
+        workers,
+    ) {
         let FileResult {
             path_rel,
             path,
@@ -320,7 +491,12 @@ fn run_with_workers(
     // cache must produce the same numbers as a cold one.
     let (metrics, duplication) = measure(contents, file_metrics, options.config);
     whole_tree.extend(duplicate_block_findings(&duplication));
-    whole_tree.extend(duplication_gates(rules, &metrics, options.config));
+    whole_tree.extend(duplication_gates(
+        rules,
+        &metrics,
+        options.config,
+        anchoring,
+    ));
 
     let (kept, ignored) = suppress_whole_tree(&scanned, whole_tree);
     findings.extend(kept);
@@ -462,6 +638,7 @@ fn duplication_gates(
     rules: &RuleSet,
     metrics: &Metrics,
     config: Option<&crate::config::Config>,
+    anchoring: &Anchoring,
 ) -> Vec<Finding> {
     let needs_silos = rules.rules.iter().any(|rule| {
         matches!(
@@ -481,13 +658,62 @@ fn duplication_gates(
         _ => None,
     };
 
-    match (config, &sets) {
+    let mut gates = match (config, &sets) {
         (Some(config), Some(sets)) => {
             let silo_of = |path: &str| config.silo_of(sets, path).map(str::to_string);
             crate::engines::duplication::scan_duplication(&rules.rules, metrics, Some(&silo_of))
         }
         _ => crate::engines::duplication::scan_duplication(&rules.rules, metrics, None),
+    };
+    anchor_scan_aggregates(rules, &mut gates, anchoring);
+    gates
+}
+
+/// Move whole-scan gate findings onto the scan root's anchored path.
+///
+/// A `scan` scope gate reports about the scan as a whole rather than about any
+/// file, so the engine puts it at `"."`. Under config anchoring that is right
+/// only when the scan root is the config root: a subdirectory scan has to say
+/// where it was, or the whole-repository run and the module run would report the
+/// same gate at two different places. The fingerprint is rebuilt from the inputs
+/// the engine used, whose identity for this scope is the empty string - the
+/// measured density is deliberately not part of it, so that a gate finding can
+/// be baselined at all.
+///
+/// `silo` scope aggregates also sit at `"."` and are deliberately left where
+/// they are. They exist only when the scan root is the config root, because
+/// [`duplication_setup`] refuses them otherwise, so their `"."` already means
+/// the config root and the prefix is empty in every run that can produce one.
+/// `file` scope findings carry a real file path and are already anchored.
+fn anchor_scan_aggregates(rules: &RuleSet, gates: &mut [Finding], anchoring: &Anchoring) {
+    let scan_root = anchoring.scan_root_path();
+    if scan_root == "." {
+        return;
     }
+
+    for gate in gates {
+        if gate.path != "." || !is_scan_scoped(rules, &gate.rule_id) {
+            continue;
+        }
+        gate.fingerprint = crate::findings::fingerprint(&gate.rule_id, scan_root, "", 0);
+        gate.path = scan_root.to_string();
+    }
+}
+
+/// True when `rule_id` names a duplication gate scoped to the whole scan. Read
+/// from the rule rather than guessed from the finding, so the two aggregate
+/// scopes are never confused for one another.
+fn is_scan_scoped(rules: &RuleSet, rule_id: &str) -> bool {
+    rules.rules.iter().any(|rule| {
+        rule.id == rule_id
+            && matches!(
+                rule.payload,
+                CompiledPayload::Duplication {
+                    scope: DuplicationScope::Scan,
+                    ..
+                }
+            )
+    })
 }
 
 /// What one file contributed to the report, before any of it is merged.
@@ -526,6 +752,7 @@ fn scan_files(
     root: &Path,
     rules: &RuleSet,
     options: &ScanOptions,
+    anchoring: &Anchoring,
     files: &[PathBuf],
     on_progress: &mut dyn FnMut(Progress),
     workers: usize,
@@ -546,7 +773,7 @@ fn scan_files(
                     let Some(path) = files.get(index) else {
                         break;
                     };
-                    let (result, raw) = scan_one(root, rules, options, index, path);
+                    let (result, raw) = scan_one(root, rules, options, anchoring, index, path);
                     produced.push(result);
                     // The receiver outlives every worker, so this cannot fail.
                     let _ = sender.send(raw);
@@ -588,10 +815,14 @@ fn scan_one(
     root: &Path,
     rules: &RuleSet,
     options: &ScanOptions,
+    anchoring: &Anchoring,
     index: usize,
     path: &Path,
 ) -> (FileResult, usize) {
-    let path_rel = relative(root, path);
+    // The one place a scanned file gets a name. Everything downstream - the
+    // fingerprint, the report, the metrics key, the baseline entry - is built
+    // from this string, so anchoring it here anchors all of them together.
+    let path_rel = anchoring.relative(root, path);
     let (outcome, raw) = match walk::read_text(path) {
         FileKind::Binary => (Outcome::Binary, 0),
         FileKind::Unreadable(reason) => (Outcome::Unreadable(reason), 0),
@@ -751,10 +982,11 @@ fn sort_findings(findings: &mut [Finding]) {
     });
 }
 
-/// Scan-root-relative, forward-slash path. Fingerprints incorporate this
-/// value, so it must depend only on the scanned tree, never on anything
-/// above the scan root. A file scan root reports its file name so the path
-/// is never empty.
+/// Scan-root-relative, forward-slash path. It must depend only on the scanned
+/// tree, never on anything above the scan root; [`Anchoring::relative`] is what
+/// puts a path from above the scan root in front of it, and only when the config
+/// asked for one. A file scan root reports its file name so the path is never
+/// empty.
 fn relative(root: &Path, path: &Path) -> String {
     let tail = path.strip_prefix(root).unwrap_or(path);
     let joined = join_slashes(tail);
@@ -824,6 +1056,17 @@ rules:
             fs::create_dir_all(parent).unwrap();
         }
         fs::write(path, body).unwrap();
+    }
+
+    /// A cache for the default, scan-root-anchored convention.
+    fn cache_for(root: &Path, rules: &RuleSet) -> crate::cache::Cache {
+        crate::cache::Cache::open(root, rules, &crate::cache::PathScope::ScanRoot)
+    }
+
+    /// A cache for the convention `anchoring` describes.
+    fn cache_anchored(root: &Path, rules: &RuleSet, anchoring: &Anchoring) -> crate::cache::Cache {
+        let scope = crate::cache::PathScope::new(anchoring.anchor(), anchoring.prefix());
+        crate::cache::Cache::open(root, rules, &scope)
     }
 
     #[test]
@@ -1096,6 +1339,7 @@ rules:
                 &rules,
                 &options,
                 None,
+                &Anchoring::default(),
                 &mut |p| events.push(p),
                 workers,
             );
@@ -1133,7 +1377,7 @@ rules:
         write(dir.path(), "src/b.rs", b"needle needle\n");
 
         let rules = ruleset();
-        let cache = crate::cache::Cache::open(dir.path(), &rules);
+        let cache = cache_for(dir.path(), &rules);
         let cold = cached_scan(dir.path(), &rules, &cache);
         let warm = cached_scan(dir.path(), &rules, &cache);
 
@@ -1153,7 +1397,7 @@ rules:
         write(dir.path(), "a.rs", b"needle\n");
 
         let rules = ruleset();
-        let cache = crate::cache::Cache::open(dir.path(), &rules);
+        let cache = cache_for(dir.path(), &rules);
         assert_eq!(cached_scan(dir.path(), &rules, &cache).findings.len(), 1);
 
         write(
@@ -1173,7 +1417,7 @@ rules:
         write(dir.path(), "src/b.rs", b"needle\n");
 
         let rules = ruleset();
-        let cache = crate::cache::Cache::open(dir.path(), &rules);
+        let cache = cache_for(dir.path(), &rules);
         cached_scan(dir.path(), &rules, &cache);
         let report = cached_scan(dir.path(), &rules, &cache);
 
@@ -1193,7 +1437,7 @@ rules:
         write(dir.path(), "notes.txt", b"needle\n");
 
         let rules = ruleset();
-        let cache = crate::cache::Cache::open(dir.path(), &rules);
+        let cache = cache_for(dir.path(), &rules);
         let cold = cached_scan(dir.path(), &rules, &cache);
         let warm = cached_scan(dir.path(), &rules, &cache);
 
@@ -1371,7 +1615,9 @@ db = ["src/db/**"]
         write(dir.path(), "siloscan.toml", SILOS.as_bytes());
         boundary_tree(dir.path());
 
-        let config = silo_config(SILOS);
+        // Loaded from disk, because the guard measures against the config's own
+        // directory and an in-memory config has none.
+        let config = root_config(dir.path());
         let options = ScanOptions {
             config: Some(&config),
             ..ScanOptions::default()
@@ -1847,7 +2093,9 @@ rules:
         write(dir.path(), "src/api/a.rs", block.as_bytes());
         write(dir.path(), "src/api/b.rs", block.as_bytes());
 
-        let config = silo_config(SILOS);
+        // Loaded from disk, because the guard measures against the config's own
+        // directory and an in-memory config has none.
+        let config = root_config(dir.path());
         let options = ScanOptions {
             config: Some(&config),
             ..ScanOptions::default()
@@ -1904,13 +2152,21 @@ rules:
         duplicated_tree(dir.path());
 
         let rules = duplication_ruleset();
-        let cache = crate::cache::Cache::open(dir.path(), &rules);
+        let cache = cache_for(dir.path(), &rules);
         let report = |workers, cache: Option<&crate::cache::Cache>| {
             let options = ScanOptions {
                 cache,
                 ..ScanOptions::default()
             };
-            let report = run_with_workers(dir.path(), &rules, &options, None, &mut |_| {}, workers);
+            let report = run_with_workers(
+                dir.path(),
+                &rules,
+                &options,
+                None,
+                &Anchoring::default(),
+                &mut |_| {},
+                workers,
+            );
             serde_json::to_string(&report).unwrap()
         };
 
@@ -1925,6 +2181,467 @@ rules:
         assert!(cold.contains("metrics.duplicate-block"));
         assert!(cold.contains("quality.duplication"));
         assert!(cold.contains("\"duplicated_lines\":24"));
+    }
+
+    // Anchoring: one path convention per scan, chosen by the config, applied to
+    // every path a scan produces.
+
+    /// A rule pack that lives in the directory an included module config points
+    /// at, so loading it at all proves the include contributed it.
+    const MODULE_RULES: &str = r#"
+version: 1
+rules:
+  - id: module.value
+    severity: warning
+    message: "module value"
+    regex:
+      pattern: "value3"
+"#;
+
+    /// A repository whose root config anchors on itself and includes a module
+    /// config, and whose only duplicated block lives inside that module.
+    ///
+    /// The module config declares its silo and its rule directory relative to
+    /// itself; the merged config speaks config-root-relative paths. `crates/core`
+    /// shares nothing with the module, so the module's duplicate block is the
+    /// same block whether the whole repository or only the module is scanned.
+    fn multimodule_repo(root: &Path) {
+        git_root(root);
+        write(
+            root,
+            "siloscan.toml",
+            b"anchor = \"config\"\ninclude = [\"modules/api/siloscan.toml\"]\n\n[silos]\ncore = [\"crates/core/**\"]\n",
+        );
+        write(
+            root,
+            "modules/api/siloscan.toml",
+            b"rules = [\"rules\"]\n\n[silos]\napi = [\"src/**\"]\n",
+        );
+        write(
+            root,
+            "modules/api/rules/module.yml",
+            MODULE_RULES.as_bytes(),
+        );
+
+        let block = duplicated_block();
+        write(
+            root,
+            "modules/api/src/a.rs",
+            format!("// module a\n{block}").as_bytes(),
+        );
+        write(root, "modules/api/src/b.rs", block.as_bytes());
+        // Outside the module: one more `module.value` match and nothing else, so
+        // the repository scan reports strictly more than the module scan.
+        write(root, "crates/core/lib.rs", b"let value3 = 3;\n");
+    }
+
+    fn root_config(root: &Path) -> crate::config::Config {
+        crate::config::load(&root.join("siloscan.toml")).expect("root config should load")
+    }
+
+    /// The rules the included module contributes, loaded the way the CLI loads
+    /// them: from the merged config's rule directories.
+    fn module_rules(config: &crate::config::Config) -> RuleSet {
+        crate::rules::load_dirs(&config.rule_dirs()).expect("included rules should load")
+    }
+
+    fn options_for(config: &crate::config::Config) -> ScanOptions<'_> {
+        ScanOptions {
+            config: Some(config),
+            ..ScanOptions::default()
+        }
+    }
+
+    /// Path and fingerprint of every finding: what has to match across two
+    /// scans for a baseline written by one to serve the other.
+    fn identities(findings: &[Finding]) -> Vec<(String, String)> {
+        findings
+            .iter()
+            .map(|f| (f.path.clone(), f.fingerprint.clone()))
+            .collect()
+    }
+
+    #[test]
+    fn an_included_module_contributes_its_silo_and_its_rules_to_the_scan() {
+        let dir = tempdir();
+        multimodule_repo(dir.path());
+
+        let config = root_config(dir.path());
+        // Both rebased onto the config root by the loader, so the scanner never
+        // learns that an include existed.
+        assert_eq!(config.silos["api"], vec!["modules/api/src/**"]);
+        assert_eq!(
+            config.rule_dirs(),
+            vec![dir.path().join("modules/api/rules")]
+        );
+
+        let rules = module_rules(&config);
+        assert!(rules.rules.iter().any(|rule| rule.id == "module.value"));
+
+        let report =
+            scan_opts(dir.path(), &rules, &options_for(&config), &mut |_| {}).expect("valid setup");
+        assert!(
+            report
+                .findings
+                .iter()
+                .any(|f| f.rule_id == "module.value" && f.path == "modules/api/src/a.rs")
+        );
+
+        // The merged silo globs match the same paths the scan reports.
+        let sets = config.silo_sets().expect("globs compile");
+        assert_eq!(config.silo_of(&sets, "modules/api/src/a.rs"), Some("api"));
+        assert_eq!(config.silo_of(&sets, "crates/core/lib.rs"), Some("core"));
+    }
+
+    #[test]
+    fn a_module_scan_and_a_repository_scan_agree_on_every_shared_finding() {
+        let dir = tempdir();
+        multimodule_repo(dir.path());
+
+        let config = root_config(dir.path());
+        let rules = module_rules(&config);
+        let options = options_for(&config);
+
+        let whole = scan_opts(dir.path(), &rules, &options, &mut |_| {}).expect("repository scan");
+        let module = scan_opts(
+            &dir.path().join("modules/api"),
+            &rules,
+            &options,
+            &mut |_| {},
+        )
+        .expect("module scan");
+
+        assert!(
+            !module.findings.is_empty(),
+            "the fixture must find something"
+        );
+        assert!(
+            module
+                .findings
+                .iter()
+                .all(|f| f.path.starts_with("modules/api/")),
+            "a module scan reports its files by their path from the config root: {:?}",
+            identities(&module.findings)
+        );
+
+        // The point of the feature: every finding the module scan reports is one
+        // the repository scan reported, with the same path and the same
+        // fingerprint, so one baseline serves both.
+        let whole_ids: std::collections::BTreeSet<(String, String)> =
+            identities(&whole.findings).into_iter().collect();
+        for identity in identities(&module.findings) {
+            assert!(
+                whole_ids.contains(&identity),
+                "{identity:?} is not in the repository scan: {whole_ids:?}"
+            );
+        }
+        assert!(
+            whole.findings.len() > module.findings.len(),
+            "the repository scan must also see what lies outside the module"
+        );
+
+        // Metrics keys ride the same convention as the findings.
+        assert!(module.metrics.files.contains_key("modules/api/src/a.rs"));
+        assert!(whole.metrics.files.contains_key("modules/api/src/a.rs"));
+    }
+
+    #[test]
+    fn a_baseline_from_a_module_scan_covers_the_repository_scan() {
+        let dir = tempdir();
+        multimodule_repo(dir.path());
+
+        let config = root_config(dir.path());
+        let rules = module_rules(&config);
+        let module_root = dir.path().join("modules/api");
+        let module = scan_opts(&module_root, &rules, &options_for(&config), &mut |_| {})
+            .expect("module scan");
+
+        // Exactly what `siloscan baseline` records: fingerprint and path taken
+        // from the finding, with nothing translated.
+        let baseline = crate::baseline::Baseline {
+            version: 1,
+            entries: module
+                .findings
+                .iter()
+                .map(|f| crate::baseline::BaselineEntry {
+                    fingerprint: f.fingerprint.clone(),
+                    rule_id: f.rule_id.clone(),
+                    path: f.path.clone(),
+                })
+                .collect(),
+        };
+
+        let options = ScanOptions {
+            baseline: Some(&baseline),
+            config: Some(&config),
+            ..ScanOptions::default()
+        };
+        let whole = scan_opts(dir.path(), &rules, &options, &mut |_| {}).expect("repository scan");
+
+        assert_eq!(identities(&whole.baselined), identities(&module.findings));
+        assert!(
+            whole
+                .findings
+                .iter()
+                .all(|f| f.path == "crates/core/lib.rs"),
+            "only what lies outside the module is new: {:?}",
+            identities(&whole.findings)
+        );
+    }
+
+    #[test]
+    fn a_whole_scan_gate_reports_where_the_scan_root_is() {
+        let dir = tempdir();
+        multimodule_repo(dir.path());
+
+        let config = root_config(dir.path());
+        let rules = duplication_ruleset();
+        let options = options_for(&config);
+        let gate = |report: &ScanReport| {
+            report
+                .findings
+                .iter()
+                .find(|f| f.rule_id == "quality.duplication")
+                .cloned()
+                .expect("the gate must fire")
+        };
+
+        let whole = gate(&scan_opts(dir.path(), &rules, &options, &mut |_| {}).unwrap());
+        let module = gate(
+            &scan_opts(
+                &dir.path().join("modules/api"),
+                &rules,
+                &options,
+                &mut |_| {},
+            )
+            .unwrap(),
+        );
+
+        // The repository scan root is the config root, so its path from the
+        // config root is ".", exactly as it would be without any anchor.
+        assert_eq!(whole.path, ".");
+        assert_eq!(
+            whole.fingerprint,
+            crate::findings::fingerprint("quality.duplication", ".", "", 0)
+        );
+
+        // A subdirectory scan says where it measured, and fingerprints that way.
+        assert_eq!(module.path, "modules/api");
+        assert_eq!(
+            module.fingerprint,
+            crate::findings::fingerprint("quality.duplication", "modules/api", "", 0)
+        );
+        assert_ne!(whole.fingerprint, module.fingerprint);
+    }
+
+    #[test]
+    fn a_single_file_scan_anchors_on_the_directory_holding_it() {
+        let dir = tempdir();
+        multimodule_repo(dir.path());
+
+        let config = root_config(dir.path());
+        let file = dir.path().join("modules/api/src/a.rs");
+        let report = scan_opts(
+            &file,
+            &module_rules(&config),
+            &options_for(&config),
+            &mut |_| {},
+        )
+        .expect("file scan");
+
+        // A file scan root reports its own name, so the prefix is the directory
+        // holding it; getting that wrong would repeat the file name.
+        assert!(!report.findings.is_empty());
+        assert!(
+            report
+                .findings
+                .iter()
+                .all(|f| f.path == "modules/api/src/a.rs"),
+            "{:?}",
+            identities(&report.findings)
+        );
+    }
+
+    #[test]
+    fn an_anchored_report_is_byte_identical_across_workers_and_cache_state() {
+        let dir = tempdir();
+        multimodule_repo(dir.path());
+        let root = dir.path().join("modules/api");
+
+        let config = root_config(dir.path());
+        let rules = module_rules(&config);
+        let anchoring = Anchoring::resolve(&root, Some(&config)).expect("anchoring resolves");
+        assert_eq!(anchoring.prefix(), "modules/api");
+
+        let cache = cache_anchored(&root, &rules, &anchoring);
+        let json = |workers, cache: Option<&crate::cache::Cache>| {
+            let options = ScanOptions {
+                cache,
+                config: Some(&config),
+                ..ScanOptions::default()
+            };
+            let report = run_with_workers(
+                &root,
+                &rules,
+                &options,
+                None,
+                &anchoring,
+                &mut |_| {},
+                workers,
+            );
+            crate::output::to_json(&report, anchoring.anchor())
+        };
+
+        // Cold cache first, so the warm run below reads what it wrote.
+        let cold = json(1, Some(&cache));
+        let warm = json(8, Some(&cache));
+        let uncached = json(4, None);
+
+        assert_eq!(cold, warm, "a warm cache must not move an anchored report");
+        assert_eq!(cold, uncached, "the cache must not move it at all");
+        // Non-empty and anchored, so the comparisons above are not vacuous.
+        assert!(cold.contains("\"anchor\": \"config\""));
+        assert!(cold.contains("\"modules/api/src/a.rs\""));
+    }
+
+    #[test]
+    fn a_cache_entry_from_one_convention_never_serves_the_other() {
+        let dir = tempdir();
+        multimodule_repo(dir.path());
+        let root = dir.path().join("modules/api");
+
+        let config = root_config(dir.path());
+        let rules = module_rules(&config);
+        let run = |cache: Option<&crate::cache::Cache>, anchoring: &Anchoring| {
+            let options = ScanOptions {
+                cache,
+                ..ScanOptions::default()
+            };
+            run_with_workers(&root, &rules, &options, None, anchoring, &mut |_| {}, 1)
+        };
+
+        // Fill the cache under config anchoring, then scan the same tree under
+        // scan-root anchoring with a cache bound to that convention.
+        let anchored = Anchoring::resolve(&root, Some(&config)).unwrap();
+        let warm = cache_anchored(&root, &rules, &anchored);
+        let filled = run(Some(&warm), &anchored);
+        assert!(!filled.findings.is_empty());
+
+        let plain_cache = cache_for(&root, &rules);
+        let plain = run(Some(&plain_cache), &Anchoring::default());
+        let no_cache = run(None, &Anchoring::default());
+
+        assert_eq!(
+            identities(&plain.findings),
+            identities(&no_cache.findings),
+            "the anchored entries must not have been served here"
+        );
+        assert!(
+            plain
+                .findings
+                .iter()
+                .all(|f| !f.path.starts_with("modules/")),
+            "scan-root paths carry no prefix: {:?}",
+            identities(&plain.findings)
+        );
+    }
+
+    #[test]
+    fn anchoring_needs_a_config_that_is_on_disk() {
+        let config = crate::config::Config {
+            anchor: Anchor::Config,
+            ..crate::config::Config::default()
+        };
+
+        let err = Anchoring::resolve(Path::new("."), Some(&config)).unwrap_err();
+        assert!(err.contains(crate::config::CONFIG_NAME), "{err}");
+    }
+
+    #[test]
+    fn a_scan_root_outside_the_config_root_cannot_be_anchored() {
+        let dir = tempdir();
+        multimodule_repo(dir.path());
+        let outside = tempdir();
+
+        let config = root_config(dir.path());
+        let err = Anchoring::resolve(outside.path(), Some(&config)).unwrap_err();
+        assert!(err.contains("does not contain the scan root"), "{err}");
+
+        // And it reaches the caller as a scan setup failure, not as a scan.
+        let options = options_for(&config);
+        assert!(scan_opts(outside.path(), &ruleset(), &options, &mut |_| {}).is_err());
+    }
+
+    #[test]
+    fn a_module_holding_a_config_is_still_below_the_one_the_scan_loaded() {
+        let dir = tempdir();
+        multimodule_repo(dir.path());
+
+        // The module directory holds its own `siloscan.toml` - it is the file the
+        // root includes - so a guard that rediscovered a config from the scan
+        // root would find that one, call the scan root the config root, and run
+        // a silo aggregate over part of the silo.
+        let config = root_config(dir.path());
+        let options = options_for(&config);
+        let err = scan_opts(
+            &dir.path().join("modules/api"),
+            &silo_duplication_rules(),
+            &options,
+            &mut |_| {},
+        )
+        .unwrap_err();
+
+        assert!(
+            err.contains("silo-scoped duplication rules are relative to"),
+            "{err}"
+        );
+        assert!(
+            err.contains(&dir.path().display().to_string()),
+            "the config root is named: {err}"
+        );
+    }
+
+    #[test]
+    fn without_an_anchor_key_nothing_moves() {
+        let dir = tempdir();
+        duplicated_tree(dir.path());
+        write(dir.path(), "n.rs", b"needle\n");
+        // Present on disk for both runs, so the only variable below is whether
+        // the scan loaded it.
+        write(dir.path(), "siloscan.toml", b"");
+
+        let rules = duplication_ruleset();
+        let anchor = crate::config::Anchor::ScanRoot;
+
+        let bare = scan(dir.path(), &rules, None);
+        let config = root_config(dir.path());
+        let loaded = scan_opts(dir.path(), &rules, &options_for(&config), &mut |_| {})
+            .expect("empty config");
+
+        assert_eq!(
+            crate::output::to_json(&bare, anchor),
+            crate::output::to_json(&loaded, anchor),
+            "an empty config must change nothing at all"
+        );
+
+        // Pinned to the scan-root convention, so a change of convention cannot
+        // slip through by moving both sides of the comparison together.
+        for report in [&bare, &loaded] {
+            let fingerprints: Vec<&str> = report
+                .findings
+                .iter()
+                .map(|f| f.fingerprint.as_str())
+                .collect();
+            for expected in [
+                crate::findings::fingerprint("test.needle", "n.rs", "needle", 0),
+                crate::findings::fingerprint("quality.duplication", ".", "", 0),
+            ] {
+                assert!(
+                    fingerprints.contains(&expected.as_str()),
+                    "missing {expected}: {fingerprints:?}"
+                );
+            }
+        }
     }
 
     #[cfg(unix)]
