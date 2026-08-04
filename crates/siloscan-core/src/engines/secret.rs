@@ -22,7 +22,7 @@ pub fn scan_file(
         }
 
         let CompiledPayload::Secret {
-            regex,
+            pattern,
             group,
             entropy,
             keywords,
@@ -47,6 +47,15 @@ pub fn scan_file(
             }
         }
 
+        // Compiled here and not before: the envelope, the allowlisted paths and
+        // the keyword prefilter above reject most rules for most files, and a
+        // rejected rule must not pay for its pattern. `None` means the pattern
+        // is valid but too big to compile, which is nothing this engine can
+        // report on, so the rule sits out.
+        let Some(regex) = pattern.get() else {
+            continue;
+        };
+
         for caps in regex.captures_iter(content) {
             // A `None` span means an optional capture did not participate.
             let Some(span) = capture_span(&caps, *group) else {
@@ -62,7 +71,11 @@ pub fn scan_file(
                 }
             }
 
-            if allow_patterns.iter().any(|allow| allow.is_match(matched)) {
+            if allow_patterns
+                .iter()
+                .filter_map(|allow| allow.get())
+                .any(|allow| allow.is_match(matched))
+            {
                 continue;
             }
 

@@ -19,4 +19,70 @@ mod tests {
             rules.len()
         );
     }
+
+    /// Compiling the whole pack costs seconds of wall time and hundreds of
+    /// megabytes of resident memory. Loading it must buy none of that: every
+    /// pattern stays source until a rule has a file to match against.
+    #[test]
+    fn default_pack_compiles_no_patterns_at_load() {
+        use crate::rules::CompiledPayload;
+
+        let rules =
+            crate::rules::load_str(default_rules(), "default-pack").expect("default pack loads");
+        for rule in &rules {
+            let CompiledPayload::Secret {
+                pattern,
+                allow_patterns,
+                ..
+            } = &rule.payload
+            else {
+                panic!("the default pack is secret rules only: {}", rule.id);
+            };
+            assert!(!pattern.is_compiled(), "{} compiled at load", rule.id);
+            for allow in allow_patterns {
+                assert!(
+                    !allow.is_compiled(),
+                    "{} allowlist compiled at load",
+                    rule.id
+                );
+            }
+        }
+    }
+
+    /// Deferring the compile moves one failure class out of load: a pattern that
+    /// parses but whose program exceeds the regex size limit is discovered at
+    /// first use, where there is no error channel, so the rule would silently
+    /// sit out and quietly cost findings. Nothing in the shipped pack may be in
+    /// that class - every pattern has to actually build.
+    #[test]
+    fn every_default_pack_pattern_compiles() {
+        use crate::rules::CompiledPayload;
+
+        let rules =
+            crate::rules::load_str(default_rules(), "default-pack").expect("default pack loads");
+        for rule in &rules {
+            let CompiledPayload::Secret {
+                pattern,
+                allow_patterns,
+                ..
+            } = &rule.payload
+            else {
+                panic!("the default pack is secret rules only: {}", rule.id);
+            };
+            assert!(
+                pattern.get().is_some(),
+                "{} does not compile: {}",
+                rule.id,
+                pattern.pattern()
+            );
+            for allow in allow_patterns {
+                assert!(
+                    allow.get().is_some(),
+                    "{} allowlist does not compile: {}",
+                    rule.id,
+                    allow.pattern()
+                );
+            }
+        }
+    }
 }

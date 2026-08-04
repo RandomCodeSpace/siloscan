@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/siloscan-core", "crates/siloscan", "crates/siloscan-tui"]
 
 [workspace.package]
-version = "1.0.1"
+version = "1.0.2"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/RandomCodeSpace/siloscan"
