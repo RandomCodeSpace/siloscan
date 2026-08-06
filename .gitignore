@@ -1,6 +1,12 @@
 /target
 .siloscan/cache/
 
+# Scan caches a test or a manual run pointed at the working tree. The cache
+# lives in a per-user directory by default; these appear only when one is
+# given an explicit path here, and they are never part of the source.
+/relcache/
+/*cache/
+
 # Discussion and planning documents stay out of the repository (code only).
 # Design records live on the GitHub issue tracker; research notes live on
 # throwaway research/* branches.
