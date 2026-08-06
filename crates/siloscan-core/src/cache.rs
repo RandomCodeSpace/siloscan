@@ -259,9 +259,11 @@ const SALT_LEN: usize = 32;
 const DIR_MODE: u32 = 0o700;
 
 /// Owner-only mode for every file this crate creates for a cache: entries, the
-/// prune stamp, and the probe [`euid`] measures itself with. The salt has its
-/// own name for the same value ([`SALT_MODE`]) because it is also a value read
-/// back and checked, not only one written.
+/// salt, the prune stamp, and the probe [`euid`] measures itself with.
+///
+/// It is a file permission mode and nothing else. The salt's file is created
+/// with it and read back against it ([`read_salt`]), but the value is never
+/// part of a salt, a key or anything else a digest sees.
 #[cfg(unix)]
 const FILE_MODE: u32 = 0o600;
 
@@ -270,13 +272,6 @@ const FILE_MODE: u32 = 0o600;
 /// are about.
 #[cfg(unix)]
 const OTHERS_MASK: u32 = 0o077;
-
-/// Owner-only file mode for the salt, and the mask a stored salt is checked
-/// against on read. Group or world access means the file did not come from
-/// [`create_salt`]. Defence in depth only: see the module docs for what the
-/// cache's location does and what this check does not do.
-#[cfg(unix)]
-const SALT_MODE: u32 = 0o600;
 
 /// The NTFS alternate data stream a salt's bytes live in on Windows, appended
 /// to [`SALT_NAME`]. See [`salt_file`] for why the salt is not simply the file.
@@ -1429,7 +1424,7 @@ fn resolve_salt(root: &Path, owner: u32, create: bool) -> Option<[u8; SALT_LEN]>
 /// hand - fail to be read rather than be trusted on sight.
 ///
 /// - unix: the file itself, and [`read_salt`] rejects any mode wider than
-///   [`SALT_MODE`], and any owner but this one. The mode is a weak signal on its
+///   [`FILE_MODE`], and any owner but this one. The mode is a weak signal on its
 ///   own: an archive preserves a `0600` mode exactly, and a `umask` of `077`
 ///   gives a checked-out file one. It costs a `stat` this code path already
 ///   needs, so it stays; it is not relied on, and 1.3.0's claim that it proved
@@ -1481,7 +1476,10 @@ fn read_salt(root: &Path, owner: u32) -> Option<[u8; SALT_LEN]> {
         if meta.uid() != owner {
             return None;
         }
-        if meta.permissions().mode() & !SALT_MODE & 0o777 != 0 {
+        // Any 0o777 bit outside [`FILE_MODE`]: anything at all for group or
+        // other, or an execute bit for the owner. None of them is a bit this
+        // crate sets, so a file carrying one is not one [`write_salt`] made.
+        if meta.permissions().mode() & !FILE_MODE & 0o777 != 0 {
             return None;
         }
     }
@@ -1531,29 +1529,33 @@ fn create_salt(root: &Path, owner: u32) -> Option<[u8; SALT_LEN]> {
     let path = salt_file(root)?;
     let salt = generate_salt()?;
 
-    if let Some(written) = write_salt(&path, &salt) {
-        return Some(written);
+    if write_salt(&path, &salt) {
+        return Some(salt);
     }
     // Either someone else got there first, or the file is one this build can
     // never use. Only the second is replaced, and only once: losing the second
     // create too means another process refilled it in the same window, and its
     // salt is the one to read.
-    if foreign_salt(&path, owner)
-        && fs::remove_file(&path).is_ok()
-        && let Some(written) = write_salt(&path, &salt)
-    {
-        return Some(written);
+    if foreign_salt(&path, owner) && fs::remove_file(&path).is_ok() && write_salt(&path, &salt) {
+        return Some(salt);
     }
     read_salt(root, owner)
 }
 
-/// Create `path` exclusively, owner-only, holding `salt`. `None` when the file
+/// Create `path` exclusively, owner-only, holding `salt`. False when the file
 /// already existed or the write did not complete.
 ///
 /// The mode is set on the open file as well as on the create, for the reason
 /// [`create_dir_all_secure`] gives: the create's mode is masked by the process
 /// umask, and this file's mode is checked on every later read.
-fn write_salt(path: &Path, salt: &[u8; SALT_LEN]) -> Option<[u8; SALT_LEN]> {
+///
+/// What it reports is whether the write happened, and nothing else. Handing the
+/// caller back its own `salt` was the earlier signature, and it claimed more
+/// than it delivered: the caller already holds those bytes. A return typed as a
+/// salt also made the value this process goes on to hash with look - to a
+/// reader, and to anything that follows values rather than types - like
+/// something derived from the file mode this function sets on the way.
+fn write_salt(path: &Path, salt: &[u8; SALT_LEN]) -> bool {
     use std::io::Write as _;
 
     let mut options = fs::OpenOptions::new();
@@ -1561,25 +1563,29 @@ fn write_salt(path: &Path, salt: &[u8; SALT_LEN]) -> Option<[u8; SALT_LEN]> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt as _;
-        options.mode(SALT_MODE);
+        options.mode(FILE_MODE);
     }
-    let mut file = options.open(path).ok()?;
+    let Ok(mut file) = options.open(path) else {
+        return false;
+    };
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;
-        file.set_permissions(fs::Permissions::from_mode(SALT_MODE))
-            .ok()?;
+        if file
+            .set_permissions(fs::Permissions::from_mode(FILE_MODE))
+            .is_err()
+        {
+            return false;
+        }
     }
     let mut text = hex(salt);
     text.push('\n');
-    file.write_all(text.as_bytes()).ok()?;
-    file.sync_all().ok()?;
-    Some(*salt)
+    file.write_all(text.as_bytes()).is_ok() && file.sync_all().is_ok()
 }
 
 /// True when a salt file exists and fails a check [`read_salt`] applies before
 /// it reads a byte: on unix, a regular file whose mode is wider than
-/// [`SALT_MODE`], or one owned by anyone but `owner`.
+/// [`FILE_MODE`], or one owned by anyone but `owner`.
 ///
 /// A salt owned by another uid inside a directory this uid owns and nobody else
 /// can write is a leftover - a directory created by `root`, a restored backup,
@@ -1601,7 +1607,7 @@ fn foreign_salt(path: &Path, owner: u32) -> bool {
     use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
     fs::metadata(path).is_ok_and(|meta| {
         meta.is_file()
-            && (meta.uid() != owner || meta.permissions().mode() & !SALT_MODE & 0o777 != 0)
+            && (meta.uid() != owner || meta.permissions().mode() & !FILE_MODE & 0o777 != 0)
     })
 }
 
@@ -2541,7 +2547,7 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt as _;
-            fs::set_permissions(path, fs::Permissions::from_mode(SALT_MODE)).unwrap();
+            fs::set_permissions(path, fs::Permissions::from_mode(FILE_MODE)).unwrap();
         }
         #[cfg(not(unix))]
         let _ = path;
@@ -2765,7 +2771,7 @@ mod tests {
             .unwrap()
             .permissions()
             .mode();
-        assert_eq!(mode & 0o777, SALT_MODE, "salt mode {:o}", mode & 0o777);
+        assert_eq!(mode & 0o777, FILE_MODE, "salt mode {:o}", mode & 0o777);
 
         // A checkout produces a group- or world-readable file, which is the
         // signal that this salt arrived with the tree rather than being written
@@ -2779,7 +2785,7 @@ mod tests {
             );
         }
 
-        fs::set_permissions(salt_path(&cache), fs::Permissions::from_mode(SALT_MODE)).unwrap();
+        fs::set_permissions(salt_path(&cache), fs::Permissions::from_mode(FILE_MODE)).unwrap();
         let cache = fx.open();
         assert!(cache.get(&hash, &content()).is_some());
     }
@@ -2813,7 +2819,7 @@ mod tests {
         assert_ne!(after, before, "the rejected salt must not survive");
         assert_eq!(
             fs::metadata(&path).unwrap().permissions().mode() & 0o777,
-            SALT_MODE
+            FILE_MODE
         );
 
         let warm = fx.open();
@@ -2896,7 +2902,7 @@ mod tests {
         assert_eq!(mode_of(&root), DIR_MODE, "cache root: {umask}");
         assert_eq!(mode_of(shard), DIR_MODE, "shard: {umask}");
         assert_eq!(mode_of(&entry_file), FILE_MODE, "entry: {umask}");
-        assert_eq!(mode_of(&salt_path(&cache)), SALT_MODE, "salt: {umask}");
+        assert_eq!(mode_of(&salt_path(&cache)), FILE_MODE, "salt: {umask}");
 
         // The stamp is written by the open after the directory exists, which is
         // the next run of the binary.
