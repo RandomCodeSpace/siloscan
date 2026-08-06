@@ -117,14 +117,17 @@ impl LayoutMap {
 
 /// Match text as it may be put on screen.
 ///
-/// A secret rule's `matched` is the credential itself, so it is replaced by
+/// A secret rule's `matched` is the credential itself, and a regex rule that
+/// set `redact: true` said its own is one too, so both are replaced by
 /// [`REDACTED_MATCH`] - the same placeholder the JSON report writes - before
-/// any pane draws it. The live-scan path hands the UI findings straight from
-/// the engine, with the raw text still in them, so the substitution has to
-/// happen here rather than at the boundary.
+/// any pane draws it. Which rules those are is decided by
+/// [`output::redacts_match`], so the terminal cannot show what the report
+/// withholds. The live-scan path hands the UI findings straight from the
+/// engine, with the raw text still in them, so the substitution has to happen
+/// here rather than at the boundary.
 ///
 /// Applying this to an already-redacted finding is a no-op: a snapshot's
-/// secret finding carries the placeholder, and either branch returns the
+/// redacted finding carries the placeholder, and either branch returns the
 /// placeholder. `rules` is whatever rule set the session loaded; a finding
 /// whose rule is not in it keeps its text, which is what a snapshot loaded
 /// against unrelated rules needs.
@@ -134,7 +137,7 @@ impl LayoutMap {
 /// display only - `matched` is also a grouping key and a highlight length, and
 /// neither of those may see the rendered form.
 pub fn display_match<'a>(rules: &RuleSet, finding: &'a Finding) -> Cow<'a, str> {
-    if output::is_secret_rule(rules, &finding.rule_id) {
+    if output::redacts_match(rules, &finding.rule_id) {
         Cow::Borrowed(REDACTED_MATCH)
     } else {
         sanitize_for_terminal(&finding.matched)
@@ -671,6 +674,64 @@ mod tests {
     use siloscan_core::scan::Progress;
 
     use crate::state::{FindingRow, Status};
+
+    /// The three treatments the terminal has to tell apart: a secret rule, a
+    /// regex rule that asked to be redacted, and a plain regex rule.
+    fn redaction_rules() -> RuleSet {
+        let src = r#"
+version: 1
+rules:
+  - id: secret.aws-key
+    severity: error
+    message: aws access key
+    secret: { pattern: 'AKIA[0-9A-Z]{16}' }
+  - id: house.token
+    severity: error
+    message: house token
+    regex: { pattern: 'ACME-[0-9]{6}', redact: true }
+  - id: style.needle
+    severity: warning
+    message: needle found
+    regex: { pattern: 'needle' }
+"#;
+        RuleSet {
+            rules: siloscan_core::rules::load_str(src, "test").expect("should load"),
+            sources: vec![("test".to_string(), src.to_string())],
+        }
+    }
+
+    fn matched_as(rule_id: &str, matched: &str) -> String {
+        let finding = Finding {
+            rule_id: rule_id.to_string(),
+            severity: Severity::Error,
+            message: "m".to_string(),
+            path: "src/a.rs".to_string(),
+            line: 1,
+            column: 1,
+            column_utf16: 1,
+            matched: matched.to_string(),
+            fingerprint: "ff".to_string(),
+        };
+        display_match(&redaction_rules(), &finding).into_owned()
+    }
+
+    /// A regex rule is how someone catches a credential format the built-in
+    /// rules do not know, and the terminal was printing that credential while
+    /// the JSON report beside it withheld the built-in ones. `redact: true`
+    /// buys the same treatment here, and buys it for every pane at once: they
+    /// all draw through this function.
+    #[test]
+    fn a_regex_rule_that_asked_to_be_redacted_is_redacted_on_screen() {
+        assert_eq!(matched_as("house.token", "ACME-482913"), REDACTED_MATCH);
+        assert_eq!(
+            matched_as("secret.aws-key", "AKIAIOSFODNN7EXAMPLE"),
+            REDACTED_MATCH
+        );
+        // The default is unchanged: a plain regex rule's match is the finding.
+        assert_eq!(matched_as("style.needle", "needle"), "needle");
+        // And a rule the session's set does not carry keeps its text.
+        assert_eq!(matched_as("absent.rule", "plain"), "plain");
+    }
 
     fn state() -> AppState {
         let mut state = AppState::new(

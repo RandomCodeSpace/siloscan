@@ -88,6 +88,60 @@
 //! they were never sufficient on their own. What keeps the scanned tree out is
 //! that the scanned tree is not where any of this is read from.
 //!
+//! # Who else can read it, and who else can write it
+//!
+//! Being in the user's own cache directory is a statement about which tree the
+//! bytes came from, not about which users can reach them. An entry is an
+//! inventory of a private tree - every scanned file's path, the rule that fired,
+//! the line and column it fired at, and the exact byte length of each secret -
+//! and up to 1.4.1 it was created with whatever the process umask allowed. At
+//! the common `022` that is a world-readable file in a world-readable directory,
+//! which hands every local account a map of a tree they cannot open. At `002` or
+//! `000` the directory is group- or world-*writable*, and then the salt below is
+//! replaceable by anyone on the machine: they delete it, write their own, and
+//! every entry they forge under it authenticates. That is the tag-forging
+//! primitive the 1.4.0 relocation existed to remove, restored by a umask.
+//!
+//! So on unix nothing here is left to the umask:
+//!
+//! - The cache root, the per-scan-root directory and every directory created
+//!   between them are made with mode `0700`, set explicitly after creation
+//!   because `mkdir`'s mode argument is masked ([`create_dir_all_secure`]).
+//! - Entries, the salt and the prune stamp are created `0600`, set explicitly
+//!   on the open file for the same reason.
+//! - Before the directory is read from or written to it is checked
+//!   ([`secure_dir`]): it must be owned by this process's effective uid, and it
+//!   must grant nothing to group or other. A directory that fails either test is
+//!   not repaired and not used - the cache is simply unavailable, every read is
+//!   a miss, nothing is written, and the scan runs cold, which is a scan that
+//!   reports exactly what a warm one would.
+//! - A directory that *is* ours but has been widened is tightened back to
+//!   `0700`, its salt is discarded, and this run still treats it as unavailable.
+//!   Discarding the salt is what makes the widening cost something: every entry
+//!   written before it authenticates under a salt that no longer exists, so
+//!   nothing produced while the directory stood open to other accounts can ever
+//!   be served. The next run finds an owner-only directory and warms normally.
+//! - The salt is checked the same way before its bytes are used: owned by us,
+//!   and no bit outside `0600`.
+//!
+//! There is no way to ask this process for its own effective uid through the
+//! standard library, and a dependency for one call is not worth it, so it is
+//! measured rather than asked for: a file created with `O_EXCL` is owned by the
+//! effective uid of whoever created it, whatever the directory around it says
+//! ([`euid`]). It is a process constant, so this happens at most once per run.
+//!
+//! On Windows none of the above is implemented and none of it is claimed. There
+//! is no ownership check and no ACL is set: files and directories this crate
+//! creates inherit the ACL of the containing directory, which for `LOCALAPPDATA`
+//! is the account's own and for a `--cache-dir` is whatever the user pointed at.
+//! An administrator, a process running as the same account, and anyone with
+//! write access to a loosened `--cache-dir` can therefore read the entries and
+//! replace the salt. What does hold there is the alternate data stream the salt
+//! lives in ([`salt_file`]), which keeps a `.salt` that arrived with a checkout
+//! or an archive from ever being read, and the per-entry tag, which keeps a
+//! borrowed cache from being believed. A Windows cache should be treated as
+//! readable by anything running as that user.
+//!
 //! The crate version inside an entry makes it a miss after an upgrade, but a
 //! miss is not a removal: without one, every release left the whole of the
 //! previous release's cache on disk for good. [`Cache::open`] therefore prunes
@@ -195,6 +249,27 @@ const SALT_NAME: &str = ".salt";
 
 /// Salt width in bytes, matching the digest that consumes it.
 const SALT_LEN: usize = 32;
+
+/// Owner-only mode for every directory this crate creates for a cache, and the
+/// mode an existing cache directory has to be at before it is used. Search and
+/// write are the same bit here: a directory nobody else can enter is a directory
+/// whose entries nobody else can read, and one nobody else can write is one
+/// whose salt nobody else can replace.
+#[cfg(unix)]
+const DIR_MODE: u32 = 0o700;
+
+/// Owner-only mode for every file this crate creates for a cache: entries, the
+/// prune stamp, and the probe [`euid`] measures itself with. The salt has its
+/// own name for the same value ([`SALT_MODE`]) because it is also a value read
+/// back and checked, not only one written.
+#[cfg(unix)]
+const FILE_MODE: u32 = 0o600;
+
+/// The bits a cache directory or a salt must not grant. Anything here means
+/// group or other can reach the file, which is the whole of what these checks
+/// are about.
+#[cfg(unix)]
+const OTHERS_MASK: u32 = 0o077;
 
 /// Owner-only file mode for the salt, and the mask a stored salt is checked
 /// against on read. Group or world access means the file did not come from
@@ -428,6 +503,15 @@ pub struct Cache {
     /// it: [`Cache::put`] creates the directory and the salt with it, and
     /// publishes the result through `salt`, which is consulted first.
     salt_missing: AtomicBool,
+    /// Set once [`secure_dir`] has refused this cache's directory - it belongs
+    /// to another uid, it grants group or other something and could not be
+    /// tightened, or it had to be tightened and its salt retired with it.
+    ///
+    /// Separate from `salt_missing` because the two mean opposite things to a
+    /// writer. A missing salt is the normal state of a first run and must not
+    /// stop [`Cache::put`] from creating one; a refused directory must, or every
+    /// file in the tree pays for the same rejected `stat` and the same mutex.
+    dir_rejected: AtomicBool,
     /// Held while this process creates the salt, so exactly one thread does.
     ///
     /// [`create_salt`] tolerates losing the create race by reading back what
@@ -492,7 +576,14 @@ impl Cache {
     ) -> Cache {
         let rules_hash = rules.source_hash();
         let path_scope = scope.discriminator();
-        if let Some(root) = &root {
+        // Judged once, here, so that what this cache does is decided by the
+        // directory it opened rather than by which of `get` and `put` a caller
+        // reached first. A directory found exposed is tightened by this call and
+        // is unusable for the rest of the run either way.
+        let trust = root.as_deref().map(|root| secure_dir(root, false));
+        if let Some(root) = &root
+            && matches!(trust, Some(DirTrust::Owned(_)))
+        {
             prune_if_stale(root);
         }
         Cache {
@@ -503,6 +594,7 @@ impl Cache {
             path_scope,
             salt: OnceLock::new(),
             salt_missing: AtomicBool::new(false),
+            dir_rejected: AtomicBool::new(trust == Some(DirTrust::Rejected)),
             salt_create: Mutex::new(()),
         }
     }
@@ -615,6 +707,11 @@ impl Cache {
     /// file in the same directory and is renamed into place, so a reader never
     /// observes a partial entry. Failures are silent: a cache that cannot be
     /// written is a cache that misses.
+    ///
+    /// Every directory and every file created here is owner-only, and the cache
+    /// directory is checked before anything is put in it - see the module docs
+    /// and [`secure_dir`]. The salt is resolved first because resolving it is
+    /// what creates and checks the directory; the shard below it follows.
     pub fn put(&self, content_hash: &str, entry: &CachedFile) {
         let Some(path) = self.entry_path(content_hash) else {
             return;
@@ -622,14 +719,15 @@ impl Cache {
         let Some(dir) = path.parent() else {
             return;
         };
-        if fs::create_dir_all(dir).is_err() {
-            return;
-        }
         // An entry this checkout cannot authenticate would be an entry it could
-        // never read back, so there is no point writing one.
+        // never read back, so there is no point writing one - and an entry in a
+        // directory this checkout does not trust is one it must not write at all.
         let Some(salt) = self.salt_for_write() else {
             return;
         };
+        if create_dir_all_secure(dir).is_err() {
+            return;
+        }
 
         let stored = StoredEntry {
             version: VERSION.to_string(),
@@ -651,7 +749,7 @@ impl Cache {
         bytes.push(b'\n');
 
         let temp = dir.join(temp_name(content_hash));
-        if fs::write(&temp, &bytes).is_err() {
+        if write_owner_only(&temp, &bytes).is_err() {
             let _ = fs::remove_file(&temp);
             return;
         }
@@ -688,17 +786,33 @@ impl Cache {
     }
 
     /// This cache's salt for reading, or `None` when there is nothing to read
-    /// it from - an absent, unreadable or foreign salt file, or a directory
-    /// whose location cannot be resolved. Every one of those makes the whole
-    /// cache cold, which is a correct cache.
+    /// it from - an absent, unreadable or foreign salt file, a directory this
+    /// user does not own or that others can reach ([`secure_dir`]), or a
+    /// directory whose location cannot be resolved. Every one of those makes the
+    /// whole cache cold, which is a correct cache.
     fn salt_for_read(&self) -> Option<&[u8; SALT_LEN]> {
         if let Some(salt) = self.salt.get() {
             return Some(salt);
         }
-        if self.salt_missing.load(Ordering::Relaxed) {
+        if self.salt_missing.load(Ordering::Relaxed) || self.dir_rejected.load(Ordering::Relaxed) {
             return None;
         }
-        match resolve_salt(self.root.as_ref()?, false) {
+        let root = self.root.as_ref()?;
+        let owner = match secure_dir(root, false) {
+            DirTrust::Owned(owner) => owner,
+            // Nothing to read from, and nothing to hold against the directory:
+            // a cache that has not been written yet is the normal first run, and
+            // the write path is still allowed to create it.
+            DirTrust::Absent => {
+                self.salt_missing.store(true, Ordering::Relaxed);
+                return None;
+            }
+            DirTrust::Rejected => {
+                self.dir_rejected.store(true, Ordering::Relaxed);
+                return None;
+            }
+        };
+        match resolve_salt(root, owner, false) {
             Some(salt) => Some(self.salt.get_or_init(|| salt)),
             None => {
                 self.salt_missing.store(true, Ordering::Relaxed);
@@ -719,12 +833,21 @@ impl Cache {
     /// all of its entries. Another *process* racing this one still resolves the
     /// same way [`create_salt`] describes.
     ///
-    /// The lock is held across a file create and a small write, and only until
-    /// the first salt is resolved; afterwards the [`OnceLock`] answers without
-    /// taking it.
+    /// The lock is held across a directory create, a file create and a small
+    /// write, and only until the first salt is resolved; afterwards the
+    /// [`OnceLock`] answers without taking it.
+    ///
+    /// The cache directory is created here rather than in [`Cache::put`] so that
+    /// it is created once per cache, with the mode it must have, and checked
+    /// before a single entry is written into it. A directory that fails that
+    /// check is recorded in `dir_rejected` so the rest of the tree does not
+    /// re-run the same refusal per file.
     fn salt_for_write(&self) -> Option<&[u8; SALT_LEN]> {
         if let Some(salt) = self.salt.get() {
             return Some(salt);
+        }
+        if self.dir_rejected.load(Ordering::Relaxed) {
+            return None;
         }
         // A poisoned lock guards no invariant of its own: the salt either
         // resolved into the `OnceLock` or it did not, and either way the value
@@ -738,7 +861,12 @@ impl Cache {
         if let Some(salt) = self.salt.get() {
             return Some(salt);
         }
-        let salt = resolve_salt(self.root.as_ref()?, true)?;
+        let root = self.root.as_ref()?;
+        let DirTrust::Owned(owner) = secure_dir(root, true) else {
+            self.dir_rejected.store(true, Ordering::Relaxed);
+            return None;
+        };
+        let salt = resolve_salt(root, owner, true)?;
         Some(self.salt.get_or_init(|| salt))
     }
 }
@@ -805,6 +933,243 @@ fn absolute_dir(value: OsString) -> Option<PathBuf> {
     Some(path)
 }
 
+/// What [`secure_dir`] found where a cache directory was expected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DirTrust {
+    /// A directory owned by this process's effective uid, granting nothing to
+    /// group or other. The value is that uid, which the salt beside it is
+    /// checked against too.
+    Owned(u32),
+    /// Nothing is there. Not a failure: a cache that has never been written is
+    /// the first run of every scan, and the write path creates it.
+    Absent,
+    /// There is something there, and it is not a directory this crate will read
+    /// from or write to. Left exactly as it was found unless it was ours, in
+    /// which case its mode is tightened and its salt retired - see [`secure_dir`].
+    Rejected,
+}
+
+/// Establish that `root` is a cache directory this crate may use, creating it
+/// when asked to, and answer with the uid that owns it.
+///
+/// This is the check the module docs describe, and it is the whole of it:
+///
+/// - With `create`, `root` and every missing directory above it are created
+///   `0700` ([`create_dir_all_secure`]). A directory this crate has just created
+///   is owned by this process by construction.
+/// - The directory is opened once and every question is asked of that one
+///   handle, so the answer cannot change between the ownership test and the
+///   `chmod` that follows it.
+/// - Owned by another uid: [`DirTrust::Rejected`], and nothing is written,
+///   changed or removed. Someone else's directory is someone else's, and
+///   "repairing" it would mean writing into a directory this user does not
+///   control on the strength of a check that just failed.
+/// - Ours, but granting something to group or other: tightened back to
+///   [`DIR_MODE`], the salt beside it removed, and still [`DirTrust::Rejected`]
+///   for this run. Anything written while other accounts could reach the
+///   directory is now unauthenticatable, which is the point; the next run finds
+///   an owner-only directory with no salt and warms up from cold.
+/// - Ours and owner-only: [`DirTrust::Owned`].
+///
+/// On unix the effective uid comes from [`euid`], which measures it rather than
+/// asking for it. Where it cannot be measured nothing is trusted.
+#[cfg(unix)]
+fn secure_dir(root: &Path, create: bool) -> DirTrust {
+    use std::io::ErrorKind;
+    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+
+    if create && create_dir_all_secure(root).is_err() {
+        return DirTrust::Rejected;
+    }
+    let dir = match fs::File::open(root) {
+        Ok(dir) => dir,
+        // A directory that is not there is not a directory that failed a check.
+        // Anything else - a permission error, a path that is not a directory -
+        // is one this crate does not get to use.
+        Err(err) if err.kind() == ErrorKind::NotFound => return DirTrust::Absent,
+        Err(_) => return DirTrust::Rejected,
+    };
+    let Ok(meta) = dir.metadata() else {
+        return DirTrust::Rejected;
+    };
+    if !meta.is_dir() {
+        return DirTrust::Rejected;
+    }
+    let Some(owner) = euid(root) else {
+        return DirTrust::Rejected;
+    };
+    if meta.uid() != owner {
+        return DirTrust::Rejected;
+    }
+    if meta.permissions().mode() & OTHERS_MASK != 0 {
+        // Ours, so this is closing our own directory rather than editing
+        // someone else's. The salt goes with it: entries written while the
+        // directory stood open must not be servable afterwards, and without a
+        // salt none of them is.
+        if dir
+            .set_permissions(fs::Permissions::from_mode(DIR_MODE))
+            .is_err()
+        {
+            return DirTrust::Rejected;
+        }
+        if let Some(salt) = salt_file(root)
+            && let Err(err) = fs::remove_file(&salt)
+            && err.kind() != ErrorKind::NotFound
+        {
+            return DirTrust::Rejected;
+        }
+        return DirTrust::Rejected;
+    }
+    DirTrust::Owned(owner)
+}
+
+/// No ownership or permission model is enforced off unix. On Windows the
+/// directory is created and used as it is: see the module docs for what that
+/// does and does not mean, and [`salt_file`] for the one provenance signal that
+/// does hold there.
+#[cfg(not(unix))]
+fn secure_dir(root: &Path, create: bool) -> DirTrust {
+    if create && create_dir_all_secure(root).is_err() {
+        return DirTrust::Rejected;
+    }
+    if root.is_dir() {
+        DirTrust::Owned(0)
+    } else if root.exists() {
+        DirTrust::Rejected
+    } else {
+        DirTrust::Absent
+    }
+}
+
+/// Create `dir` and every missing directory above it, owner-only.
+///
+/// The mode is set twice on purpose. `mkdir` takes one, but the kernel masks it
+/// with the process umask, which can only clear bits: for [`DIR_MODE`] that can
+/// never add group or other access, but a `umask` of `0700` would leave a
+/// directory this process cannot itself use. The explicit `chmod` after each
+/// successful create is what makes the mode the stated one rather than the
+/// umask's opinion of it, and it only ever touches a directory this call just
+/// made.
+///
+/// Directories that already exist are left exactly as they are: this function
+/// creates, and [`secure_dir`] judges. Losing a create race is not a failure -
+/// the winner made the same directory with the same mode.
+#[cfg(unix)]
+fn create_dir_all_secure(dir: &Path) -> std::io::Result<()> {
+    use std::io::{Error, ErrorKind};
+    use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _};
+
+    let mut missing = Vec::new();
+    for ancestor in dir.ancestors() {
+        // The empty path is what a relative path's ancestors end on. It is not
+        // a directory to create, and asking for it is an error.
+        if ancestor.as_os_str().is_empty() || ancestor.is_dir() {
+            break;
+        }
+        missing.push(ancestor);
+    }
+    for path in missing.iter().rev() {
+        let mut builder = fs::DirBuilder::new();
+        builder.mode(DIR_MODE);
+        match builder.create(path) {
+            Ok(()) => fs::set_permissions(path, fs::Permissions::from_mode(DIR_MODE))?,
+            Err(err) if err.kind() == ErrorKind::AlreadyExists => {}
+            Err(err) => return Err(err),
+        }
+    }
+    if dir.is_dir() {
+        Ok(())
+    } else {
+        Err(Error::new(
+            ErrorKind::NotADirectory,
+            "cache path is not a directory",
+        ))
+    }
+}
+
+#[cfg(not(unix))]
+fn create_dir_all_secure(dir: &Path) -> std::io::Result<()> {
+    fs::create_dir_all(dir)
+}
+
+/// Write `bytes` to `path`, owner-only, replacing whatever was there.
+///
+/// The mode is given to the create and then set again on the open file, for the
+/// reason [`create_dir_all_secure`] gives: `open`'s mode argument is masked by
+/// the umask, and an existing file keeps the mode it already had. The second
+/// call is on the file descriptor, so it lands on the file that was just
+/// written and not on whatever the path names by the time it runs.
+fn write_owner_only(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write as _;
+
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(FILE_MODE);
+    }
+    let mut file = options.open(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        file.set_permissions(fs::Permissions::from_mode(FILE_MODE))?;
+    }
+    file.write_all(bytes)
+}
+
+/// This process's effective uid, or `None` when it cannot be established.
+///
+/// The standard library exposes no way to ask, and a dependency for one number
+/// is not one this crate is going to take, so it is measured: a file created
+/// with `O_EXCL` belongs to the effective uid of the process that created it,
+/// whoever owns the directory it was created in and whatever mode that directory
+/// carries. Exclusive creation is what makes it sound - a file that already
+/// existed, or a symlink standing in for one, fails the create rather than
+/// answering with someone else's uid - and the probe is removed immediately
+/// afterwards.
+///
+/// `hint` is tried first, because the caller is about to use that directory
+/// anyway and a probe there costs nothing extra. A directory this user cannot
+/// write to falls back to the temporary directory; a machine where neither works
+/// gets no cache, which is a cold scan and a correct one.
+///
+/// A uid is a process constant, so this happens at most once per process: the
+/// answer is memoized and every later call is a load.
+#[cfg(unix)]
+fn euid(hint: &Path) -> Option<u32> {
+    static EUID: OnceLock<u32> = OnceLock::new();
+
+    if let Some(uid) = EUID.get() {
+        return Some(*uid);
+    }
+    let uid = probe_uid(hint).or_else(|| probe_uid(&std::env::temp_dir()))?;
+    Some(*EUID.get_or_init(|| uid))
+}
+
+/// The uid a file created in `dir` by this process comes out owned by, or `None`
+/// when no file could be created there. The probe never outlives the call, and
+/// its name cannot collide with an entry: entries are `*.json`.
+#[cfg(unix)]
+fn probe_uid(dir: &Path) -> Option<u32> {
+    use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
+
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let path = dir.join(format!(".owner.{}.{n}.probe", std::process::id()));
+
+    let file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(FILE_MODE)
+        .open(&path)
+        .ok()?;
+    let uid = file.metadata().ok().map(|meta| meta.uid());
+    drop(file);
+    let _ = fs::remove_file(&path);
+    uid
+}
+
 /// The directory under `base` that holds `scan_root`'s entries: a hash of the
 /// root's canonical path, so every scan root gets its own cache, its own salt
 /// and its own prune stamp.
@@ -855,7 +1220,15 @@ pub fn prune_in(cache_dir: &Path, scan_root: &Path) -> usize {
     prune_at(&root)
 }
 
+/// A prune only ever removes files and writes a stamp, and both are things this
+/// crate does to its own directory. A directory [`secure_dir`] will not vouch
+/// for is therefore not walked and not stamped either: it is not this user's to
+/// tidy, and a stamp in it would be this build claiming it had swept a directory
+/// it never read.
 fn prune_at(root: &Path) -> usize {
+    if !matches!(secure_dir(root, false), DirTrust::Owned(_)) {
+        return 0;
+    }
     let removed = prune_dir(root, SystemTime::now());
     write_stamp(root);
     removed
@@ -874,6 +1247,12 @@ fn prune_at(root: &Path) -> usize {
 /// is when the last pass finished. Without it the pass is once per upgrade and
 /// the age window in [`prune_dir`] would never fire for a user who stays on one
 /// release - which is exactly the user whose cache grows.
+///
+/// The caller establishes that the directory is one this crate may touch
+/// ([`secure_dir`]); this function only decides whether the pass is due. Doing
+/// the check here as well would mean [`Cache::bind`] and this function each
+/// forming their own opinion of the same directory, and the two could differ -
+/// which is how the order of `get` and `put` started to matter.
 fn prune_if_stale(root: &Path) {
     let stamp = root.join(STAMP_NAME);
     if fs::read_to_string(&stamp).is_ok_and(|named| named.trim() == VERSION)
@@ -906,7 +1285,7 @@ fn swept_recently(stamp: &Path) -> bool {
 /// costs a prune pass per scan, which is only where this started.
 fn write_stamp(root: &Path) {
     if root.is_dir() {
-        let _ = fs::write(root.join(STAMP_NAME), format!("{VERSION}\n"));
+        let _ = write_owner_only(&root.join(STAMP_NAME), format!("{VERSION}\n").as_bytes());
     }
 }
 
@@ -1013,16 +1392,23 @@ fn entry_version(path: &Path) -> Option<String> {
 /// cold rather than believed. A location that cannot be resolved yields `None`
 /// - a cache that cannot say where it is does not get believed.
 ///
+/// `owner` is the uid [`secure_dir`] established for the directory, which the
+/// salt file has to match: a salt owned by anyone else was not written here, and
+/// a cache directory whose salt someone else owns is one whose entries this
+/// build has no reason to believe. Callers resolve the directory first, so this
+/// function neither creates nor checks it.
+///
 /// This is tamper resistance, not key management, and it is not what keeps the
 /// scanned tree out - the cache's location does that (see the module docs). The
 /// salt sits unencrypted in a file any process running as this user can read,
-/// so anything already running as this user can forge an entry; so can anything
-/// that can write into this user's cache directory. Neither is a boundary this
-/// crate can defend, and neither is reachable from the tree being scanned.
-fn resolve_salt(root: &Path, create: bool) -> Option<[u8; SALT_LEN]> {
-    let stored = match read_salt(root) {
+/// so anything already running as this user can forge an entry. What no longer
+/// follows is "so can anything that can write into this user's cache directory":
+/// nothing else can, because [`secure_dir`] will not use a directory that lets
+/// it.
+fn resolve_salt(root: &Path, owner: u32, create: bool) -> Option<[u8; SALT_LEN]> {
+    let stored = match read_salt(root, owner) {
         Some(salt) => salt,
-        None if create => create_salt(root)?,
+        None if create => create_salt(root, owner)?,
         None => return None,
     };
     let location = fs::canonicalize(root).ok()?;
@@ -1043,10 +1429,13 @@ fn resolve_salt(root: &Path, create: bool) -> Option<[u8; SALT_LEN]> {
 /// hand - fail to be read rather than be trusted on sight.
 ///
 /// - unix: the file itself, and [`read_salt`] rejects any mode wider than
-///   [`SALT_MODE`]. This is a weak signal on its own: an archive preserves a
-///   `0600` mode exactly, and a `umask` of `077` gives a checked-out file one.
-///   It costs a `stat` this code path already needs, so it stays; it is not
-///   relied on, and 1.3.0's claim that it proved provenance was wrong.
+///   [`SALT_MODE`], and any owner but this one. The mode is a weak signal on its
+///   own: an archive preserves a `0600` mode exactly, and a `umask` of `077`
+///   gives a checked-out file one. It costs a `stat` this code path already
+///   needs, so it stays; it is not relied on, and 1.3.0's claim that it proved
+///   provenance was wrong. The ownership test is not provenance either - it is
+///   what stops another local account from putting its own salt here, which is
+///   how a world-writable cache directory turned into forged entries.
 /// - windows: an NTFS alternate data stream on `.salt` ([`SALT_STREAM`]). Git
 ///   does not record streams and the common archive formats do not carry them,
 ///   so a `.salt` that arrived from elsewhere has no stream and is simply never
@@ -1077,22 +1466,27 @@ fn salt_file(root: &Path) -> Option<PathBuf> {
 
 /// The salt stored in `root`, if it is one this build would have written.
 ///
-/// [`salt_file`] says where to look and what the mode check below is worth.
-/// Everything else - absent, unreadable, not hex, wrong length - lands in the
-/// same place, which is a cold cache.
-fn read_salt(root: &Path) -> Option<[u8; SALT_LEN]> {
+/// [`salt_file`] says where to look and what the mode and ownership checks below
+/// are worth. Everything else - absent, unreadable, not hex, wrong length -
+/// lands in the same place, which is a cold cache.
+fn read_salt(root: &Path, owner: u32) -> Option<[u8; SALT_LEN]> {
     let path = salt_file(root)?;
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt as _;
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
         let meta = fs::metadata(&path).ok()?;
         if !meta.is_file() {
+            return None;
+        }
+        if meta.uid() != owner {
             return None;
         }
         if meta.permissions().mode() & !SALT_MODE & 0o777 != 0 {
             return None;
         }
     }
+    #[cfg(not(unix))]
+    let _ = owner;
     unhex(fs::read_to_string(&path).ok()?.trim())
 }
 
@@ -1130,7 +1524,7 @@ fn read_salt(root: &Path) -> Option<[u8; SALT_LEN]> {
 /// cache as cold for that run. It costs the loser of that race a scan it was
 /// going to do anyway on a cache this empty, and the next run finds a finished
 /// file. Nothing about a report depends on which side of it a process lands.
-fn create_salt(root: &Path) -> Option<[u8; SALT_LEN]> {
+fn create_salt(root: &Path, owner: u32) -> Option<[u8; SALT_LEN]> {
     if !root.is_dir() {
         return None;
     }
@@ -1144,17 +1538,21 @@ fn create_salt(root: &Path) -> Option<[u8; SALT_LEN]> {
     // never use. Only the second is replaced, and only once: losing the second
     // create too means another process refilled it in the same window, and its
     // salt is the one to read.
-    if foreign_salt(&path)
+    if foreign_salt(&path, owner)
         && fs::remove_file(&path).is_ok()
         && let Some(written) = write_salt(&path, &salt)
     {
         return Some(written);
     }
-    read_salt(root)
+    read_salt(root, owner)
 }
 
 /// Create `path` exclusively, owner-only, holding `salt`. `None` when the file
 /// already existed or the write did not complete.
+///
+/// The mode is set on the open file as well as on the create, for the reason
+/// [`create_dir_all_secure`] gives: the create's mode is masked by the process
+/// umask, and this file's mode is checked on every later read.
 fn write_salt(path: &Path, salt: &[u8; SALT_LEN]) -> Option<[u8; SALT_LEN]> {
     use std::io::Write as _;
 
@@ -1166,6 +1564,12 @@ fn write_salt(path: &Path, salt: &[u8; SALT_LEN]) -> Option<[u8; SALT_LEN]> {
         options.mode(SALT_MODE);
     }
     let mut file = options.open(path).ok()?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        file.set_permissions(fs::Permissions::from_mode(SALT_MODE))
+            .ok()?;
+    }
     let mut text = hex(salt);
     text.push('\n');
     file.write_all(text.as_bytes()).ok()?;
@@ -1173,9 +1577,15 @@ fn write_salt(path: &Path, salt: &[u8; SALT_LEN]) -> Option<[u8; SALT_LEN]> {
     Some(*salt)
 }
 
-/// True when a salt file exists and fails the provenance check [`read_salt`]
-/// applies before it reads a byte: on unix, a regular file whose mode is wider
-/// than [`SALT_MODE`].
+/// True when a salt file exists and fails a check [`read_salt`] applies before
+/// it reads a byte: on unix, a regular file whose mode is wider than
+/// [`SALT_MODE`], or one owned by anyone but `owner`.
+///
+/// A salt owned by another uid inside a directory this uid owns and nobody else
+/// can write is a leftover - a directory created by `root`, a restored backup,
+/// a container that changed uids - and not something another account can arrange
+/// today. Replacing it is the same one-time repair the mode case gets, in a
+/// directory this crate has already established is its own.
 ///
 /// Deliberately narrower than "[`read_salt`] returned `None`". A salt with the
 /// right mode whose bytes do not parse is the create race described on
@@ -1187,17 +1597,19 @@ fn write_salt(path: &Path, salt: &[u8; SALT_LEN]) -> Option<[u8; SALT_LEN]> {
 /// Anything that is not a regular file is left alone: it is not a salt this
 /// build wrote and not one it can remove with a single `unlink` either.
 #[cfg(unix)]
-fn foreign_salt(path: &Path) -> bool {
-    use std::os::unix::fs::PermissionsExt as _;
-    fs::metadata(path)
-        .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & !SALT_MODE & 0o777 != 0)
+fn foreign_salt(path: &Path, owner: u32) -> bool {
+    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+    fs::metadata(path).is_ok_and(|meta| {
+        meta.is_file()
+            && (meta.uid() != owner || meta.permissions().mode() & !SALT_MODE & 0o777 != 0)
+    })
 }
 
 /// No provenance check outside unix carries a signal a file can fail on its
 /// own: on Windows the salt is an alternate data stream, which a checkout
 /// cannot carry at all, and elsewhere there is no salt to begin with.
 #[cfg(not(unix))]
-fn foreign_salt(_path: &Path) -> bool {
+fn foreign_salt(_path: &Path, _owner: u32) -> bool {
     false
 }
 
@@ -1418,6 +1830,32 @@ mod tests {
             findings: vec![finding("a.rule", 1, SECRET), finding("b.rule", 2, "other")],
             facts: None,
         }
+    }
+
+    /// The uid this test process runs as, measured the way the code under test
+    /// measures it.
+    fn this_uid() -> u32 {
+        #[cfg(unix)]
+        {
+            euid(&std::env::temp_dir()).expect("a uid must be measurable to test ownership")
+        }
+        #[cfg(not(unix))]
+        {
+            0
+        }
+    }
+
+    /// The mode of `path`, or `None` off unix.
+    #[cfg(unix)]
+    fn mode_of(path: &Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::metadata(path).unwrap().permissions().mode() & 0o777
+    }
+
+    #[cfg(unix)]
+    fn set_mode(path: &Path, mode: u32) {
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
     }
 
     fn files_in(dir: &Path) -> Vec<String> {
@@ -2074,7 +2512,8 @@ mod tests {
     fn retag(cache: &Cache, content_hash: &str, edit: impl FnOnce(&mut StoredEntry)) {
         let mut stored = read_entry(cache, content_hash);
         edit(&mut stored);
-        let salt = resolve_salt(cache.root().unwrap(), false).expect("a written cache has a salt");
+        let salt = resolve_salt(cache.root().unwrap(), this_uid(), false)
+            .expect("a written cache has a salt");
         stored.tag = entry_tag(
             &salt,
             &cache.entry_key(content_hash),
@@ -2160,7 +2599,10 @@ mod tests {
         theirs.put(&hash, &entry());
         let source = theirs.entry_path(&hash).unwrap();
         let target = mine.entry_path(&hash).unwrap();
-        fs::create_dir_all(target.parent().unwrap()).unwrap();
+        // Owner-only, like every directory this crate makes: a directory staged
+        // any other way would be refused for its mode and prove nothing about
+        // the entry inside it.
+        create_dir_all_secure(target.parent().unwrap()).unwrap();
         fs::copy(&source, &target).unwrap();
 
         assert!(
@@ -2381,6 +2823,303 @@ mod tests {
         );
     }
 
+    /// Everything this crate creates for a cache is owner-only, and none of it
+    /// is left to the process umask.
+    ///
+    /// The shipped defect: at the common `umask 022` the cache directory came
+    /// out `0755` and every entry `0644`, so an inventory of a private tree -
+    /// paths, rule ids, positions, and each secret's exact length - was readable
+    /// by every account on the machine. At `002` or `000` the directory was
+    /// group- or world-writable as well, which is a salt anyone could replace.
+    ///
+    /// Run under `umask 000` by re-executing this one test through a shell,
+    /// because there is no way to set a umask from inside a process without a
+    /// dependency this crate does not have. The child is asserted to have
+    /// actually run the test, so a rename here cannot turn into a silent pass.
+    /// Where there is no shell to be had, the assertions still run under
+    /// whatever umask the harness has, and say so.
+    #[cfg(unix)]
+    #[test]
+    fn created_directories_and_files_are_owner_only_whatever_the_umask() {
+        const CHILD: &str = "SILOSCAN_TEST_PERMISSIVE_UMASK";
+        const NAME: &str =
+            "cache::tests::created_directories_and_files_are_owner_only_whatever_the_umask";
+
+        if std::env::var_os(CHILD).is_some() {
+            assert_created_paths_are_owner_only();
+            return;
+        }
+        let Ok(exe) = std::env::current_exe() else {
+            assert_created_paths_are_owner_only();
+            return;
+        };
+        let run = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!("umask 000; exec \"$0\" --exact --nocapture {NAME}"))
+            .arg(&exe)
+            .env(CHILD, "1")
+            .output();
+        let Ok(run) = run else {
+            // No shell, so no umask to set. The property is still asserted, it
+            // is just asserted under this process's umask.
+            assert_created_paths_are_owner_only();
+            return;
+        };
+        let mut text = String::from_utf8_lossy(&run.stdout).into_owned();
+        text.push_str(&String::from_utf8_lossy(&run.stderr));
+        assert!(run.status.success(), "under umask 000:\n{text}");
+        assert!(
+            text.contains("1 passed"),
+            "the child ran no test, so this proves nothing:\n{text}"
+        );
+    }
+
+    #[cfg(unix)]
+    fn assert_created_paths_are_owner_only() {
+        let fx = Fixture::new();
+        let hash = hash();
+        let cache = fx.open();
+        cache.put(&hash, &entry());
+
+        // What the umask would have produced on its own, for the failure
+        // message: at 000 this is 0666 and at 022 it is 0644, and either way
+        // the modes below are the ones this crate set rather than the ones it
+        // was given.
+        let reference = fx.base().join("reference");
+        fs::write(&reference, "x").unwrap();
+        let umask = format!("a umask-created file here is {:o}", mode_of(&reference));
+
+        let root = cache.root().unwrap().to_path_buf();
+        let entry_file = cache.entry_path(&hash).unwrap();
+        let shard = entry_file.parent().unwrap();
+
+        assert_eq!(mode_of(&root), DIR_MODE, "cache root: {umask}");
+        assert_eq!(mode_of(shard), DIR_MODE, "shard: {umask}");
+        assert_eq!(mode_of(&entry_file), FILE_MODE, "entry: {umask}");
+        assert_eq!(mode_of(&salt_path(&cache)), SALT_MODE, "salt: {umask}");
+
+        // The stamp is written by the open after the directory exists, which is
+        // the next run of the binary.
+        let _ = fx.open();
+        let stamp = root.join(STAMP_NAME);
+        assert!(stamp.is_file(), "no stamp to check");
+        assert_eq!(mode_of(&stamp), FILE_MODE, "stamp: {umask}");
+
+        // And nothing else this crate leaves behind is readable either.
+        for path in [
+            root.as_path(),
+            shard,
+            &entry_file,
+            &salt_path(&cache),
+            &stamp,
+        ] {
+            assert_eq!(
+                mode_of(path) & OTHERS_MASK,
+                0,
+                "{} is reachable by others: {umask}",
+                path.display()
+            );
+        }
+    }
+
+    /// A cache directory that grants group or other anything is not read from,
+    /// not written to, and not believed - whatever it holds was reachable by
+    /// accounts that are not this one. It is tightened back to `0700` and its
+    /// salt goes with it, so nothing written while it stood open can ever
+    /// authenticate again, and the run after it is a normal cold one.
+    #[cfg(unix)]
+    #[test]
+    fn a_cache_directory_others_can_reach_is_not_trusted() {
+        for loose in [0o777, 0o770, 0o707, 0o750, 0o705, 0o701] {
+            let fx = Fixture::new();
+            let hash = hash();
+            let cache = fx.open();
+            cache.put(&hash, &entry());
+            assert!(cache.get(&hash, &content()).is_some(), "warm to begin with");
+
+            let root = cache.root().unwrap().to_path_buf();
+            let entry_file = cache.entry_path(&hash).unwrap();
+            set_mode(&root, loose);
+
+            let exposed = fx.open();
+            assert!(
+                exposed.get(&hash, &content()).is_none(),
+                "a {loose:o} cache directory was read"
+            );
+            let other = content_hash(b"another file");
+            exposed.put(&other, &entry());
+            assert_eq!(
+                files_in(&root),
+                vec![hash[..2].to_string()],
+                "a {loose:o} cache directory was written to"
+            );
+            assert_eq!(
+                files_in(&root.join(&hash[..2])),
+                vec![entry_file.file_name().unwrap().to_string_lossy()],
+                "a {loose:o} cache directory was written to"
+            );
+            assert_eq!(
+                mode_of(&root),
+                DIR_MODE,
+                "a {loose:o} directory was left as it was"
+            );
+            assert!(
+                !salt_path(&exposed).exists(),
+                "the salt survived a directory others could write"
+            );
+
+            // The next run finds a directory that is owner-only again. The
+            // entries written before it was exposed stay unreadable - their
+            // salt is gone - and the cache refills from cold.
+            let next = fx.open();
+            assert!(
+                next.get(&hash, &content()).is_none(),
+                "an entry from an exposed directory came back"
+            );
+            next.put(&hash, &entry());
+            assert!(
+                next.get(&hash, &content()).is_some(),
+                "the cache never warmed up again"
+            );
+        }
+    }
+
+    /// A cache directory or a salt belonging to another uid is not this user's
+    /// to read, write or repair.
+    ///
+    /// Staging one needs `chown`, which needs root, so the full sequence only
+    /// runs where the suite runs as root, as a container-based CI does. An
+    /// unprivileged run gets what it can honestly get instead: a directory that
+    /// already belongs to another uid - `/usr` and friends - must come back
+    /// [`DirTrust::Rejected`] and must come back untouched. That does not
+    /// isolate the ownership test from the mode test, because a system directory
+    /// fails both, and an unprivileged process could not carry out the repair
+    /// either way. It does establish that no directory belonging to somebody
+    /// else is ever accepted, which is the property.
+    #[cfg(unix)]
+    #[test]
+    fn a_cache_directory_or_salt_owned_by_another_uid_is_not_trusted() {
+        use std::os::unix::fs::{MetadataExt as _, chown};
+
+        /// `nobody` on every distribution this is likely to run on, and an
+        /// account that certainly is not the one running the tests.
+        const OTHER: u32 = 65534;
+
+        if this_uid() != 0 {
+            let foreign: Vec<PathBuf> = ["/usr", "/etc", "/var", "/bin"]
+                .iter()
+                .map(PathBuf::from)
+                .filter(|path| {
+                    fs::metadata(path).is_ok_and(|meta| meta.is_dir() && meta.uid() != this_uid())
+                })
+                .collect();
+            assert!(
+                !foreign.is_empty(),
+                "no directory owned by another uid to test against"
+            );
+            for path in foreign {
+                let before = mode_of(&path);
+                assert_eq!(
+                    secure_dir(&path, false),
+                    DirTrust::Rejected,
+                    "{} belongs to another uid and was accepted",
+                    path.display()
+                );
+                assert_eq!(
+                    mode_of(&path),
+                    before,
+                    "{} belongs to another uid and was modified",
+                    path.display()
+                );
+            }
+            eprintln!(
+                "partial: staging a cache directory owned by another uid needs \
+                 root, and this run is uid {}. What ran here is the refusal of \
+                 directories that already belong to somebody else; the salt half \
+                 and the do-not-repair half need a root run.",
+                this_uid()
+            );
+            return;
+        }
+
+        let fx = Fixture::new();
+        let hash = hash();
+        let cache = fx.open();
+        cache.put(&hash, &entry());
+        assert!(cache.get(&hash, &content()).is_some(), "warm to begin with");
+        let root = cache.root().unwrap().to_path_buf();
+        let salt = salt_path(&cache);
+        let salt_before = fs::read_to_string(&salt).unwrap();
+
+        chown(&root, Some(OTHER), None).unwrap();
+        let theirs = fx.open();
+        assert!(
+            theirs.get(&hash, &content()).is_none(),
+            "a directory owned by another uid was read"
+        );
+        theirs.put(&content_hash(b"another file"), &entry());
+        assert_eq!(
+            fs::read_to_string(&salt).unwrap(),
+            salt_before,
+            "another user's directory was repaired"
+        );
+        assert_eq!(
+            mode_of(&root),
+            DIR_MODE,
+            "another user's directory was chmodded"
+        );
+
+        // The directory back, the salt not. A salt this user does not own is
+        // one this user did not write, whatever its mode says.
+        chown(&root, Some(this_uid()), None).unwrap();
+        chown(&salt, Some(OTHER), None).unwrap();
+        let cache = fx.open();
+        assert!(
+            cache.get(&hash, &content()).is_none(),
+            "a salt owned by another uid was used"
+        );
+
+        // Inside a directory this user owns and nobody else can write, that
+        // salt is a leftover rather than an attack, and the next write replaces
+        // it instead of leaving the cache cold forever.
+        cache.put(&hash, &entry());
+        assert_ne!(fs::read_to_string(&salt).unwrap(), salt_before);
+        assert!(fx.open().get(&hash, &content()).is_some());
+    }
+
+    /// The determinism rule, against the state the checks above introduce: a
+    /// cache that is refused produces exactly what a cold scan produces, because
+    /// a refused cache is a miss and a miss is a rescan.
+    #[cfg(unix)]
+    #[test]
+    fn cold_warm_and_refused_caches_produce_identical_findings() {
+        let fx = Fixture::new();
+        let hash = hash();
+        let cold = entry();
+
+        let cache = fx.open();
+        cache.put(&hash, &cold);
+        let warm = fx
+            .open()
+            .get(&hash, &content())
+            .expect("a warm cache is a hit");
+
+        set_mode(cache.root().unwrap(), 0o777);
+        // A refused cache answers `None`, which is the caller's signal to scan
+        // the file - and scanning the file is what produced `cold`.
+        let refused = fx.open().get(&hash, &content());
+        assert!(refused.is_none(), "a refused cache served an entry");
+        let refused = refused.unwrap_or_else(|| cold.clone());
+
+        let bytes = |file: &CachedFile| serde_json::to_vec(&file.findings).unwrap();
+        assert_eq!(bytes(&cold), bytes(&warm), "warm output differs from cold");
+        assert_eq!(
+            bytes(&cold),
+            bytes(&refused),
+            "refused output differs from cold"
+        );
+    }
+
     /// A scan root's cache is keyed by where the root is, so moving the root is
     /// a cold scan and nothing else. Moving it is not tampering; it is also not
     /// something the entries, which carry paths, can be dragged through.
@@ -2412,7 +3151,7 @@ mod tests {
         let fx = Fixture::new();
         let cache = fx.open();
         cache.put(&hash(), &entry());
-        let salt = resolve_salt(cache.root().unwrap(), false).unwrap();
+        let salt = resolve_salt(cache.root().unwrap(), this_uid(), false).unwrap();
         let body = read_entry(&cache, &hash()).body_bytes().unwrap();
 
         let tag = entry_tag(&salt, &cache.entry_key(&hash()), &body);
@@ -2470,8 +3209,8 @@ mod tests {
         let fx = Fixture::new();
         let root = fx.root().join("gone");
 
-        assert!(create_salt(&root).is_none());
-        assert!(resolve_salt(&root, true).is_none());
+        assert!(create_salt(&root, this_uid()).is_none());
+        assert!(resolve_salt(&root, this_uid(), true).is_none());
         assert!(!root.exists(), "a failed salt left something behind");
     }
 
@@ -2490,7 +3229,7 @@ mod tests {
         let cold = fx.open();
         assert!(cold.get(&hash, &content()).is_none());
         assert!(!salt_path(&cold).exists(), "a read created a salt");
-        assert!(resolve_salt(cache.root().unwrap(), false).is_none());
+        assert!(resolve_salt(cache.root().unwrap(), this_uid(), false).is_none());
     }
 
     #[test]
@@ -2534,7 +3273,10 @@ mod tests {
         let hash = hash();
 
         let in_tree = fx.root().join(CACHE_DIR);
-        fs::create_dir_all(&in_tree).unwrap();
+        // Owner-only, as an attacker's archive would unpack it: the point here
+        // is that the directory is never looked at, so it must not fail for a
+        // reason as incidental as its mode.
+        create_dir_all_secure(&in_tree).unwrap();
         let forged = cache_rooted_at(&in_tree);
         forged.put(
             &hash,

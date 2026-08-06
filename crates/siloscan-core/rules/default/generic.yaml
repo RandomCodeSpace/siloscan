@@ -10,7 +10,28 @@ rules:
     severity: error
     message: 'Detected credentials embedded in a URL, exposing the account they authenticate to anyone who can read the source.'
     secret:
-      pattern: '(?i)\b[a-z][a-z0-9+.-]{1,15}://([^\s:@/?#''"\x60<>\\]{1,64}):([^\s:@/?#''"\x60<>\\]{6,128})@[a-z0-9._-]{1,255}'
+      # The username repeats from zero, not one: `redis://:password@host` and
+      # `amqp://:password@broker` - no username at all - are the canonical
+      # forms Redis and RabbitMQ document, and through 1.4.1 neither was ever
+      # reported.
+      #
+      # The password is two alternatives rather than one character class so
+      # that `/` and `@` are each reachable without the other. A password may
+      # legally carry neither unencoded, and people paste both anyway:
+      #
+      #   alternative one  allows `/`, excludes `@`. The greedy run then ends
+      #                    at the first `@`, which is the delimiter, because a
+      #                    host cannot contain `/`. Unambiguous.
+      #   alternative two  allows `@`, excludes `/`. Reached only when the
+      #                    first alternative cannot complete, and the greedy
+      #                    run backtracks to the last `@` on the line.
+      #
+      # Ordered that way on purpose. The first alternative is what 1.4.1
+      # matched plus `/`, so every value it already reported it still reports
+      # byte for byte, and a URL whose path carries an `@` - a scoped npm
+      # package, say - keeps the delimiter reading rather than swallowing the
+      # host into the secret.
+      pattern: '(?i)\b[a-z][a-z0-9+.-]{1,15}://([^\s:@/?#''"\x60<>\\]{0,64}):((?:[^\s:@?#''"\x60<>\\]{6,128})|(?:[^\s:/?#''"\x60<>\\]{6,128}))@[a-z0-9._-]{1,255}'
       group: 2
       entropy: 3.0
       keywords:
@@ -22,6 +43,12 @@ rules:
           - '\{\{'
           - '%\(?[a-zA-Z_]'
           - '^\[[^]]+]$'
+          # A build-time substitution marker - `@DB_PASSWORD@`, `@@DB_PASSWORD@@`
+          # - which autoconf, systemd `.in` units and Debian packaging leave in
+          # a template where the value goes. A name standing in for a value, the
+          # same as `${...}` and `{{...}}` above, and `@` is a value character
+          # here, so without this the marker itself reads as the password.
+          - '^@{1,2}[A-Za-z0-9_.-]{1,64}@{1,2}$'
           # Placeholder passwords, matched against the whole captured value.
           #
           # These were substring stopwords through 1.4.0, and `pass` and `word`
@@ -38,6 +65,19 @@ rules:
           # Every word that was a stopword before is still here, which makes
           # this strictly less suppressive than what it replaces.
           - '(?i)^(?:(?:[-_.+~*]|%20)*(?:pass(?:wd|word|phrase)?|word|secret|token|credentials?|creds|api|apikey|key|db|database|user(?:name)?|admin|root|host|local(?:host)?|changeme|changeit|change|replace|insert|enter|put|set|goes|here|with|your|my|our|the|some|own|new|real|actual|not(?:real)?|none|null|empty|unset|undefined|todo|fixme|value|string|placeholder|redacted|hidden|masked|example|sample|dummy|fake|invalid|test(?:ing)?|demo|sandbox|super|top(?:secret)?|mysecret|hunter2|letmein|x{3,}))+(?:[-_.+~*]|%20)*$'
+          # The same vocabulary with a counter after it - `key_1234`,
+          # `password1`, `token-42` - which is what a documented example URL
+          # carries. Deliberately not `(?i)`: the whole argument for the
+          # anchored pattern above is that a real password spelling a
+          # placeholder word is still a password, and every one of those the
+          # corpus and the pack's own tests carry - `MyPassword123`,
+          # `s3cr3tPassw0rd99`, `Tokenb3arer-Xk29` - has a capital in it.
+          # Lowercase throughout plus a numeric suffix is prose.
+          #
+          # Measured, not supposed: without it, supporting the empty-username
+          # form reports `dotenv://:key_1234@dotenv.org/vault/.env.vault` from
+          # the error message dotenv ships, five times over in one node_modules.
+          - '^(?:pass(?:wd|word|phrase)?|word|secret|token|credentials?|creds|api|apikey|key|db|database|user(?:name)?|admin|root|host|value|string|example|sample|dummy|fake|test|demo)[-_.]?[0-9]{1,8}$'
   - id: secrets.aws-secret-access-key
     severity: error
     message: 'Identified an AWS secret access key, which pairs with an access key id to grant API access to the account.'
@@ -66,9 +106,107 @@ rules:
     severity: warning
     message: 'Detected a high-entropy value assigned to a secret-like identifier, which is how a hardcoded credential usually looks.'
     secret:
-      pattern: '(?i)[\w.-]{0,50}?(?:pass(?:wd|word)?|secret|token|api[_.-]?key|access[_.-]?key|private[_.-]?key|signing[_.-]?key|encryption[_.-]?key|master[_.-]?key|client[_.-]?secret|auth[_.-](?:token|key|secret|pass|header)|authorization|credentials?|creds)(?:[ \t]{0,20}|[_.-][\w.-]{0,20}[ \t]{0,5})(?::[ \t]{0,5}[\w&:<>,\[\] ]{1,40})?[\s''"]{0,3}(?:=|:{1,3}=|:|=>)[\x60''"\s=]{0,5}([A-Za-z0-9!#$%^&*_+=/.~-]{20,128})(?:[\x60''"\s;]|\\[nr]|$)'
+      # The captured value class and the terminator that closes it.
+      #
+      # Through 1.4.1 the class was `[A-Za-z0-9!#$%^&*_+=/.~-]`, which is
+      # narrower than a password. `(`, `)`, `[`, `]`, `{`, `}`, `:`, `@`, `?`
+      # and every non-ASCII letter were outside it, so `S3cr3t(P@ss)!` was not
+      # a value this rule could describe - and because the pattern ends in a
+      # mandatory terminator, a value carrying one of those characters did not
+      # report a truncated span, it did not report at all.
+      #
+      # Two changes, kept apart on purpose:
+      #
+      #   in the class     `@ [ ] { }` and the Latin letter ranges, so bracket,
+      #                    at-sign and accented passwords are describable.
+      #   as terminators   `, : ( ) < > | \`, so a value that ends at one of
+      #                    them still closes. They are deliberately not in the
+      #                    class: `(` is call syntax, and letting it in turns
+      #                    `base64.b64encode(f` into a candidate.
+      #
+      # Both were then corrected by measuring - a real node_modules, then 1.8 GB
+      # of published Rust and C under a cargo registry - rather than by reading
+      # the pattern, which moved three more decisions:
+      #
+      #   `? [ ] { }`      terminate rather than continue after all. In
+      #                    minified bundle output they are index and block
+      #                    syntax, and in the class they report
+      #                    `params[0].toLowerCase`,
+      #                    `heritageClauses[1].getFirstToken` and
+      #                    `options2?.onresumptiontoken`.
+      #   `:`              terminates rather than continues. 1.4.1 put it in
+      #                    the class so that a colon-bearing password could be
+      #                    described, and on the registry that turned every
+      #                    scope-resolution path into a credential: findings
+      #                    went 23 -> 569, and 474 of the 569 lines carried
+      #                    `::` - `let token = Literal::u8_unsuffixed(0);`,
+      #                    `let secret_key = p256::SecretKey::from_pkcs8_der(`.
+      #                    The identifier allowlist below cannot save them,
+      #                    because it requires every separator to be followed
+      #                    by a word and a doubled `::` never is. The one
+      #                    measurement 1.4.1 did take was a node_modules, which
+      #                    is JavaScript and has no `::` at all. The cost is
+      #                    the same one the non-ASCII decision below pays: a
+      #                    password containing a colon is captured up to it.
+      #   non-ASCII        is `\x{C0}-\x{24F}`, the Latin letters, not all of
+      #                    unicode. A password policy that accepts unicode
+      #                    produces accented Latin, and Latin prose is written
+      #                    with spaces, which terminate a value. Scripts with
+      #                    no word separator do not: with all of unicode in the
+      #                    class, a whole line of Chinese out of a localized
+      #                    message catalogue is one high-entropy token, and the
+      #                    rule reported one per catalogue. The cost is stated
+      #                    rather than hidden - a password written in Cyrillic,
+      #                    Greek or CJK is captured only up to its first such
+      #                    character, which is why the terminator carries the
+      #                    rest of unicode: a value that runs into one of those
+      #                    characters still closes and still reports, shorter.
+      #
+      # Both classes are written `(?-i:...)`, and that is load-bearing rather
+      # than tidy. The regex crate applies Unicode simple case folding to a
+      # class under `(?i)`, and the terminator range `\x{250}-\x{10FFFF}`
+      # contains U+212A KELVIN SIGN, U+212B ANGSTROM SIGN and U+1E9E LATIN
+      # CAPITAL SHARP S, which fold onto `k`/`K`, `a`-ring and sharp-s - all of
+      # them value characters. Under `(?i)` the two classes therefore
+      # overlapped: `SERVICE_PASSWORD=7o3Z4pfUrkFWZ9cBrlQb` reported twice,
+      # once at the full span and once truncated at the `k`, with a redacted
+      # `matched` that was a prefix of the credential and a reported byte
+      # length that was wrong. Turning folding off for the two classes - and
+      # only for them, so the identifier half of the pattern stays
+      # case-insensitive - restores both invariants below.
+      #
+      # Nothing that terminates a value is in the class and nothing in the
+      # class terminates, so the captured span is the maximal run either way.
+      # No character that was already a terminator - backtick, quote,
+      # whitespace, `;`, backslash - moved into the class, which is what keeps
+      # every span this rule already reported byte-identical, and with it every
+      # fingerprint in an existing baseline.
+      #
+      # The third connector alternative crosses exactly one newline to reach a
+      # `value` key. That is the Kubernetes container environment shape, where
+      # the name and the value are two entries of the same list item:
+      #
+      #   - name: DATABASE_PASSWORD
+      #     value: "..."
+      #
+      # One newline and one literal key, so it cannot wander down a file: the
+      # `valueFrom:` form two lines below it in the same manifest - which is
+      # the correct pattern and carries no secret - does not match, because
+      # what follows `value` there is `From`, not the connector.
+      pattern: '(?i)[\w.-]{0,50}?(?:pass(?:wd|word|phrase)?|secret|token|api[_.-]?key|access[_.-]?key|private[_.-]?key|signing[_.-]?key|encryption[_.-]?key|master[_.-]?key|client[_.-]?secret|auth[_.-](?:token|key|secret|pass|header)|authorization|credentials?|creds)(?:[ \t]{0,20}|[_.-][\w.-]{0,20}[ \t]{0,5}|[\w.-]{0,20}[ \t]{0,20}\r?\n[ \t]{0,40}value)(?::[ \t]{0,5}[\w&:<>,\[\] ]{1,40})?[\s''"]{0,3}(?:=|:{1,3}=|:|=>)[\x60''"\s=]{0,5}((?-i:[0-9A-Za-z_!#$%&*+\-./=@^~\x{C0}-\x{D6}\x{D8}-\x{F6}\x{F8}-\x{24F}]{20,128}))(?:(?-i:[\x60''"\s;,:()<>|\\?\[\]{}\x{80}-\x{BF}\x{D7}\x{F7}\x{250}-\x{10FFFF}])|$)'
       group: 1
-      entropy: 3.7
+      # Shannon entropy over bytes has a ceiling of log2(length), so a floor is
+      # a statement about the shortest value the rule accepts as much as about
+      # randomness. 3.7 was above what the shapes this rule exists for actually
+      # measure: thirty-two random hex characters average about 3.66 and forty
+      # about 3.73, so a 32-hex webhook secret cleared the old floor roughly a
+      # quarter of the time and a 40-hex OAuth client secret rarely.
+      #
+      # 3.4 sits under every shape in the detection corpus - the lowest
+      # reported positive measures 3.50 - and above the identifier and dotted
+      # reference values the corpus argues must stay quiet. It is measured, not
+      # chosen: see tests/corpus/README.md.
+      entropy: 3.4
       keywords:
         - 'password'
         - 'passwd'
@@ -108,30 +246,104 @@ rules:
           - '^(?:AGE-SECRET-KEY-1|ABIA|ACCA|AIza|AKIA|AQVN|ASIA|ATATT3|CLOJARS_|EZAK|EZTK|FLWPUBK_|FLWSECK_|GR1348941|HRKU-|NRAK-|NRII-|NRJS-|PMAK-|SG\.)'
           - '^(?:dnkey-|do[opr]_v1_|dp\.pt\.|dt0c01\.|duffel_(?:live|test)_|fio-u-|fm2_|fo1_|gh[oprsu]_|github_pat_|glagent-|glc_|glcbt-|gldt-|glffct-|glft-|glimt-|gloas-|glpat-|glptt-|glrt-|glsa_|glsoat-|hf_|hvs\.|ico-|lin_api_|npm_|ntn_|ops_eyJ)'
           - '^(?:pnu_|pplx-|pscale_(?:oauth|pw|tkn)_|pul-|rdme_|(?:rk|sk)_(?:live|prod|test)_|rubygems_|sgp_|shippo_(?:live|test)_|shp(?:at|ca|pa|ss)_|sk-ant-(?:admin01|api03)-|sm_(?:aat|pat|sat)_|sntryu_|sq0atp-|sq[apu]_|tfp_|xapp-|xkeysib-|xox[abepr]-|xoxe\.)'
-          # The 40-character shape `secrets.aws-secret-access-key` and
-          # `secrets.sourcegraph-access-token` both match on, for the same
-          # reason: whichever of them fires, this rule firing beside it says
-          # nothing the first one did not.
-          - '^[A-Za-z0-9/+]{40}$'
+          # Four more vendor formats, each measured reporting twice against the
+          # detection corpus - once under its own rule and once here. Their
+          # markers are too short to sit in the prefix lists above (`SK`,
+          # `key-`, `Q~`, `sk-`), so each is matched as a whole shape instead:
+          # the length and alphabet come off the vendor rule's own pattern in
+          # secrets.yaml, so nothing but that vendor's format is claimed.
+          - '^SK[0-9a-fA-F]{32}$'
+          - '^key-[a-f0-9]{32}$'
+          - '^[A-Za-z0-9_~.]{3}[0-9]Q~[A-Za-z0-9_~.-]{31,34}$'
+          - '^sk-(?:proj|svcacct|admin)-[A-Za-z0-9_-]{58,74}T3Blb'
+          - '^sk-[A-Za-z0-9]{20}T3Blb'
+          # AWS's documentation secret key, which every tutorial and README
+          # pastes verbatim. Anchored on the uppercase `EXAMPLE` suffix AWS
+          # puts in its sample material rather than matched as a substring, so
+          # a real credential that happens to contain the letters is reported.
+          #
+          # This replaces a `^[A-Za-z0-9/+]{40}$` entry that claimed the AWS
+          # secret-key rule already covered every forty-character value. It did
+          # not: that rule matches on the identifier - `aws...secret`,
+          # `secret_access_key` - and says nothing about a forty-character
+          # value assigned to any other name. GitHub OAuth client secrets (40
+          # hex), Cloudflare keys and half the token generators in use emit
+          # exactly forty characters, and all of them were dropped.
+          - 'EXAMPLE(?:KEY|ID|SECRET|TOKEN)?$'
           - '^\$'
           - '\$\{'
           - '\{\{'
           - '^%'
-          - '=[^=]'
-          - '^[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+$'
+          # A captured value that runs on into the next query parameter. `&` is
+          # a value character, so `?secret=<64 hex>&relay=wss%3A%2F%2F...` is
+          # one span and everything after the `&` belongs to the URL, not to
+          # the credential.
+          #
+          # This replaces a blanket `=[^=]`. `=` is in the value class and has
+          # been since 1.4.0, so that entry - not the class - is why a password
+          # carrying an `=` was reported at no length at all, and `=` is what a
+          # generated password is full of. Dropping it outright costs 9 findings
+          # on 1.8 GB of published crates under a cargo registry, and every one
+          # of the 9 is a query string: two AWS canonical-request fixtures, five
+          # codecov badge URLs and two NWC connection URIs. All nine continue
+          # into `&name=`, which is what this entry says instead. The registry
+          # stays at 410 and a password containing an `=` is now reported.
+          #
+          # The cost is stated rather than hidden: a password carrying `&` and
+          # then `=`, in that order, is still dropped.
+          - '&[\w.-]{1,40}='
+          # The other half of what `=[^=]` was doing: a captured value that is
+          # itself an assignment to an identifier written in words. Minified
+          # bundle output chains them - `didScheduleRenderPhaseUpdateDuringThis\
+          # Pass=didScheduleRenderPhaseUpdate=!0` - and the identifier on the
+          # left ends in `pass`, so the rule reaches it and the value class runs
+          # through the `=`. One finding in a real node_modules, and the shape
+          # is the word-sequence pattern already argued below, anchored on the
+          # `=` rather than on the end of the value.
+          #
+          # A generated password does not survive it: the shape needs two word
+          # segments before the `=`, and `Tz9=fQ4wLp2XvEr8Sd1M` has one.
+          - '^[_$]?(?:[a-z]{2,}|[A-Z][a-z]+)(?:[0-9]{0,4}(?:[a-z]{2,}|[A-Z][a-z]+)){1,10}[0-9]{0,4}='
+          # A build-time substitution marker, for the reason spelled out on the
+          # same entry in `secrets.generic-credentialed-url`.
+          - '^@{1,2}[A-Za-z0-9_.-]{1,64}@{1,2}$'
+          # A SCREAMING_SNAKE name, and the `__NAME__` marker a build-time
+          # substitution leaves behind. Both are names standing where a value
+          # goes; the second form is what `web.config` and `appsettings.json`
+          # ship as their password placeholder. Written as two alternatives so
+          # that a bare run of capitals with no separator at all - which is a
+          # perfectly good token - is not allowlisted by either.
+          - '^(?:[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+|_{1,2}[A-Z][A-Z0-9_]*_{1,2})$'
           - '^(?:sha1|sha256|sha512|md5|base64)[-:]'
           - '^\.{0,2}/'
+          # A URL assigned to a secret-like name is an endpoint, and a URL that
+          # does carry a credential is `secrets.generic-credentialed-url`'s
+          # finding, not this rule's. Needed once `:` and `/` are both in the
+          # value class: without it `"token_uri": "https://oauth2.googleapis
+          # .com/token"` reads as a high-entropy value assigned to `token`.
+          - '^[a-z][a-z0-9+.-]{1,15}://'
           - '^[^0-9]*$'
           - '^(?:[A-Z]{1,4}|[A-Z][a-z]+|[a-z]{3,})(?:[0-9]{0,5}(?:[A-Z][a-z]+|[A-Z]{2,4}|[a-z]{3,}))*[0-9]{0,5}$'
-          # Separator-joined identifier tokens. Widened in 1.4.1 to carry the
-          # weight the `secret` and `token` stopwords used to carry by
-          # accident: a dotted minified reference (`_chunk7UDY.DEFAULT_TOKEN_TTL`),
-          # a token whose digits lead its words (`SecretName-6RandomCharacters`)
-          # and a hyphenated English sentence longer than eight words are all
-          # identifiers, and none of them stops being one because it spells
-          # `secret`. The leading digits must be followed by whole words, so a
-          # hex token like `4f3a9b2c` is still reported.
-          - '^[_$]?(?:[A-Za-z][A-Za-z0-9]{0,23}|[0-9]{1,10}|[0-9]{1,5}(?:[A-Z][a-z]{2,}|[a-z]{3,})+)(?:[_.\-/](?:[A-Za-z][A-Za-z0-9]{0,23}|[0-9]{1,10}|[0-9]{1,5}(?:[A-Z][a-z]{2,}|[a-z]{3,})+)){1,12}$'
+          # Separator-joined identifiers: `_chunk7UDY.DEFAULT_TOKEN_TTL`,
+          # `django.contrib.auth.hashers.PBKDF2PasswordHasher`,
+          # `terraform-state-lock-billing-eu-west-1`. This exists to keep
+          # minified bundle output and dotted references out of the report, and
+          # it has to do that without eating base64url tokens, which carry the
+          # same `-` and `_` separators.
+          #
+          # 1.4.1 said a segment was `[A-Za-z][A-Za-z0-9]{0,23}` - any run of
+          # up to 24 alphanumerics starting with a letter. That is the shape of
+          # a base64url token as much as of an identifier, and it swallowed
+          # roughly one token in five: `XBBcovrIcgP2B1OVdztzwsvP/aQnvYWCvrbxPIEu`
+          # splits on `/` into two runs that both fit, so a forty-character
+          # api key assigned to `INTERNAL_API_KEY` was allowlisted.
+          #
+          # A segment is now a sequence of *words*, not of characters: a
+          # lowercase run, a capitalised word, an acronym, or a number. That
+          # still spells every identifier above, and it stops on the first
+          # isolated capital or letter-digit pair, which random base64 produces
+          # within a few characters and an identifier essentially never does.
+          - '^[_$]?(?:(?:[a-z]{2,}|[A-Z][a-z]+|[A-Z]{2,}|[0-9]{1,4})){1,8}(?:[_.\-/:](?:(?:[a-z]{2,}|[A-Z][a-z]+|[A-Z]{2,}|[0-9]{1,4})){1,8}){1,12}$'
           # Placeholder values, anchored on the whole captured value, for the
           # same reason as `secrets.generic-credentialed-url` above: `password`,
           # `secret`, `token` and `your` were substring stopwords, so a real
@@ -145,6 +357,241 @@ rules:
           # value by chance (six or more fixed characters out of a 62-symbol
           # alphabet). Every English-word stopword that used to sit here moved
           # to the anchored pattern above.
+          - 'process.env'
+          - 'os.environ'
+          - 'getenv'
+          - 'localhost'
+          - 'deadbeef'
+          - 'abcdefghij'
+          - '0123456789'
+          - 'qwerty'
+          - 'foobar'
+          - 'lorem'
+  - id: secrets.generic-password-assignment
+    severity: warning
+    message: 'Detected a short value assigned to a password identifier, which is how a hardcoded account password usually looks.'
+    secret:
+      # Everything `secrets.generic-secret-assignment` describes, for values of
+      # eight to nineteen characters. A separate rule and not a lower bound on
+      # that one, for two reasons that both matter:
+      #
+      #   entropy   Shannon entropy over bytes cannot exceed log2(length), so
+      #             an eight-character value tops out at 3.0 and can never
+      #             clear a floor set for thirty-two hex characters. One rule
+      #             cannot serve both bands; two rules can, and each says what
+      #             its own floor is for.
+      #   identifier
+      #             at eight characters the value carries almost no evidence of
+      #             its own, so the identifier has to carry it. This rule keys
+      #             on `pass`, `passwd`, `password` and `passphrase` only - not
+      #             on `token`, `key` or `secret`, which name short values that
+      #             are routinely not credentials.
+      #
+      # The length bands do not overlap: a twenty-character value cannot end
+      # inside this rule's range and still be followed by a terminator, so one
+      # credential is still one finding, and every value the existing rule
+      # already reports keeps reporting under the id an existing baseline
+      # fingerprinted it with. That holds only because both classes are
+      # `(?-i:...)`: under `(?i)` the terminator range folded onto `k`, `K`,
+      # `a`-ring and sharp-s, which are value characters, and a twenty-plus
+      # character value containing one of them did end inside this rule's range
+      # and did report twice. See the same note on
+      # `secrets.generic-secret-assignment` above.
+      pattern: '(?i)[\w.-]{0,50}?pass(?:wd|word|phrase)?(?:[ \t]{0,20}|[_.-][\w.-]{0,20}[ \t]{0,5})(?::[ \t]{0,5}[\w&:<>,\[\] ]{1,40})?[\s''"]{0,3}(?:=|:{1,3}=|:|=>)[\x60''"\s=]{0,5}((?-i:[0-9A-Za-z_!#$%&*+\-./=@^~\x{C0}-\x{D6}\x{D8}-\x{F6}\x{F8}-\x{24F}]{8,19}))(?:(?-i:[\x60''"\s;,:()<>|\\?\[\]{}\x{80}-\x{BF}\x{D7}\x{F7}\x{250}-\x{10FFFF}])|$)'
+      group: 1
+      # 2.5 of a possible 3.0 at the shortest length this rule accepts. Below
+      # it are the runs a placeholder is made of - `changeme` measures 2.75 and
+      # is caught by name below, `aaaaaaaa` measures 0.
+      entropy: 2.5
+      keywords:
+        - 'pass'
+      allowlist:
+        patterns:
+          - '^\$'
+          - '\$\{'
+          - '\{\{'
+          - '^%'
+          - '#\{'
+          # A value that runs on into the next query parameter, for the reason
+          # spelled out on the same entry in
+          # `secrets.generic-secret-assignment`, which is also where the
+          # measurement that replaced the blanket `=[^=]` was taken.
+          - '&[\w.-]{1,40}='
+          # And a value that is itself an assignment to a word-shaped
+          # identifier, for the reason spelled out on the same entry there.
+          - '^[_$]?(?:[a-z]{2,}|[A-Z][a-z]+)(?:[0-9]{0,4}(?:[a-z]{2,}|[A-Z][a-z]+)){1,10}[0-9]{0,4}='
+          - '^@{1,2}[A-Za-z0-9_.-]{1,64}@{1,2}$'
+          - '^(?:[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+|_{1,2}[A-Z][A-Z0-9_]*_{1,2})$'
+          - '^(?:sha1|sha256|sha512|md5|base64)[-:]'
+          - '^\.{0,2}/'
+          - '^[a-z][a-z0-9+.-]{1,15}://'
+          # A numeric literal in a source language: hexadecimal, binary or
+          # decimal, with the integer suffix C, C++ and Rust write.
+          #
+          # This is the single largest false positive class the rule had, and
+          # it is not a judgement call: on 1.8 GB of published Rust and C under
+          # a cargo registry the rule reported 324 lines, of which two were
+          # credentials, and 268 were a constant whose *name* spells `PASS` -
+          # `pub const FVE_E_POLICY_PASSPHRASE_NOT_ALLOWED: HRESULT =
+          # 0x8031006A;`, `pub const DIBUTTON_HOCKEYO_PASS: u32 = 419431426u32;`
+          # `pub const PPPIOCSPASS: u32 = 1074820167;`, and negative forms such
+          # as `pub const _MAPI_E_PASSWORD_EXPIRED: i32 = -2147221215i32;`.
+          # Every one of them clears the 2.5 floor and carries a digit, so
+          # nothing else here stops them. A password is not a number, so this
+          # costs no detection.
+          - '^[-+]?(?:0[xXbB][0-9A-Fa-f_]+|[0-9][0-9_]*)(?:[uUiIlLfF](?:8|16|32|64|128|size)?)?$'
+          # An identifier written as a sequence of words: a lowercase run, or a
+          # capital followed by lowercase, joined by nothing or by digits.
+          # `sqlite3GetBoolean`, `sqlite3VdbeAddOp1`, `addrBypass` - the second
+          # false positive class on the same registry, C and Rust code assigning
+          # a function result to a variable whose name ends in `pass`.
+          #
+          # Deliberately narrower than the CamelCase allowlist on
+          # `secrets.generic-secret-assignment`, which admits a bare run of
+          # capitals as a word and so swallowed `zouVKBKVT9UQCfgq` and
+          # `CM0UAIbWWUnb6SFMV10` - real passwords at this rule's lengths.
+          # Requiring a lowercase letter after every capital is what separates
+          # the two: an identifier is written in words, and a generated
+          # password produces an isolated capital within a few characters.
+          # A value with no digit at all needs none of this - `^[^0-9]*$`
+          # below already covers it.
+          - '^[_$]?(?:[a-z]{2,}|[A-Z][a-z]+)(?:[0-9]{0,4}(?:[a-z]{2,}|[A-Z][a-z]+)){1,10}[0-9]{0,4}$'
+          # A value with no digit at all. At these lengths that is
+          # overwhelmingly a word, a path fragment or an identifier rather than
+          # a generated password, and it is the single cheapest thing standing
+          # between this rule and every `password = "someIdentifier"` in a real
+          # tree. It is also a real gap: an all-letter passphrase is not
+          # reported, and `secrets.generic-secret-assignment` has carried the
+          # same exemption since 1.4.0.
+          - '^[^0-9]*$'
+          # Separator-joined identifiers, identical to the entry on
+          # `secrets.generic-secret-assignment`. A bare run of capitals is a
+          # segment here - `OPENSSL_uni2utf8`, `X509_get_pubkey` - and that is
+          # safe in a way it would not be without the separator: a value with
+          # no separator at all is not matched by this pattern, so the
+          # sixteen-character generated passwords the word-sequence pattern
+          # above is careful about are out of its reach either way.
+          - '^[_$]?(?:(?:[a-z]{2,}|[A-Z][a-z]+|[A-Z]{2,}|[0-9]{1,4})){1,8}(?:[_.\-/:](?:(?:[a-z]{2,}|[A-Z][a-z]+|[A-Z]{2,}|[0-9]{1,4})){1,8}){1,12}$'
+          - '(?i)^(?:[-_.+~*/]*(?:pass(?:wd|word|phrase)?|word|secret|token|credentials?|creds|api|apikey|key|db|database|user(?:name)?|admin|root|host|local(?:host)?|changeme|changeit|change|replace|insert|enter|put|set|goes|here|with|your|my|our|the|some|own|new|real|actual|not(?:real)?|none|null|empty|unset|undefined|todo|fixme|value|string|placeholder|redacted|hidden|masked|example|sample|dummy|fake|invalid|test(?:ing)?|demo|sandbox|super|top(?:secret)?|mysecret|hunter2|letmein|x{3,}))+[-_.+~*/]*$'
+        stopwords:
+          - 'process.env'
+          - 'os.environ'
+          - 'getenv'
+          - 'localhost'
+          - 'deadbeef'
+          - 'qwerty'
+          - 'foobar'
+  - id: secrets.generic-authorization-header
+    severity: warning
+    message: 'Detected a hardcoded HTTP authorization credential, which grants whatever the token or account behind it can do to anyone who can read the source.'
+    secret:
+      # `Authorization: Bearer <token>` and `Authorization: Basic <base64>`,
+      # anywhere. `secrets.curl-auth-header` in the translated pack covers
+      # these inside a curl command and nowhere else: the same header written
+      # into a Go `req.Header.Set`, a Java constant, a Kubernetes env value, a
+      # YAML config, a Python string or a `wget --header` was reported by
+      # nothing through 1.4.1.
+      #
+      # Inside a curl command the two rules overlap and the header is reported
+      # twice. That is not fixable from here and is recorded rather than
+      # claimed away: an allowlist sees the captured value only, never the
+      # `curl` on the line, and the translated document is regenerated
+      # wholesale so nothing may be hand-edited into it. The duplicate, its
+      # scope and the two other structural ones are named in the pack's own
+      # tests - see `default_pack.rs`.
+      #
+      # No identifier is needed - `Bearer` and `Basic` are the RFC 7235 scheme
+      # names, so the syntax names itself. The scheme name is what makes this
+      # narrow, so the value stays a strict token alphabet: an interpolation
+      # (`${token}`, `{token}`, `#{token}`) or a documentation placeholder
+      # (`<base64-encoded-credentials>`) cannot start one, and the rule never
+      # sees it.
+      #
+      # Ships at `warning`, not `error`, for the reason spelled out in
+      # `default_pack.rs`: severity is an upgrade contract. Every finding this
+      # rule makes is new, so no existing baseline can cover one, and a rule
+      # that ships at `error` fails the first build after an upgrade under the
+      # default `--fail-on error`. Precise enough to report; not precise enough
+      # to break a build the day it appears.
+      pattern: '(?i)\b(?:bearer|basic)[ \t]+([A-Za-z0-9+/=~._-]{20,512})(?:[\x60''"\s;,()<>|\\]|$)'
+      group: 1
+      entropy: 3.5
+      keywords:
+        - 'bearer'
+        - 'basic'
+      allowlist:
+        patterns:
+          # A scheme name followed by a long word is prose - `Basic
+          # authentication configuration` - not a credential.
+          - '^[^0-9]*$'
+          - '^(?:[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+|_{1,2}[A-Z][A-Z0-9_]*_{1,2})$'
+          - '^(?:sha1|sha256|sha512|md5|base64)[-:]'
+          - '^[_$]?(?:(?:[a-z]{2,}|[A-Z][a-z]+|[A-Z]{2,}|[0-9]{1,4})){1,8}(?:[_.\-/:](?:(?:[a-z]{2,}|[A-Z][a-z]+|[A-Z]{2,}|[0-9]{1,4})){1,8}){1,12}$'
+          - '(?i)^(?:[-_.+~*/]*(?:pass(?:wd|word|phrase)?|word|secret|token|credentials?|creds|api|apikey|key|db|database|user(?:name)?|admin|root|host|local(?:host)?|changeme|changeit|change|replace|insert|enter|put|set|goes|here|with|your|my|our|the|some|own|new|real|actual|not(?:real)?|none|null|empty|unset|undefined|todo|fixme|value|string|placeholder|redacted|hidden|masked|example|sample|dummy|fake|invalid|test(?:ing)?|demo|sandbox|super|top(?:secret)?|mysecret|hunter2|letmein|x{3,}))+[-_.+~*/]*$'
+        stopwords:
+          - 'abcdefghij'
+          - '0123456789'
+          - 'qwerty'
+          - 'foobar'
+          - 'lorem'
+  - id: secrets.generic-markup-config-secret
+    severity: warning
+    message: 'Detected a credential carried by a configuration element or attribute pair, which is how XML and .NET configuration files leak one.'
+    secret:
+      # Two markup shapes where the name and the value sit in different places,
+      # so `secrets.generic-secret-assignment` - which needs the two joined by
+      # `=` or `:` - cannot see either:
+      #
+      #   <password>value</password>      the name is the element
+      #   <add key="ApiKey" value="v" />  the name is one attribute, the value
+      #                                   another, and .NET `appSettings`,
+      #                                   `web.config` and every transform over
+      #                                   them is written this way
+      #
+      # One capture group serving both branches, closed by a terminator that
+      # covers both: `<` ends an element body, `"` ends an attribute.
+      #
+      # The value class is the one the two assignment rules use with case
+      # folding off, for the reason argued there, and with `:` kept. The two
+      # assignment rules drop `:` because in source it is scope resolution and
+      # `Literal::u8_unsuffixed` reads as a credential; here the value is
+      # delimited by markup on both sides and the only way to reach it is
+      # through an element or attribute already named `password`, `secret`,
+      # `token` or `apiKey`. Dropping `:` here costs the corpus a real XML
+      # password element and buys nothing, so the two decisions are made
+      # separately and each is stated where it applies.
+      pattern: '(?i)(?:<[\w.:-]{0,40}(?:pass(?:wd|word|phrase)?|secret|token|api[_.-]?key|credentials?)[\w.:-]{0,20}>|\bkey[ \t]*=[ \t]*"[\w.:-]{0,40}(?:pass(?:wd|word|phrase)?|secret|token|api[_.-]?key|credentials?)[\w.:-]{0,20}"[ \t]{1,20}value[ \t]*=[ \t]*")((?-i:[0-9A-Za-z_!#$%&*+\-./:=@^~\x{C0}-\x{D6}\x{D8}-\x{F6}\x{F8}-\x{24F}]{8,256}))(?:["<]|$)'
+      group: 1
+      # The same floor as `secrets.generic-password-assignment`, and for the
+      # same reason: this rule accepts values from eight characters, where 3.0
+      # is the ceiling.
+      entropy: 2.5
+      keywords:
+        - 'pass'
+        - 'secret'
+        - 'token'
+        - 'apikey'
+        - 'api_key'
+        - 'api.key'
+        - 'api-key'
+        - 'credential'
+      allowlist:
+        patterns:
+          - '^\$'
+          - '\$\{'
+          - '\{\{'
+          - '^%'
+          - '#\{'
+          - '=[^=]'
+          - '^@{1,2}[A-Za-z0-9_.-]{1,64}@{1,2}$'
+          - '^(?:[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+|_{1,2}[A-Z][A-Z0-9_]*_{1,2})$'
+          - '^(?:sha1|sha256|sha512|md5|base64)[-:]'
+          - '^\.{0,2}/'
+          - '^[a-z][a-z0-9+.-]{1,15}://'
+          - '^[^0-9]*$'
+          - '^[_$]?(?:(?:[a-z]{2,}|[A-Z][a-z]+|[A-Z]{2,}|[0-9]{1,4})){1,8}(?:[_.\-/:](?:(?:[a-z]{2,}|[A-Z][a-z]+|[A-Z]{2,}|[0-9]{1,4})){1,8}){1,12}$'
+          - '(?i)^(?:[-_.+~*/]*(?:pass(?:wd|word|phrase)?|word|secret|token|credentials?|creds|api|apikey|key|db|database|user(?:name)?|admin|root|host|local(?:host)?|changeme|changeit|change|replace|insert|enter|put|set|goes|here|with|your|my|our|the|some|own|new|real|actual|not(?:real)?|none|null|empty|unset|undefined|todo|fixme|value|string|placeholder|redacted|hidden|masked|example|sample|dummy|fake|invalid|test(?:ing)?|demo|sandbox|super|top(?:secret)?|mysecret|hunter2|letmein|x{3,}))+[-_.+~*/]*$'
+        stopwords:
           - 'process.env'
           - 'os.environ'
           - 'getenv'

@@ -51,10 +51,13 @@ mod tests {
 
     /// Every rule id the generic document ships. Named here so a rule that
     /// disappears from the pack fails a test instead of quietly scanning less.
-    const GENERIC_RULE_IDS: [&str; 3] = [
+    const GENERIC_RULE_IDS: [&str; 6] = [
         "secrets.generic-credentialed-url",
         "secrets.aws-secret-access-key",
         "secrets.generic-secret-assignment",
+        "secrets.generic-password-assignment",
+        "secrets.generic-authorization-header",
+        "secrets.generic-markup-config-secret",
     ];
 
     fn scan(content: &str) -> Vec<String> {
@@ -202,22 +205,25 @@ mod tests {
     /// value it is being tested against.
     const SLACK_BOT_PREFIX: &str = concat!("xox", "b");
     const STRIPE_LIVE_PREFIX: &str = concat!("sk", "_live");
+    const OPENAI_PREFIX: &str = concat!("sk", "-");
+    const OPENAI_MARKER: &str = concat!("T3Blb", "kFJ");
+    const AZURE_MARKER: &str = concat!("Q", "~");
+    const TWILIO_PREFIX: &str = concat!("S", "K");
+    const MAILGUN_PREFIX: &str = concat!("ke", "y-");
 
-    /// One credential is one finding. The generic rule matches on the shape of
-    /// the assignment, so every prefixed credential a specific rule already
+    /// One credential is one finding, wherever the generic rule can tell that
+    /// a specific one already owns the value. The generic rule matches on the
+    /// shape of the assignment, so every prefixed credential a specific rule
     /// names is inside its reach - and reported twice it is noise in the
-    /// listing and a double count in whatever gates on the report.
+    /// listing and a double count in whatever gates on the report. The
+    /// generic rule stands down by recognising the vendor prefix in the value
+    /// itself, which is why each of these reports once.
     #[test]
     fn a_credential_a_specific_rule_names_is_not_reported_twice() {
         for (line, expected) in [
             (
                 "api_key = \"ghp_A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8\"\n".to_string(),
                 "secrets.github-pat",
-            ),
-            (
-                "aws_secret_access_key = \"kJ7pQm2XvNb9RtWs4YzA1CdE6FgH0IjKlMnOpQrS\"\n"
-                    .to_string(),
-                "secrets.aws-secret-access-key",
             ),
             (
                 format!(
@@ -233,9 +239,92 @@ mod tests {
                 ),
                 "secrets.stripe-access-token",
             ),
+            // Four formats whose marker is too short to sit in the generic
+            // rule's prefix allowlists, so it stands down on the whole shape
+            // instead. Each of these was measured reporting twice.
+            (
+                format!(
+                    "openai_api_key = \"{OPENAI_PREFIX}A1b2C3d4E5f6G7h8I9j0{OPENAI_MARKER}K1l2M3n4O5p6Q7r8S9t0\"\n"
+                ),
+                "secrets.openai-api-key",
+            ),
+            (
+                format!(
+                    "azure_client_secret = \"Abc4{AZURE_MARKER}D9eF1gH2iJ3kL4mN5oP6qR7sT8uV9wX0yZ\"\n"
+                ),
+                "secrets.azure-ad-client-secret",
+            ),
+            (
+                format!("twilio_api_key = \"{TWILIO_PREFIX}0a1b2c3d4e5f60718293a4b5c6d7e8f9\"\n"),
+                "secrets.twilio-api-key",
+            ),
+            (
+                format!("mailgun_api_key = \"{MAILGUN_PREFIX}1a2b3c4d5e6f708192a3b4c5d6e7f809\"\n"),
+                "secrets.mailgun-private-api-token",
+            ),
         ] {
             assert_eq!(scan_pack(&line), vec![expected.to_string()], "{line}");
         }
+    }
+
+    /// Every credential the pack reports twice, recorded rather than hidden.
+    ///
+    /// A generic rule stands down on a specific rule's credential by looking
+    /// at the value, because an allowlist is matched against the captured
+    /// value and never sees the rest of the line. Three overlaps are therefore
+    /// not reachable from an allowlist at all, and each is listed here with
+    /// what makes it unreachable. This test is the record: a fourth duplicate
+    /// appearing means a rule changed, and the change has to be argued.
+    ///
+    ///   aws-secret-access-key   the value is forty characters of base64
+    ///                           alphabet and nothing else - no prefix, no
+    ///                           marker, nothing to recognise. Through 1.4.1
+    ///                           the second finding was suppressed by an
+    ///                           allowlist entry reading `^[A-Za-z0-9/+]{40}$`
+    ///                           - every forty-character value, from every
+    ///                           identifier, dropped for this one overlap.
+    ///                           That entry is what made a GitHub OAuth client
+    ///                           secret and every other forty-character token
+    ///                           undetectable, and it is gone.
+    ///   cloudflare-api-key      forty characters of `[a-z0-9_-]`, which is
+    ///                           the same problem one alphabet wider. The rule
+    ///                           finds it by the identifier `cloudflare`; the
+    ///                           generic rule finds the same value by
+    ///                           `api_key`, and neither the value nor an
+    ///                           allowlist can tell them apart.
+    ///   curl-auth-header        the discriminator is the word `curl` on the
+    ///                           line, which an allowlist cannot see. The
+    ///                           translated document is regenerated wholesale
+    ///                           on every gitleaks bump, so narrowing the
+    ///                           other side is not available either.
+    ///
+    /// In each case the duplicate is a second report of a credential that was
+    /// already reported, not a miss.
+    #[test]
+    fn the_pack_reports_three_credentials_twice_and_no_others() {
+        assert_eq!(
+            scan_pack("aws_secret_access_key = \"kJ7pQm2XvNb9RtWs4YzA1CdE6FgH0IjKlMnOpQrS\"\n"),
+            vec![
+                "secrets.aws-secret-access-key".to_string(),
+                "secrets.generic-secret-assignment".to_string(),
+            ]
+        );
+        assert_eq!(
+            scan_pack("cloudflare_api_key = \"7f3b9c1d5e2a8046bd71c9e4f0a25836db1c7e9f\"\n"),
+            vec![
+                "secrets.cloudflare-api-key".to_string(),
+                "secrets.generic-secret-assignment".to_string(),
+            ]
+        );
+        assert_eq!(
+            scan_pack(
+                "RUN curl -sSf -H \"Authorization: Bearer h8Kq2vRt7XwPmZn4LbYc5TjF9dGe1Sa3\" https://artifacts.internal/app\n"
+            ),
+            vec![
+                "secrets.curl-auth-header".to_string(),
+                "secrets.generic-authorization-header".to_string(),
+            ]
+        );
     }
 
     /// The other half of the same statement: narrowing the generic rule around

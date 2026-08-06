@@ -485,19 +485,18 @@ fn run_scan(args: ScanArgs) {
     // reported. Whole findings are dropped and none is rewritten, so every
     // fingerprint that survives is the one the scan produced.
     let min_severity = args.min_severity.to_severity();
+    let reported_before = report.findings.len() + report.baselined.len() + report.suppressed.len();
     report.findings.retain(|f| f.severity >= min_severity);
     report.baselined.retain(|f| f.severity >= min_severity);
     report.suppressed.retain(|f| f.severity >= min_severity);
+    // Counted over all three lists, because the human listing speaks for all
+    // three: it prints the new findings and the counts of the other two, and a
+    // threshold that removed baselined entries shrinks that line just as
+    // silently as it shortens the listing.
+    let withheld = reported_before
+        - (report.findings.len() + report.baselined.len() + report.suppressed.len());
 
-    // Recorded in the machine-readable formats so a consumer can tell a report
-    // that withheld findings from one that had none to withhold - the same
-    // distinction `skipped`, `ignored` and `warnings` exist to make. `None` on
-    // the default threshold, which drops nothing and so has nothing to declare;
-    // the report is then the document it was before this was recorded at all.
-    let filtered_at = match min_severity > Severity::Info {
-        true => Some(min_severity),
-        false => None,
-    };
+    let filtered_at = filtered_at(min_severity);
 
     let mut out = io::stdout().lock();
     match args.format {
@@ -535,6 +534,17 @@ fn run_scan(args: ScanArgs) {
             // Scanner-generated wording and two integers - no scanned text - so
             // it needs no `safe()`.
             if let Some(line) = report.ignored.summary_line() {
+                emit(&mut out, format_args!("{line}"));
+            }
+            // The same statement, for the third source of a short listing: what
+            // the scan found and the threshold refused to print. Without it a
+            // fully filtered report is byte for byte a clean one, which is the
+            // reading `--min-severity` is otherwise indistinguishable from.
+            // Scanner-generated wording, a count and a severity word - no
+            // scanned text - so it needs no `safe()`.
+            if let Some(threshold) = filtered_at
+                && let Some(line) = withheld_line(withheld, threshold)
+            {
                 emit(&mut out, format_args!("{line}"));
             }
             emit(
@@ -1053,6 +1063,48 @@ fn quantity(count: usize, singular: &str, plural: &str) -> String {
     match count {
         1 => format!("1 {singular}"),
         _ => format!("{count} {plural}"),
+    }
+}
+
+/// The threshold a run was filtered at, or `None` when it reported everything
+/// it found.
+///
+/// Recorded in the machine-readable formats so a consumer can tell a report
+/// that withheld findings from one that had none to withhold - the same
+/// distinction `skipped`, `ignored` and `warnings` exist to make - and the same
+/// answer decides whether the human listing says anything. `None` on the
+/// default threshold, which drops nothing and so has nothing to declare; the
+/// report is then the document it was before any of this was recorded, in every
+/// format.
+fn filtered_at(min_severity: Severity) -> Option<Severity> {
+    match min_severity > Severity::Info {
+        true => Some(min_severity),
+        false => None,
+    }
+}
+
+/// What `--min-severity` withheld, for the human listing, or `None` when the
+/// threshold withheld nothing.
+///
+/// The machine-readable formats record the threshold itself and let the
+/// consumer work out the rest; a human reads a listing, and a listing that is
+/// short because of a flag looks exactly like a listing that is short because
+/// the tree is clean. The line exists to separate those two, so it is printed
+/// only when they are actually confusable - a threshold that removed nothing
+/// produces the same report either way and has nothing to announce, and saying
+/// so on every filtered run would put a line on the terminal that is noise
+/// exactly when the news is good.
+///
+/// `threshold` is the level that was applied, which the caller only has when
+/// filtering was active at all: on the default the report is unfiltered and
+/// this is never reached.
+fn withheld_line(withheld: usize, threshold: Severity) -> Option<String> {
+    match withheld {
+        0 => None,
+        count => Some(format!(
+            "{} hidden by --min-severity {threshold}",
+            quantity(count, "finding", "findings")
+        )),
     }
 }
 
@@ -1614,6 +1666,48 @@ rules:
         let mut all = before.clone();
         all.retain(|f| f.severity >= Severity::Info);
         assert_eq!(all.len(), 3);
+    }
+
+    /// A filtered human listing has to say it was filtered. JSON and SARIF have
+    /// carried the threshold since it existed; the terminal, where most people
+    /// read a report, carried nothing, so a run that hid every finding printed
+    /// the same thing a clean tree does.
+    #[test]
+    fn a_filtered_human_listing_says_what_it_withheld() {
+        assert_eq!(
+            withheld_line(3, Severity::Error).as_deref(),
+            Some("3 findings hidden by --min-severity error")
+        );
+        assert_eq!(
+            withheld_line(1, Severity::Warning).as_deref(),
+            Some("1 finding hidden by --min-severity warning"),
+            "the count agrees with its noun, like every other summary line"
+        );
+    }
+
+    /// The line is about a confusion, not about the flag: a threshold that
+    /// removed nothing produced the report it would have produced anyway, and
+    /// announcing it there would be noise on exactly the runs with no news.
+    #[test]
+    fn a_filter_that_withheld_nothing_says_nothing() {
+        assert_eq!(withheld_line(0, Severity::Error), None);
+    }
+
+    /// The whole decision `run_scan` makes, composed as it composes it: the
+    /// default threshold reports everything, so nothing new reaches the
+    /// listing and an unfiltered run's output is byte for byte what it was
+    /// before this line existed - whatever the counts happen to be.
+    #[test]
+    fn an_unfiltered_run_prints_nothing_new() {
+        assert_eq!(filtered_at(Severity::Info), None);
+        let line = filtered_at(SeverityArg::Info.to_severity())
+            .and_then(|threshold| withheld_line(7, threshold));
+        assert_eq!(line, None, "the default threshold must print no extra line");
+
+        // And the flag being in play is not on its own enough either.
+        assert_eq!(filtered_at(Severity::Error), Some(Severity::Error));
+        let line = filtered_at(Severity::Error).and_then(|threshold| withheld_line(0, threshold));
+        assert_eq!(line, None);
     }
 
     #[test]

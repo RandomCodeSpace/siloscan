@@ -35,6 +35,7 @@ use std::path::Path;
 use siloscan_core::config::Anchor;
 use siloscan_core::findings::Finding;
 use siloscan_core::metrics::Metrics;
+use siloscan_core::rules::Severity;
 use siloscan_core::serde_json::{self, Map, Value};
 
 /// Report major version this build reads.
@@ -61,6 +62,10 @@ pub struct SnapshotData {
     pub schema_version: String,
     /// Convention every path in the report is expressed in.
     pub anchor: Anchor,
+    /// Threshold the report was filtered at, absent when it reported
+    /// everything the scan found. A pre-1.4 report predates the key and loads
+    /// as `None`, which is also what an unfiltered report writes.
+    pub min_severity: Option<Severity>,
     pub findings: Vec<Finding>,
     pub baselined: Vec<Finding>,
     pub suppressed: Vec<Finding>,
@@ -189,6 +194,7 @@ fn parse(text: &str, label: &str, source: String) -> Result<SnapshotData, Snapsh
         source,
         schema_version: version,
         anchor: section!(map, "anchor", label),
+        min_severity: section!(map, "min_severity", label),
         findings: section!(map, "findings", label),
         baselined: section!(map, "baselined", label),
         suppressed: section!(map, "suppressed", label),

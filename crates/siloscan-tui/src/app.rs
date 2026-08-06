@@ -12,7 +12,7 @@ use siloscan_core::config::Config;
 use siloscan_core::findings::Finding;
 use siloscan_core::metrics::DUPLICATE_BLOCK_RULE_ID;
 use siloscan_core::output::REDACTED_MATCH;
-use siloscan_core::rules::RuleSet;
+use siloscan_core::rules::{RuleSet, Severity};
 use siloscan_core::scan::{self, Progress, ScanOptions, ScanReport};
 use siloscan_core::walk::IgnoreOptions;
 
@@ -123,6 +123,11 @@ pub fn apply_report(state: &mut AppState, report: ScanReport, config: Option<&Co
 /// finding - so the silo matrix is empty in snapshot mode, by construction.
 /// `snapshot` is set last: it is what every live-only action is gated on.
 ///
+/// A report written under `--min-severity` carries the threshold it was
+/// filtered at, and that is not a detail the UI may drop: every number on the
+/// board is computed from the rows the file happens to contain. See
+/// [`filtered_note`].
+///
 /// A pre-1.2 report predates redaction at the writer, so its `matched` fields
 /// may be the credentials themselves, and snapshot mode has no rule set to tell
 /// which ones are. Every match is therefore replaced by [`REDACTED_MATCH`]
@@ -164,9 +169,31 @@ pub fn apply_snapshot(state: &mut AppState, data: SnapshotData, config: Option<&
     reset_cursors(state);
     refresh_silos(state, config);
     report_debt(state);
+    // Said before the match-text note, because it is about the numbers the
+    // footer has just printed rather than about one column.
+    if let Some(threshold) = data.min_severity {
+        state.status = format!("{} | {}", state.status, filtered_note(threshold));
+    }
     if hidden {
         state.status = format!("{} | {HIDDEN_MATCH_NOTE}", state.status);
     }
+}
+
+/// What the footer says about a report that was written under
+/// `--min-severity`.
+///
+/// The writer records the threshold in the report; until this, the UI read the
+/// findings and ignored it, so a report that withheld half its findings opened
+/// as the whole picture - the debt counts, the module cards and the dashboard
+/// all computed off a filtered list and none of them saying so. The rows cannot
+/// be recovered from the file, so the only honest thing the UI can do is name
+/// the threshold and let the reader go and get an unfiltered report.
+///
+/// It lands in the footer beside the pre-1.2 match-text note, for the same
+/// reason that one is there: this is a statement about what the screen is not
+/// showing, and the footer is where the session says those.
+fn filtered_note(min_severity: Severity) -> String {
+    format!("filtered report: findings below {min_severity} hidden")
 }
 
 /// The three finding lists folded into one row list in canonical order (path,
@@ -451,6 +478,7 @@ mod tests {
             source: "report.json".to_string(),
             schema_version: schema_version.to_string(),
             anchor: Default::default(),
+            min_severity: None,
             findings: vec![finding("z.rule", "api/b.rs", 1, 1)],
             baselined: vec![finding("b.rule", "core/a.rs", 9, 2)],
             suppressed: Vec::new(),
@@ -764,6 +792,73 @@ mod tests {
         assert!(kept, "a 1.2 report's match text must be left alone");
         assert_eq!(state.status, "1 new, 1 baselined, 0 suppressed");
         assert!(!state.status.contains(HIDDEN_MATCH_NOTE));
+    }
+
+    // -- filtered reports ------------------------------------------------
+
+    /// A report written under `--min-severity` is not the whole picture, and
+    /// the board draws every number on it from the rows the file carries. Until
+    /// the UI says so, a filtered report opened as a clean one - the exact
+    /// confusion the writer records the threshold to prevent, reintroduced at
+    /// the reader.
+    #[test]
+    fn a_filtered_snapshot_says_what_it_was_filtered_at() {
+        let mut state = state();
+        let mut data = snapshot_data();
+        data.min_severity = Some(Severity::Error);
+
+        apply_snapshot(&mut state, data, None);
+
+        assert!(
+            state
+                .status
+                .contains("filtered report: findings below error hidden"),
+            "status: {}",
+            state.status
+        );
+        assert!(
+            state.status.starts_with("1 new, 1 baselined"),
+            "the debt counts are still reported: {}",
+            state.status
+        );
+
+        // The footer is where it has to land, at the sizes the board lays out
+        // for; the status line is drawn from `state.status` at all of them.
+        state.screen = crate::state::Screen::Triage;
+        let text = render_text(&state, 200, 50);
+        assert!(
+            text.contains("filtered report"),
+            "not in the footer:\n{text}"
+        );
+    }
+
+    /// An unfiltered report says nothing, and its footer is byte for byte what
+    /// it was before any of this existed.
+    #[test]
+    fn an_unfiltered_snapshot_says_nothing_about_filtering() {
+        let mut state = state();
+        apply_snapshot(&mut state, snapshot_data(), None);
+
+        assert_eq!(state.status, "1 new, 1 baselined, 0 suppressed");
+    }
+
+    /// Two notices about the same report, in a fixed order: the one about the
+    /// numbers, then the one about the column.
+    #[test]
+    fn a_filtered_pre_one_two_snapshot_says_both() {
+        let mut state = state();
+        let mut data = pre_redaction_data();
+        data.min_severity = Some(Severity::Warning);
+
+        apply_snapshot(&mut state, data, None);
+
+        assert_eq!(
+            state.status,
+            format!(
+                "1 new, 1 baselined, 0 suppressed | filtered report: findings \
+                 below warning hidden | {HIDDEN_MATCH_NOTE}"
+            )
+        );
     }
 
     #[test]

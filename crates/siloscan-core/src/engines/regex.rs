@@ -20,7 +20,7 @@ pub fn scan_file(
             continue;
         }
 
-        let CompiledPayload::Regex { regex, group } = &rule.payload else {
+        let CompiledPayload::Regex { regex, group, .. } = &rule.payload else {
             continue;
         };
 

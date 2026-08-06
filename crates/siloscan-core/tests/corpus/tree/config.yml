@@ -1,0 +1,28 @@
+# Application configuration.
+service:
+  name: billing
+  region: eu-west-1
+integrations:
+  slack_webhook: "{{SLACKHOOK_0_90}}"
+  slack_bot_token: "{{SLACKBOT_0_91}}"
+  slack_user_token: "{{SLACKUSER_0_92}}"
+  sendgrid_api_key: "{{SENDGRID_0_93}}"
+  mailgun_api_key: "{{MAILGUN_0_94}}"
+  cloudflare_api_key: "{{CFKEY_0_95}}"
+  cloudflare_global_key: "{{CFGLOBAL_0_96}}"
+  jwt: "{{JWT_0_97}}"
+http:
+  authorization: "Bearer {{B64URL_43_98}}"
+  fallback_authorization: "Basic {{B64_44_99}}"
+  webhook_signing_secret: "{{HEX_32_100}}"
+  internal_token: "{{B64_40_101}}"
+defaults:
+  slack_webhook: "https://hooks.slack.com/services/YOUR/WEBHOOK/URL"
+  authorization: "Bearer ${API_TOKEN}"
+  basic_auth: "Basic <base64-encoded-credentials>"
+  api_key: "your-api-key-here"
+  token: "TODO"
+  secret: ""
+  password: null
+  image_tag: "billing-api:1.14.3-alpine3.20"
+  cache_key: "billing:invoices:by-customer:v3"
