@@ -1,0 +1,33 @@
+version: '3.9'
+services:
+  api:
+    image: registry.internal/api:1.14.3
+    environment:
+      DATABASE_URL: "postgres://svc_app:{{PWA_20_40}}@db.internal:5432/prod"
+      REPLICA_URL: "mysql://reporting:{{PWA_24_41}}@mysql.internal:3306/reports"
+      MONGO_URL: "mongodb://ingest:{{PWA_32_42}}@mongo.internal:27017/events"
+      REDIS_URL: "redis://:{{PWA_24_43}}@redis.internal:6379/0"
+      AMQP_URL: "amqp://:{{PWA_20_44}}@broker.internal:5672/vhost"
+      REGISTRY_URL: "https://:{{B64_32_45}}@registry.internal/v2/"
+      MIRROR_URL: "https://ci-bot:{{B64URL_43_46}}@mirror.internal/repo.git"
+      LEGACY_URL: "postgres://legacy:{{WORDPW_12_47}}@db.internal/legacy"
+      AUDIT_URL: "postgres://audit:{{WORDPW_16_48}}@db.internal/audit"
+      QUEUE_URL: "amqp://queue:{{WORDPW_14_49}}@broker.internal:5672"
+      ENCODED_URL: "postgres://svc:{{PWPCT_20_50}}@db.internal/prod"
+      SLASHED_URL: "postgres://svc:{{PWSLASH_20_51}}@db.internal/prod"
+      ATSIGN_URL: "postgres://svc:{{PWAT_20_52}}@db.internal/prod"
+      SMTP_URL: "smtp://mailer:{{PWP_16_53}}@smtp.internal:587"
+    labels:
+      - "com.example.dsn=postgres://user:password@localhost:5432/db"
+      - "com.example.cache=redis://:${REDIS_PASSWORD}@redis:6379/0"
+  worker:
+    image: registry.internal/worker:1.14.3
+    environment:
+      DATABASE_URL: "postgres://appuser:changeme@localhost:5432/app"
+      BROKER_URL: "amqp://guest:guest@rabbitmq:5672"
+      CACHE_URL: "redis://redis:6379/0"
+      METRICS_URL: "https://metrics.internal/api/v1/write"
+      MAIL_URL: "smtp://mailer@smtp.internal:587"
+      VAULT_URL: "https://user:$VAULT_PASS@vault.internal"
+      TENANT_URL: "https://user:{{ tenant_password }}@tenant.internal"
+      DOCS_URL: "postgres://user:your-db-password-here@host:5432/db"

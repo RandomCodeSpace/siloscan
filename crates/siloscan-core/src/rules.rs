@@ -158,6 +158,10 @@ pub struct RawMetadata {
 pub struct RawRegex {
     pub pattern: String,
     pub group: Option<usize>,
+    /// Withhold the match text from JSON, SARIF and the terminal, exactly as a
+    /// secret rule's is. Absent means false: most regex rules match code, and
+    /// their match text is the point of the finding.
+    pub redact: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -410,6 +414,9 @@ pub enum CompiledPayload {
     Regex {
         regex: Regex,
         group: Option<usize>,
+        /// Opt-in redaction of this rule's match text. See
+        /// `crate::output::redacts_match` for what reads it.
+        redact: bool,
     },
     Secret {
         pattern: LazyRegex,
@@ -732,6 +739,7 @@ fn compile_regex(id: &str, spec: RawRegex, origin: &str) -> Result<CompiledPaylo
     Ok(CompiledPayload::Regex {
         regex,
         group: spec.group,
+        redact: spec.redact.unwrap_or(false),
     })
 }
 
@@ -1008,9 +1016,14 @@ rules:
         assert!(rule.include.as_ref().unwrap().is_match("src/main.rs"));
         assert!(rule.exclude.as_ref().unwrap().is_match("src/tests/a.rs"));
         match &rule.payload {
-            CompiledPayload::Regex { regex, group } => {
+            CompiledPayload::Regex {
+                regex,
+                group,
+                redact,
+            } => {
                 assert!(regex.is_match("x.unwrap()"));
                 assert_eq!(*group, None);
+                assert!(!redact, "redact defaults to false");
             }
             other => panic!("expected a regex payload, got {other:?}"),
         }

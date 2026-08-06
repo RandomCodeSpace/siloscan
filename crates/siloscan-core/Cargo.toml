@@ -9,6 +9,9 @@ keywords.workspace = true
 categories.workspace = true
 readme = "README.md"
 description = "Core library for siloscan: rule loading, scanning engines, findings"
+# The detection corpus is credential-shaped by construction. It belongs in the
+# repository, where the harness reads it, and nowhere near a published artifact.
+exclude = ["tests/corpus/**"]
 
 [dependencies]
 getrandom = "0.4.3"

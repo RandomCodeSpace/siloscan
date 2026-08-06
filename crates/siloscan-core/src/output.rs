@@ -44,7 +44,8 @@ use crate::rules::{CompiledPayload, RuleSet, Severity};
 /// changes the meaning of a field that already existed, so nothing moves.
 pub const SCHEMA_VERSION: &str = "1.2";
 
-/// What `matched` says for a finding a secret rule produced.
+/// What `matched` says for a finding whose rule asked for its match text to be
+/// withheld.
 ///
 /// The credential itself never reaches the report. Every other sink already
 /// refuses to carry it - the cache stores a length, the baseline stores a
@@ -137,11 +138,13 @@ pub struct JsonReport<'a> {
 /// scan ran under and is recorded verbatim: it does not rewrite any path, it
 /// tells the consumer what the paths already mean.
 ///
-/// `rules` is read for one purpose: deciding which findings came from a secret
-/// rule, whose `matched` is then redacted in all three finding arrays. Every
-/// other payload - regex, ast, the duplication channel's synthetic text, a
-/// coverage or duplication gate's density string - serializes verbatim, because
-/// none of it is a credential and consumers parse some of it.
+/// `rules` is read for one purpose: deciding which findings came from a rule
+/// that withholds its match text - every secret rule, plus any regex rule that
+/// set `redact: true` - whose `matched` is then redacted in all three finding
+/// arrays. Every other payload - a plain regex rule, ast, the duplication
+/// channel's synthetic text, a coverage or duplication gate's density string -
+/// serializes verbatim, because none of it is a credential and consumers parse
+/// some of it.
 ///
 /// `min_severity` is the threshold the caller already filtered the report at,
 /// or `None` when it filtered nothing. It is recorded, not applied: this
@@ -152,12 +155,12 @@ pub fn to_json(
     anchor: Anchor,
     min_severity: Option<Severity>,
 ) -> String {
-    let secret_rules = secret_rule_ids(rules);
+    let redacted_rules = redacted_rule_ids(rules);
     let json_report = JsonReport {
         version: env!("CARGO_PKG_VERSION"),
-        findings: report_findings(&report.findings, &secret_rules),
-        baselined: report_findings(&report.baselined, &secret_rules),
-        suppressed: report_findings(&report.suppressed, &secret_rules),
+        findings: report_findings(&report.findings, &redacted_rules),
+        baselined: report_findings(&report.baselined, &redacted_rules),
+        suppressed: report_findings(&report.suppressed, &redacted_rules),
         skipped: &report.skipped,
         schema_version: SCHEMA_VERSION,
         metrics: &report.metrics,
@@ -169,35 +172,58 @@ pub fn to_json(
     serde_json::to_string_pretty(&json_report).unwrap() // serialization cannot fail
 }
 
-/// Whether `rule_id` names a rule with a secret payload, and so whether that
-/// rule's findings carry a credential in `matched`.
+/// Whether `rule_id` names a rule whose findings must not show their match
+/// text.
+///
+/// Two rules qualify, and only two:
+///
+/// - a secret payload, always. Its `matched` is the credential itself, and no
+///   rule author gets to opt out of that.
+/// - a regex payload that asked, by setting `redact: true` on the rule. A regex
+///   rule is the escape hatch for a credential format the secret rules do not
+///   know, and one written for that purpose was printing the credential into
+///   JSON, SARIF and the terminal while the built-in rules beside it withheld
+///   theirs. The switch is opt-in because the default cannot change: most regex
+///   rules match code, not credentials, and their match text is the whole point
+///   of the finding - and for some of them (the duplication channel's block
+///   key) it is a value consumers parse.
 ///
 /// This is the single definition of what gets redacted. Every sink that could
 /// put match text in front of someone - this report, the TUI's panes - asks
 /// here rather than deciding for itself, so none of them can drift from the
 /// others. Callers redacting a whole report should build the id set once
 /// instead of asking per finding.
-pub fn is_secret_rule(rules: &RuleSet, rule_id: &str) -> bool {
+pub fn redacts_match(rules: &RuleSet, rule_id: &str) -> bool {
     rules
         .rules
         .iter()
-        .any(|rule| rule.id == rule_id && matches!(rule.payload, CompiledPayload::Secret { .. }))
+        .any(|rule| rule.id == rule_id && payload_redacts(&rule.payload))
 }
 
-/// Ids of every rule carrying a secret payload. A finding is matched to its
+/// Whether a payload withholds its match text. One place, so the report and
+/// the per-finding question above cannot answer differently.
+fn payload_redacts(payload: &CompiledPayload) -> bool {
+    match payload {
+        CompiledPayload::Secret { .. } => true,
+        CompiledPayload::Regex { redact, .. } => *redact,
+        _ => false,
+    }
+}
+
+/// Ids of every rule that withholds its match text. A finding is matched to its
 /// rule by id, which is the only link a `Finding` keeps.
-fn secret_rule_ids(rules: &RuleSet) -> HashSet<&str> {
+fn redacted_rule_ids(rules: &RuleSet) -> HashSet<&str> {
     rules
         .rules
         .iter()
-        .filter(|rule| matches!(rule.payload, CompiledPayload::Secret { .. }))
+        .filter(|rule| payload_redacts(&rule.payload))
         .map(|rule| rule.id.as_str())
         .collect()
 }
 
 fn report_findings<'a>(
     findings: &'a [Finding],
-    secret_rules: &HashSet<&str>,
+    redacted_rules: &HashSet<&str>,
 ) -> Vec<ReportFinding<'a>> {
     findings
         .iter()
@@ -208,7 +234,7 @@ fn report_findings<'a>(
             path: &finding.path,
             line: finding.line,
             column: finding.column,
-            matched: if secret_rules.contains(finding.rule_id.as_str()) {
+            matched: if redacted_rules.contains(finding.rule_id.as_str()) {
                 REDACTED_MATCH
             } else {
                 &finding.matched
@@ -265,8 +291,12 @@ mod tests {
     /// report. Matches `secret_rules`' pattern.
     const SECRET: &str = "AKIAIOSFODNN7EXAMPLE";
 
-    /// One secret rule and one regex rule, so a single report can carry both a
-    /// redacted and an untouched finding.
+    /// A credential a regex rule catches because no secret rule knows the
+    /// format - the case `redact: true` exists for.
+    const HOUSE_TOKEN: &str = "ACME-482913";
+
+    /// One secret rule, one plain regex rule and one regex rule that asked to
+    /// be redacted, so a single report can carry all three treatments.
     fn secret_rules() -> RuleSet {
         let src = r#"
 version: 1
@@ -279,6 +309,10 @@ rules:
     severity: warning
     message: needle found
     regex: { pattern: 'needle' }
+  - id: house.token
+    severity: error
+    message: house token
+    regex: { pattern: 'ACME-[0-9]{6}', redact: true }
 "#;
         RuleSet {
             rules: load_str(src, "test").expect("should load"),
@@ -471,6 +505,95 @@ rules:
                 .expect("valid json");
 
         assert_eq!(parsed["findings"][0]["fingerprint"], GOLDEN);
+    }
+
+    /// A finding from the regex rule that asked to be redacted, carrying the
+    /// credential the way the engine hands it over.
+    fn house_token_finding() -> Finding {
+        Finding {
+            rule_id: "house.token".to_string(),
+            severity: Severity::Error,
+            message: "house token".to_string(),
+            path: "src/main.rs".to_string(),
+            line: 11,
+            column: 5,
+            column_utf16: 5,
+            matched: HOUSE_TOKEN.to_string(),
+            fingerprint: fingerprint("house.token", "src/main.rs", HOUSE_TOKEN, 0),
+        }
+    }
+
+    /// A regex rule is how someone catches a credential format the secret rules
+    /// do not know, and that rule was the one printing the credential into the
+    /// report while every built-in rule beside it withheld its own. `redact:
+    /// true` is how the author asks for the same treatment.
+    #[test]
+    fn a_regex_rule_that_asked_to_be_redacted_is() {
+        let mut report = report(vec![house_token_finding()], Metrics::default());
+        report.baselined = vec![house_token_finding()];
+        report.suppressed = vec![house_token_finding()];
+
+        let json = to_json(&report, &secret_rules(), Anchor::ScanRoot, None);
+        assert!(
+            !json.contains(HOUSE_TOKEN),
+            "the credential reached the report: {json}"
+        );
+
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid json");
+        for array in ["findings", "baselined", "suppressed"] {
+            assert_eq!(
+                matched_in(&parsed, array),
+                vec![("house.token".to_string(), REDACTED_MATCH.to_string())],
+                "{array} must be redacted"
+            );
+        }
+    }
+
+    /// Redaction is a display decision, so it must not move the fingerprint any
+    /// more for a regex rule than it does for a secret one: a baseline written
+    /// before the switch was set still covers the finding after it is.
+    #[test]
+    fn asking_to_be_redacted_leaves_the_fingerprint_alone() {
+        let expected = fingerprint("house.token", "src/main.rs", HOUSE_TOKEN, 0);
+        let report = report(vec![house_token_finding()], Metrics::default());
+
+        let parsed: serde_json::Value =
+            serde_json::from_str(&to_json(&report, &secret_rules(), Anchor::ScanRoot, None))
+                .expect("valid json");
+
+        assert_eq!(parsed["findings"][0]["fingerprint"], expected);
+    }
+
+    /// The default has to stay verbatim. Most regex rules match code rather
+    /// than credentials, and their match text is what makes the finding worth
+    /// reading; a rule that says nothing gets exactly what it got before the
+    /// switch existed.
+    #[test]
+    fn a_regex_rule_that_did_not_ask_keeps_its_match_text() {
+        let parsed: serde_json::Value =
+            serde_json::from_str(&report_of(vec![regex_finding()])).expect("valid json");
+
+        assert_eq!(
+            matched_in(&parsed, "findings"),
+            vec![("style.needle".to_string(), "needle".to_string())]
+        );
+    }
+
+    /// The per-finding question the TUI asks and the id set the report builds
+    /// are two readings of one rule, and a sink that disagrees with the report
+    /// is a sink that leaks. Both go through `payload_redacts`; this pins the
+    /// answers.
+    #[test]
+    fn the_per_finding_question_agrees_with_the_report() {
+        let rules = secret_rules();
+        assert!(redacts_match(&rules, "secret.aws-key"));
+        assert!(redacts_match(&rules, "house.token"));
+        assert!(!redacts_match(&rules, "style.needle"));
+        assert!(
+            !redacts_match(&rules, "absent.rule"),
+            "a rule the set does not carry keeps its text, which is what a \
+             report loaded against unrelated rules needs"
+        );
     }
 
     #[test]

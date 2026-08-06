@@ -1,0 +1,45 @@
+apiVersion: v1
+kind: Secret
+metadata:
+  name: billing-credentials
+type: Opaque
+stringData:
+  database-password: "{{PWA_24_150}}"
+  api-token: "{{B64_40_151}}"
+  signing-secret: "{{HEX_64_152}}"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: billing-api
+spec:
+  template:
+    spec:
+      containers:
+        - name: api
+          image: registry.internal/api:1.14.3
+          env:
+            - name: DATABASE_PASSWORD
+              value: "{{PWA_20_153}}"
+            - name: AUTHORIZATION
+              value: "Bearer {{B64URL_43_154}}"
+            - name: BASIC_AUTHORIZATION
+              value: "Basic {{B64_44_155}}"
+            - name: DATABASE_URL
+              value: "postgres://billing:{{PWA_20_156}}@db.internal:5432/billing"
+            - name: REDIS_URL
+              value: "redis://:{{PWA_24_157}}@redis.internal:6379/0"
+            - name: SESSION_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: billing-credentials
+                  key: signing-secret
+            - name: LOG_LEVEL
+              value: "info"
+            - name: DATABASE_PASSWORD_TEMPLATE
+              value: "{{ .Values.database.password }}"
+            - name: API_TOKEN_PLACEHOLDER
+              value: "REPLACE_ME"
+          imagePullSecrets:
+            - name: registry-credentials
+          checksum/config: "sha256:2f0c8b7e1a94d5306fc2e8b1d47a90356ce1fb82d0947a6531ce8f204b7d1a9c"

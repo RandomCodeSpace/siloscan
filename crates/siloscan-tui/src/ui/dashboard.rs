@@ -1518,6 +1518,7 @@ mod tests {
                 source: "report.json".to_string(),
                 schema_version: "1.2".to_string(),
                 anchor: Default::default(),
+                min_severity: None,
                 findings: vec![coverage, duplicate],
                 baselined: Vec::new(),
                 suppressed: Vec::new(),

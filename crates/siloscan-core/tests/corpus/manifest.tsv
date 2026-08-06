@@ -1,0 +1,304 @@
+# Detection corpus expectations. One row per measured line.
+# Fields, tab separated:
+#   path           path under tree/, forward slashes
+#   line           1-based line number in that file
+#   expect         NONE, ANY, or a rule id; alternatives joined by |
+#   justification  why that line expects that outcome
+# Nothing outside the expectation may be reported on a measured line: ANY means
+# exactly one rule, and a list means one of those and no other.
+# Credential markers of the form {{KIND_PARAM_TAG}} are substituted by
+# tests/detection_corpus.rs before scanning; see README.md.
+path	line	expect	justification
+.env	7	ANY	8-character alphanumeric password assigned to a password identifier
+.env	8	ANY	12-character alphanumeric password assigned to a password identifier
+.env	9	ANY	16-character alphanumeric password assigned to a password identifier
+.env	10	ANY	20-character alphanumeric password assigned to a password identifier
+.env	11	ANY	24-character alphanumeric password assigned to a password identifier
+.env	12	ANY	32-character alphanumeric password assigned to a password identifier
+.env	13	ANY	40-character alphanumeric password, the length the 1.4.1 allowlist drops
+.env	14	ANY	48-character alphanumeric password assigned to a password identifier
+.env	15	ANY	64-character alphanumeric password assigned to a password identifier
+.env	18	ANY	12-character password containing shell-safe punctuation
+.env	19	ANY	16-character password containing brackets and separators
+.env	20	ANY	24-character password containing punctuation outside the rule value class
+.env	21	ANY	32-character password containing punctuation outside the rule value class
+.env	22	ANY	16-character password containing non-ASCII letters
+.env	23	ANY	24-character password containing non-ASCII letters
+.env	24	ANY	20-character password containing an at sign, a colon and brackets
+.env	25	ANY	32-character password containing an at sign, a colon and brackets
+.env	28	ANY	24-character base64 token assigned to a token identifier
+.env	29	ANY	32-character base64 token assigned to a token identifier
+.env	30	ANY	exactly 40 base64 characters, the length the 1.4.1 allowlist drops outright
+.env	31	ANY	44-character base64 token assigned to a token identifier
+.env	32	ANY	64-character base64 token assigned to a token identifier
+.env	33	ANY	32-character base64url token assigned to a token identifier
+.env	34	ANY	exactly 40 base64url characters, both the 40-length and identifier allowlists
+.env	35	ANY	43-character base64url token, the shape a 256-bit random value encodes to
+.env	36	ANY	64-character base64url token assigned to a token identifier
+.env	37	ANY	32 hex characters, whose entropy sits below the current generic floor
+.env	38	ANY	40 hex characters assigned to a secret identifier
+.env	39	ANY	64 hex characters assigned to a secret identifier
+.env	40	ANY	a GitHub OAuth client secret is exactly 40 hex characters
+.env	43	secrets.aws-access-token	AWS access key id
+.env	44	secrets.aws-secret-access-key|secrets.generic-secret-assignment	AWS secret access key beside its identifier; reported twice - forty characters of base64 alphabet carry no marker either rule can stand down on, argued in the_pack_reports_three_credentials_twice_and_no_others
+.env	45	secrets.github-pat	GitHub personal access token
+.env	46	secrets.github-oauth	GitHub OAuth access token
+.env	47	secrets.github-app-token	GitHub app installation token
+.env	48	secrets.github-app-token	GitHub app user-to-server token
+.env	49	secrets.github-fine-grained-pat	GitHub fine-grained personal access token
+.env	50	secrets.stripe-access-token	Stripe live secret key
+.env	51	secrets.stripe-access-token	Stripe test secret key, still a credential
+.env	54	NONE	the canonical placeholder password
+.env	55	NONE	the word password is not a password
+.env	56	NONE	an instruction to the reader, not a value
+.env	57	NONE	a run of x is a redaction
+.env	58	NONE	an explicit redaction marker
+.env	59	NONE	an angle-bracket placeholder
+.env	60	NONE	a dollar-brace interpolation resolved by the runtime
+.env	61	NONE	a bare environment reference
+.env	62	NONE	the AWS documentation key, allowlisted by name
+.env	63	NONE	a semantic version string
+.env	64	NONE	a 40-hex git commit sha assigned to a build identifier
+.env	65	NONE	a UUID
+Client.java	4	secrets.twilio-api-key	a Twilio API key in Java
+Client.java	5	secrets.azure-ad-client-secret	an Azure AD client secret in Java
+Client.java	6	secrets.gcp-api-key	a GCP API key in Java
+Client.java	7	ANY	a hardcoded service password in Java
+Client.java	8	ANY	exactly 40 base64 characters in Java
+Client.java	9	ANY	a keystore password with punctuation in Java
+Client.java	10	ANY	a hardcoded bearer header in Java
+Client.java	11	ANY	a hardcoded basic header in Java
+Client.java	12	secrets.generic-credentialed-url	a JDBC URL carrying an inline password
+Client.java	14	NONE	a property name
+Client.java	15	NONE	an environment lookup
+Client.java	16	NONE	a header name
+Client.java	17	NONE	the Java keystore default placeholder
+Client.java	18	NONE	a path to a keystore
+Client.java	19	NONE	a validation pattern
+Dockerfile	3	ANY	a registry password baked into an image layer
+Dockerfile	4	secrets.npm-access-token	an npm access token baked into an image layer
+Dockerfile	5	ANY	exactly 40 base64 characters baked into an image layer
+Dockerfile	6	secrets.curl-auth-header|secrets.generic-authorization-header	a bearer token inside a curl command; reported twice - the discriminator is the word curl, which an allowlist cannot see, argued in the_pack_reports_three_credentials_twice_and_no_others
+Dockerfile	7	secrets.curl-auth-header|secrets.generic-authorization-header	a basic header inside a curl command; reported twice - the discriminator is the word curl, which an allowlist cannot see, argued in the_pack_reports_three_credentials_twice_and_no_others
+Dockerfile	8	ANY	the same bearer header outside a curl command
+Dockerfile	9	ANY	a netrc password written into an image layer
+Dockerfile	10	ANY	a build argument carrying a passphrase
+Dockerfile	11	NONE	a build argument declared with no value
+Dockerfile	12	NONE	a build-arg interpolation
+Dockerfile	13	NONE	a BuildKit secret mount, which is the correct pattern
+Dockerfile	14	NONE	a PATH value
+Dockerfile	15	NONE	a git revision label
+app.js	5	secrets.github-pat	a GitHub personal access token in JavaScript
+app.js	6	secrets.stripe-access-token	a Stripe live key in JavaScript
+app.js	7	ANY	a hardcoded service password in JavaScript
+app.js	8	ANY	exactly 40 base64 characters in JavaScript
+app.js	9	ANY	exactly 40 base64url characters in JavaScript
+app.js	10	ANY	a 32-hex webhook secret in JavaScript
+app.js	11	ANY	a hardcoded bearer header in JavaScript
+app.js	12	ANY	a hardcoded basic header in JavaScript
+app.js	13	ANY	a hardcoded password with punctuation in JavaScript
+app.js	14	secrets.generic-credentialed-url	a credentialed URL in JavaScript
+app.js	16	NONE	an environment lookup
+app.js	17	NONE	a template literal, resolved at run time
+app.js	18	NONE	an instruction to the reader
+app.js	19	NONE	a UUID
+app.js	20	NONE	a header name
+app.js	21	NONE	a dotted reference in bundled output
+app.js	22	NONE	an inline image, not a credential
+app.js	23	NONE	an English sentence shown to a user
+app.js	24	NONE	a subresource integrity hash
+app.js	25	NONE	minified identifier soup
+application.properties	3	ANY	the Spring datasource password
+application.properties	4	ANY	a JDBC URL carrying its password as a query parameter
+application.properties	5	ANY	a mail password containing punctuation
+application.properties	6	ANY	the keystore password
+application.properties	7	ANY	the truststore password, with punctuation
+application.properties	8	ANY	the JWT signing key
+application.properties	9	ANY	a 256-bit encryption key in hex
+application.properties	10	ANY	a real password that spells password
+application.properties	11	ANY	a 40-character password, the length the 1.4.1 allowlist drops
+application.properties	12	ANY	a 32-hex vendor API key with no vendor prefix to key on
+application.properties	13	secrets.generic-credentialed-url	a MongoDB URI with an inline password
+application.properties	14	NONE	a username is not a credential
+application.properties	15	NONE	the Java keystore default placeholder
+application.properties	16	NONE	a Spring property placeholder
+application.properties	17	NONE	a path to a keystore, not its password
+application.properties	18	NONE	a path to a key, not the key
+application.properties	19	NONE	an English sentence
+application.properties	20	NONE	a comma-separated feature list
+application.properties	21	NONE	a 40-hex git commit sha
+appsettings.json	6	ANY	a .NET connection string carrying a password
+appsettings.json	7	ANY	a .NET connection string whose password carries punctuation
+appsettings.json	8	ANY	a connection-string password that spells password
+appsettings.json	9	NONE	a trusted connection has no password
+appsettings.json	10	NONE	a build-time substitution marker
+appsettings.json	13	ANY	exactly 40 base64 characters assigned to an api key
+appsettings.json	14	ANY	a 40-hex OAuth client secret
+appsettings.json	15	ANY	a 64-character base64 signing key
+appsettings.json	16	ANY	a service account password
+appsettings.json	17	secrets.azure-ad-client-secret	an Azure AD client secret
+appsettings.json	18	secrets.openai-api-key	an OpenAI API key
+appsettings.json	19	secrets.anthropic-api-key	an Anthropic API key
+appsettings.json	20	secrets.anthropic-admin-api-key	an Anthropic admin API key
+appsettings.json	21	NONE	a build-time placeholder
+appsettings.json	22	NONE	a reference to a secret store
+appsettings.json	23	NONE	an endpoint URL
+appsettings.json	24	NONE	a policy name
+appsettings.json	25	NONE	an all-zero GUID
+client.rb	5	secrets.gitlab-pat	a GitLab personal access token in Ruby
+client.rb	6	secrets.npm-access-token	an npm access token in Ruby
+client.rb	7	ANY	a hardcoded service password in Ruby
+client.rb	8	ANY	exactly 40 base64 characters in Ruby
+client.rb	9	ANY	a 40-hex session secret in Ruby
+client.rb	10	ANY	a hardcoded bearer header in Ruby
+client.rb	11	ANY	a hardcoded basic header in Ruby
+client.rb	12	ANY	a hardcoded password with punctuation in Ruby
+client.rb	13	secrets.generic-credentialed-url	a credentialed URL in Ruby
+client.rb	15	NONE	an environment lookup
+client.rb	16	NONE	an instruction to the reader
+client.rb	17	NONE	a header name
+client.rb	18	NONE	a Ruby string interpolation
+client.rb	19	NONE	a migration timestamp
+client.rb	20	NONE	an English error message
+config.yml	6	secrets.slack-webhook-url	a Slack incoming webhook URL
+config.yml	7	secrets.slack-bot-token	a Slack bot token
+config.yml	8	secrets.slack-user-token	a Slack user token
+config.yml	9	secrets.sendgrid-api-token	a SendGrid API key
+config.yml	10	secrets.mailgun-private-api-token	a Mailgun private API key beside its vendor name
+config.yml	11	secrets.cloudflare-api-key|secrets.generic-secret-assignment	a Cloudflare API key beside its vendor name; reported twice - forty characters of [a-z0-9_-] that neither the value nor an allowlist tells from a generic api_key, argued in the_pack_reports_three_credentials_twice_and_no_others
+config.yml	12	secrets.cloudflare-global-api-key	a Cloudflare global API key beside its vendor name
+config.yml	13	secrets.jwt	a JSON web token
+config.yml	15	ANY	a hardcoded bearer header in YAML
+config.yml	16	ANY	a hardcoded basic header in YAML
+config.yml	17	ANY	a 32-hex webhook signing secret
+config.yml	18	ANY	exactly 40 base64 characters assigned to a token identifier
+config.yml	20	NONE	the documentation webhook placeholder
+config.yml	21	NONE	an interpolation in the token position
+config.yml	22	NONE	an angle-bracket placeholder
+config.yml	23	NONE	an instruction to the reader
+config.yml	24	NONE	an unfinished value
+config.yml	25	NONE	an empty value
+config.yml	26	NONE	an explicit null
+config.yml	27	NONE	a container image tag
+config.yml	28	NONE	a namespaced cache key
+docker-compose.yml	6	secrets.generic-credentialed-url	PostgreSQL URL carrying an inline password
+docker-compose.yml	7	secrets.generic-credentialed-url	MySQL URL carrying an inline password
+docker-compose.yml	8	secrets.generic-credentialed-url	MongoDB URL carrying an inline password
+docker-compose.yml	9	secrets.generic-credentialed-url	Redis URL with an empty username, the canonical Redis form
+docker-compose.yml	10	secrets.generic-credentialed-url	AMQP URL with an empty username, the canonical RabbitMQ form
+docker-compose.yml	11	secrets.generic-credentialed-url	HTTPS URL with an empty username and a token password
+docker-compose.yml	12	secrets.generic-credentialed-url	HTTPS URL carrying a base64url token as its password
+docker-compose.yml	13	secrets.generic-credentialed-url	a real password that spells password, which 1.4.1 still allowlists here
+docker-compose.yml	14	secrets.generic-credentialed-url	a real password that spells secret
+docker-compose.yml	15	secrets.generic-credentialed-url	a real password that spells token
+docker-compose.yml	16	ANY	a password whose special characters are percent-encoded
+docker-compose.yml	17	ANY	a password containing an unencoded forward slash
+docker-compose.yml	18	ANY	a password containing an unencoded at sign
+docker-compose.yml	19	ANY	an SMTP URL whose password carries punctuation
+docker-compose.yml	21	NONE	the documentation form of a DSN
+docker-compose.yml	22	NONE	a compose interpolation, resolved outside the file
+docker-compose.yml	26	NONE	the placeholder password every quickstart ships
+docker-compose.yml	27	NONE	the RabbitMQ default guest account, not a leaked credential
+docker-compose.yml	28	NONE	a URL with no credentials at all
+docker-compose.yml	29	NONE	a plain service URL
+docker-compose.yml	30	NONE	a URL with a username and no password
+docker-compose.yml	31	NONE	a shell variable in the password position
+docker-compose.yml	32	NONE	a template interpolation in the password position
+docker-compose.yml	33	NONE	an instruction to the reader in the password position
+k8s-deployment.yaml	7	ANY	a password in a Secret stringData block
+k8s-deployment.yaml	8	ANY	exactly 40 base64 characters in a Secret stringData block
+k8s-deployment.yaml	9	ANY	a 256-bit signing secret in a Secret stringData block
+k8s-deployment.yaml	23	ANY	a password inlined in a container env value
+k8s-deployment.yaml	25	ANY	a bearer header inlined in a container env value
+k8s-deployment.yaml	27	ANY	a basic header inlined in a container env value
+k8s-deployment.yaml	29	secrets.generic-credentialed-url	a credentialed URL inlined in a container env value
+k8s-deployment.yaml	31	secrets.generic-credentialed-url	an empty-username Redis URL inlined in a container env value
+k8s-deployment.yaml	35	NONE	a reference to a Secret, which is the correct pattern
+k8s-deployment.yaml	36	NONE	the key name inside a Secret
+k8s-deployment.yaml	38	NONE	an ordinary configuration value
+k8s-deployment.yaml	40	NONE	a Helm template interpolation
+k8s-deployment.yaml	42	NONE	a placeholder value
+k8s-deployment.yaml	44	NONE	a reference to an image pull secret
+k8s-deployment.yaml	45	NONE	a config checksum annotation
+keys/deploy_key	1	secrets.private-key	an OpenSSH private key
+keys/ec-private.pem	1	secrets.private-key	an SEC1 elliptic curve private key
+keys/pgp-private.asc	1	secrets.private-key	a PGP private key block
+keys/public-material.pem	2	NONE	a public key block is not a private key
+keys/public-material.pem	6	NONE	a certificate is public material
+keys/public-material.pem	10	NONE	a key block with no body cannot carry a key
+keys/server.key	1	secrets.private-key	a PKCS1 RSA private key
+main.go	9	secrets.aws-access-token	an AWS access key id in Go
+main.go	10	secrets.aws-secret-access-key|secrets.generic-secret-assignment	an AWS secret access key beside its identifier in Go; reported twice - forty characters of base64 alphabet carry no marker either rule can stand down on, argued in the_pack_reports_three_credentials_twice_and_no_others
+main.go	11	secrets.digitalocean-pat	a DigitalOcean personal access token in Go
+main.go	12	secrets.digitalocean-access-token	a DigitalOcean OAuth token in Go
+main.go	13	ANY	a hardcoded service password in Go
+main.go	14	ANY	exactly 40 base64 characters in Go
+main.go	15	ANY	a 256-bit signing secret in Go
+main.go	23	ANY	a hardcoded bearer header in Go
+main.go	24	ANY	a hardcoded basic header in Go
+main.go	28	NONE	a header name
+main.go	29	NONE	an environment lookup
+main.go	30	NONE	a placeholder password
+main.go	31	NONE	a 40-hex build revision
+main.go	32	NONE	a user agent string
+main.go	33	NONE	an English error message
+main.go	34	NONE	a numeric constant
+main.tf	7	secrets.aws-access-token	an AWS access key id in Terraform
+main.tf	8	ANY	an AWS secret access key under the identifier the AWS provider block uses
+main.tf	13	ANY	a database password in Terraform state-bearing configuration
+main.tf	14	ANY	exactly 40 base64 characters in Terraform
+main.tf	15	ANY	a 256-bit signing secret in Terraform
+main.tf	16	secrets.openai-api-key	an OpenAI API key in Terraform
+main.tf	17	secrets.gcp-api-key	a GCP API key in Terraform
+main.tf	18	ANY	a password with punctuation in Terraform
+main.tf	19	secrets.generic-credentialed-url	a credentialed URL in Terraform
+main.tf	25	NONE	a variable reference
+main.tf	26	NONE	an interpolated variable reference
+main.tf	27	NONE	a lookup against a secret store
+main.tf	28	NONE	a placeholder password
+main.tf	29	NONE	a service endpoint
+main.tf	30	NONE	a module source
+main.tf	31	NONE	a resource name
+package-lock-excerpt.json	7	NONE	a package download URL
+package-lock-excerpt.json	8	NONE	a package integrity hash
+package-lock-excerpt.json	13	NONE	a package download URL
+package-lock-excerpt.json	14	NONE	a legacy sha1 integrity hash
+package-lock-excerpt.json	15	NONE	a 40-hex distribution shasum
+service-account.json	5	secrets.private-key	a PKCS8 private key with escaped newlines, the GCP service account form
+service-account.json	8	ANY	a 40-hex client secret beside the service account
+service-account.json	9	NONE	an OAuth endpoint
+service-account.json	10	NONE	an OAuth token endpoint
+service-account.json	11	NONE	a certificate endpoint
+service-account.json	12	NONE	a domain name
+settings.py	8	ANY	the Django secret key, a 50-character random string
+settings.py	9	ANY	a database password assigned to a password identifier
+settings.py	10	ANY	a database password containing punctuation
+settings.py	11	ANY	a hardcoded bearer header in Python
+settings.py	12	ANY	a hardcoded basic header in Python
+settings.py	13	ANY	a 256-bit cookie signing key in hex
+settings.py	14	ANY	exactly 40 base64 characters assigned to an api key identifier
+settings.py	15	ANY	a real password that spells password
+settings.py	17	NONE	an environment lookup
+settings.py	18	NONE	an environment lookup with an empty default
+settings.py	19	NONE	a placeholder password
+settings.py	20	NONE	a format template, not a token
+settings.py	21	NONE	a percent-style interpolation
+settings.py	22	NONE	help text shown to a user
+settings.py	23	NONE	a dotted class reference
+settings.py	24	NONE	a path to a key file
+settings.py	25	NONE	a header name
+settings.py	26	NONE	a list of origins
+web.config	4	ANY	a .NET appSettings api key of exactly 40 base64 characters
+web.config	5	ANY	a .NET appSettings client secret in 40 hex characters
+web.config	6	ANY	a .NET appSettings password
+web.config	7	ANY	a .NET appSettings bearer token
+web.config	8	NONE	an endpoint URL
+web.config	9	NONE	a transform placeholder
+web.config	12	ANY	a connection string carrying a password
+web.config	13	NONE	a trusted connection has no password
+web.config	18	ANY	an XML password attribute
+web.config	23	ANY	an XML password element
+web.config	24	ANY	an XML password element whose value carries punctuation
+web.config	25	ANY	an XML password element whose value carries an at sign and a colon
+web.config	26	NONE	a placeholder inside a password element
+web.config	27	NONE	an interpolation inside a password element
