@@ -1,0 +1,5 @@
+# Every text file checks out with LF line endings on every platform. The rule
+# packs are embedded into the binary with include_str! and located by exact
+# byte sequences; a CRLF checkout (git's autocrlf default on Windows) changed
+# those bytes and left every Windows build panicking on its first scan.
+* text=auto eol=lf

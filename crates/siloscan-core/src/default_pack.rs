@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::sync::OnceLock;
 
 /// Translated from the gitleaks default config (v8.30.1) by
@@ -23,14 +24,32 @@ const RULES_HEADER: &str = "\nrules:\n";
 pub fn default_rules() -> &'static str {
     static PACK: OnceLock<String> = OnceLock::new();
     PACK.get_or_init(|| {
-        let mut pack = String::with_capacity(GITLEAKS_DOCUMENT.len() + GENERIC_DOCUMENT.len());
-        pack.push_str(GITLEAKS_DOCUMENT);
+        let gitleaks = normalize(GITLEAKS_DOCUMENT);
+        let generic = normalize(GENERIC_DOCUMENT);
+        let mut pack = String::with_capacity(gitleaks.len() + generic.len());
+        pack.push_str(&gitleaks);
         if !pack.ends_with('\n') {
             pack.push('\n');
         }
-        pack.push_str(rule_items(GENERIC_DOCUMENT));
+        pack.push_str(rule_items(&generic));
         pack
     })
+}
+
+/// The document with CRLF line endings replaced by LF.
+///
+/// The documents are committed with LF and `.gitattributes` keeps them that
+/// way, but a checkout that converted them anyway (git's `autocrlf` default on
+/// Windows, before the attributes file existed) reaches `include_str!` with
+/// CRLF and made [`rule_items`] panic on every scan. The pack's contents are
+/// located by exact byte sequences, so the bytes are fixed here rather than
+/// assumed.
+fn normalize(document: &str) -> Cow<'_, str> {
+    if document.contains('\r') {
+        Cow::Owned(document.replace("\r\n", "\n"))
+    } else {
+        Cow::Borrowed(document)
+    }
 }
 
 /// The sequence items of a rule document, without its header.
