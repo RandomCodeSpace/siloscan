@@ -220,6 +220,48 @@ k8s-deployment.yaml	40	NONE	a Helm template interpolation
 k8s-deployment.yaml	42	NONE	a placeholder value
 k8s-deployment.yaml	44	NONE	a reference to an image pull secret
 k8s-deployment.yaml	45	NONE	a config checksum annotation
+k8s/configmap.yaml	7	NONE	JVM flag soup in a ConfigMap data value, punctuation-dense but not a credential
+k8s/configmap.yaml	8	NONE	40 hex characters under a build key is a git commit sha, a known false-positive shape
+k8s/configmap.yaml	9	NONE	a UUID deployment identifier in ConfigMap data
+k8s/configmap.yaml	10	NONE	base64 of a public certificate header under a ConfigMap key with no secret identifier - the classic base64-in-data false positive
+k8s/configmap.yaml	11	NONE	a session cookie name, not a session secret
+k8s/configmap.yaml	12	NONE	a numeric TTL
+k8s/configmap.yaml	13	NONE	a sha256 checksum under a checksum key, 64 hex that must stay quiet
+k8s/helm/values.yaml	12	ANY	20-character plaintext chart default password in a Helm values file, a generic assignment shape
+k8s/helm/values.yaml	13	ANY	24-character plaintext replication password in a Helm values file
+k8s/helm/values.yaml	14	NONE	an empty existingSecret override slot beside a secret-like identifier, the correct chart pattern
+k8s/helm/values.yaml	18	ANY	43-character base64url API key in a Helm values file, the shape a 256-bit value encodes to
+k8s/helm/values.yaml	19	secrets.github-pat	a GitHub personal access token committed in a Helm values file
+k8s/helm/values.yaml	24	NONE	a Helm template interpolation in the password position, resolved at render time
+k8s/helm/values.yaml	28	NONE	a Helm template interpolation with a default filter in the password position, still no value
+k8s/helm/values.yaml	32	NONE	a cpu resource limit
+k8s/helm/values.yaml	33	NONE	a memory resource limit
+k8s/kustomization.yaml	11	NONE	an image pinned by sha256 digest, 64 hex that must stay quiet
+k8s/kustomization.yaml	17	ANY	24-character password in a kustomize secretGenerator literal, a generic assignment shape people commit instead of using files
+k8s/kustomization.yaml	18	ANY	exactly 40 base64 characters in a secretGenerator literal, the length the 1.4.1 allowlist dropped
+k8s/kustomization.yaml	20	NONE	a secretGenerator file reference is a path, not a value - the correct kustomize pattern
+k8s/kustomization.yaml	25	NONE	a configMapGenerator log-level literal
+k8s/kustomization.yaml	26	NONE	a configMapGenerator feature-flag list, hyphenated identifier soup
+k8s/postgres-secret.yaml	10	secrets.kubernetes-secret-yaml|secrets.generic-secret-assignment	base64 of a 24-character password under data: beside a password key; the encoded text is itself a high-entropy value the generic assignment may own today, and the decoding reporter is secrets.kubernetes-secret-yaml, arriving via ticket 53 on the ticket 52 decode gate - either is an acceptable owner
+k8s/postgres-secret.yaml	11	secrets.kubernetes-secret-yaml|secrets.generic-secret-assignment	base64 of a 20-character replication password under data:; same encoded-value shape - the expected end-state reporter is secrets.kubernetes-secret-yaml (ticket 53), the generic assignment is the acceptable interim owner of the encoded text
+k8s/postgres-secret.yaml	12	secrets.kubernetes-secret-yaml	base64 of a credentialed postgres URL under a database-url key; no secret-like identifier, so no shipped rule can reach it without decoding - known miss until secrets.kubernetes-secret-yaml lands via tickets 52 and 53, which is the expected reporter
+k8s/redis-secret.yaml	8	secrets.kubernetes-secret-yaml|secrets.generic-secret-assignment	base64 of a 32-character redis password under data:; expected end-state reporter is secrets.kubernetes-secret-yaml (ticket 53), the generic assignment may own the encoded text until then
+k8s/redis-secret.yaml	9	secrets.kubernetes-secret-yaml|secrets.generic-secret-assignment	base64 of a 16-character requirepass value under data:; expected end-state reporter is secrets.kubernetes-secret-yaml (ticket 53), the generic assignment is the acceptable interim owner
+k8s/registry-credentials.yaml	8	secrets.kubernetes-secret-yaml	a .dockerconfigjson blob: base64 of JSON whose auth field is base64 of user:password - two encoding layers, the exact shape gating ticket 52; the key carries no secret identifier so nothing ships that can report it - known miss, expected reporter is secrets.kubernetes-secret-yaml via ticket 53
+k8s/session-secret.yaml	10	ANY	64 hex characters of session signing secret in stringData plaintext, reachable by the generic rules today; ownership may move to secrets.kubernetes-secret-yaml when ticket 53 lands
+k8s/session-secret.yaml	11	ANY	43-character base64url CSRF token in stringData plaintext
+k8s/session-secret.yaml	12	ANY	a 40-hex OAuth client secret in stringData plaintext, the GitHub OAuth client secret length
+k8s/storefront-stack.yaml	18	NONE	a container image pinned by sha256 digest in a Deployment, 64 hex that must stay quiet
+k8s/storefront-stack.yaml	23	NONE	a cpu resource request
+k8s/storefront-stack.yaml	24	NONE	a memory resource request
+k8s/storefront-stack.yaml	26	NONE	a quoted cpu resource limit
+k8s/storefront-stack.yaml	27	NONE	a memory resource limit
+k8s/storefront-stack.yaml	29	NONE	an envFrom secretRef is the correct pattern and carries no value
+k8s/storefront-stack.yaml	30	NONE	the name of a referenced Secret, a low-entropy identifier
+k8s/storefront-stack.yaml	35	NONE	the Secret's own metadata name in the middle document, not a value
+k8s/storefront-stack.yaml	39	secrets.kubernetes-secret-yaml|secrets.generic-secret-assignment	base64 of a 20-character SMTP password under data: in a Secret sandwiched between a Deployment and a Service; expected end-state reporter is secrets.kubernetes-secret-yaml (ticket 53), the generic assignment may own the encoded text until then
+k8s/storefront-stack.yaml	40	secrets.kubernetes-secret-yaml|secrets.generic-secret-assignment	base64 of a 32-character JWT signing key under data: in a multi-document manifest; expected end-state reporter is secrets.kubernetes-secret-yaml (ticket 53), the generic assignment is the acceptable interim owner
+k8s/storefront-stack.yaml	42	ANY	32-character base64url webhook secret in stringData plaintext in the same multi-document Secret, reachable by the generic rules today
 keys/deploy_key	1	secrets.private-key	an OpenSSH private key
 keys/ec-private.pem	1	secrets.private-key	an SEC1 elliptic curve private key
 keys/pgp-private.asc	1	secrets.private-key	a PGP private key block
@@ -259,6 +301,119 @@ main.tf	28	NONE	a placeholder password
 main.tf	29	NONE	a service endpoint
 main.tf	30	NONE	a module source
 main.tf	31	NONE	a resource name
+noise-artifacts/Cargo.lock	8	NONE	a crates.io registry source URL with no userinfo
+noise-artifacts/Cargo.lock	9	NONE	a Cargo.lock 64-hex package checksum, a hash of public bytes
+noise-artifacts/Cargo.lock	14	NONE	a crates.io registry source URL with no userinfo
+noise-artifacts/Cargo.lock	15	NONE	a Cargo.lock 64-hex package checksum, a hash of public bytes
+noise-artifacts/Cargo.lock	20	NONE	a crates.io registry source URL with no userinfo
+noise-artifacts/Cargo.lock	21	NONE	a Cargo.lock 64-hex package checksum, a hash of public bytes
+noise-artifacts/Cargo.lock	29	NONE	a crates.io registry source URL with no userinfo
+noise-artifacts/Cargo.lock	30	NONE	a Cargo.lock 64-hex package checksum, a hash of public bytes
+noise-artifacts/ca-bundle.pem	2	NONE	a certificate block is public material, not a private key
+noise-artifacts/ca-bundle.pem	3	NONE	the first 64-character base64 body line of a public certificate
+noise-artifacts/ca-bundle.pem	20	NONE	the padded closing base64 body line of a public certificate
+noise-artifacts/fonts.css	7	NONE	a data:font/woff2;base64 URI inlining a font, high-entropy public bytes
+noise-artifacts/fonts.css	11	NONE	a data:image/png;base64 URI inlining an icon
+noise-artifacts/go.sum	1	NONE	a go.sum h1: base64 module hash, a checksum of public source
+noise-artifacts/go.sum	2	NONE	a go.sum /go.mod h1: base64 hash, a checksum of public source
+noise-artifacts/go.sum	3	NONE	a go.sum h1: base64 module hash, a checksum of public source
+noise-artifacts/go.sum	4	NONE	a go.sum /go.mod h1: base64 hash, a checksum of public source
+noise-artifacts/go.sum	5	NONE	a go.sum h1: base64 module hash, a checksum of public source
+noise-artifacts/go.sum	6	NONE	a go.sum /go.mod h1: base64 hash, a checksum of public source
+noise-artifacts/go.sum	7	NONE	a go.sum h1: base64 module hash, a checksum of public source
+noise-artifacts/go.sum	8	NONE	a go.sum /go.mod h1: base64 hash, a checksum of public source
+noise-artifacts/go.sum	9	NONE	a go.sum h1: base64 module hash, a checksum of public source
+noise-artifacts/go.sum	10	NONE	a go.sum /go.mod h1: base64 hash, a checksum of public source
+noise-artifacts/package-lock.json	9	NONE	an npm registry tarball URL with no userinfo
+noise-artifacts/package-lock.json	10	NONE	a lockfileVersion 3 sha512 integrity hash, 88 base64 characters of checksum
+noise-artifacts/package-lock.json	15	NONE	an npm registry tarball URL with no userinfo
+noise-artifacts/package-lock.json	16	NONE	a lockfileVersion 3 sha512 integrity hash, 88 base64 characters of checksum
+noise-artifacts/package-lock.json	24	NONE	an npm registry tarball URL with no userinfo
+noise-artifacts/package-lock.json	25	NONE	a lockfileVersion 3 sha512 integrity hash, 88 base64 characters of checksum
+noise-artifacts/package-lock.json	30	NONE	an npm registry tarball URL with no userinfo
+noise-artifacts/package-lock.json	31	NONE	a legacy sha1 integrity hash, 28 base64 characters of checksum
+noise-artifacts/package-lock.json	36	NONE	an npm registry tarball URL with no userinfo
+noise-artifacts/package-lock.json	37	NONE	a lockfileVersion 3 sha512 integrity hash, 88 base64 characters of checksum
+noise-artifacts/release.sha256sums	1	NONE	a sha256sums line, 64 hex characters naming a release tarball
+noise-artifacts/release.sha256sums	2	NONE	a sha256sums line, 64 hex characters naming a release tarball
+noise-artifacts/release.sha256sums	3	NONE	a sha256sums line, 64 hex characters naming a release tarball
+noise-artifacts/release.sha256sums	4	NONE	a sha256sums line, 64 hex characters naming a release tarball
+noise-artifacts/release.sha256sums	5	NONE	a sha256sums line, 64 hex characters naming a release archive
+noise-artifacts/release.sha256sums	6	NONE	a sha256sums line, 64 hex characters naming a source tarball
+noise-artifacts/vendor.min.js	1	NONE	minified identifier soup carrying an embedded base64 image string in a bundle
+noise-artifacts/vendor.min.js	2	NONE	a sourceMappingURL comment, a file reference
+noise-artifacts/vendor.min.js.map	6	NONE	a source map mappings field, base64 VLQ soup of arbitrary length
+noise-artifacts/yarn.lock	7	NONE	a yarn registry URL whose fragment is a 40-hex tarball sha1
+noise-artifacts/yarn.lock	8	NONE	a yarn.lock sha512 integrity hash, a checksum of public bytes
+noise-artifacts/yarn.lock	14	NONE	a yarn registry URL whose fragment is a 40-hex tarball sha1
+noise-artifacts/yarn.lock	15	NONE	a yarn.lock sha512 integrity hash, a checksum of public bytes
+noise-artifacts/yarn.lock	21	NONE	a yarn registry URL whose fragment is a 40-hex tarball sha1
+noise-artifacts/yarn.lock	22	NONE	a yarn.lock sha512 integrity hash, a checksum of public bytes
+noise-artifacts/yarn.lock	26	NONE	a yarn registry URL whose fragment is a 40-hex tarball sha1
+noise-artifacts/yarn.lock	27	NONE	a yarn.lock sha512 integrity hash, a checksum of public bytes
+noise-code/proto/authpb/auth.pb.go	22	NONE	generated protobuf field named Password whose only value is its own wire tag, the canonical pb.go false positive
+noise-code/proto/authpb/auth.pb.go	23	NONE	client_secret field tag; the name=client_secret assignment inside the tag string carries the field name, not a value
+noise-code/proto/authpb/auth.pb.go	34	NONE	generated getter named after the password field, no value on the line
+noise-code/proto/authpb/auth.pb.go	53	NONE	access_token field tag; a token identifier beside a struct-tag string that spells access_token twice more
+noise-code/proto/authpb/auth.pb.go	54	NONE	refresh_token field tag in the same tag-string shape
+noise-code/proto/authpb/auth.pb.go	75	NONE	first row of a serialized file descriptor as comma-separated hex bytes, dense numeric soup
+noise-code/proto/authpb/auth.pb.go	82	NONE	descriptor bytes that encode the word password one 0xNN at a time
+noise-code/proto/telemetry_pb2.py	14	NONE	serialized descriptor byte string naming password, access_token and secret fields among escapes, the densest pb2 temptation
+noise-code/proto/telemetry_pb2.py	21	NONE	a short options byte string assigned to a serialized_options identifier
+noise-code/src/generated/expanded.rs	25	NONE	the field-name literal password in serde Serialize expansion, with no value anywhere near it
+noise-code/src/generated/expanded.rs	30	NONE	the field-name literal api_key in the same expansion
+noise-code/src/generated/expanded.rs	71	NONE	match arm mapping the string password to a field discriminant
+noise-code/src/generated/expanded.rs	72	NONE	match arm mapping the string api_key to a field discriminant
+noise-code/src/generated/expanded.rs	86	NONE	the same password arm as a byte-string literal
+noise-code/src/generated/expanded.rs	87	NONE	the same api_key arm as a byte-string literal
+noise-code/src/generated/expanded.rs	93	NONE	the generated FIELDS list spelling password and api_key side by side
+noise-code/src/sys/linux_ppp.rs	10	NONE	bindgen ioctl constant ending in PASS assigned a numeric request code, the exact shape behind the original mass findings
+noise-code/src/sys/linux_ppp.rs	16	NONE	keyring id constant; KEY-prefixed name with a small negative value
+noise-code/src/sys/linux_ppp.rs	26	NONE	keyctl opcode with both KEY and SECURITY in the name and the value 17
+noise-code/src/sys/linux_ppp.rs	27	NONE	key permission mask; KEY name assigned a large integer that is a bitmask, not a secret
+noise-code/src/sys/sodium.rs	5	NONE	libsodium size constant with secret and key in one name and the value 32
+noise-code/src/sys/sodium.rs	8	NONE	a very long generated identifier containing KEYBYTES, still just the number 32
+noise-code/src/sys/sodium.rs	12	NONE	SECRETKEYBYTES size constant, value 64
+noise-code/src/sys/sodium.rs	22	NONE	PASSWD-named limit constant assigned u32::MAX, a password identifier with a large plain integer
+noise-code/src/sys/windows_security.rs	6	NONE	Windows access-right bit named TOKEN with a one-digit value
+noise-code/src/sys/windows_security.rs	12	NONE	TOKEN_ALL_ACCESS mask; token identifier assigned a six-digit integer
+noise-code/src/sys/windows_security.rs	15	NONE	NCRYPT interface id with SECRET in the name and a numeric value
+noise-code/src/sys/windows_security.rs	21	NONE	credential-type enum value; PASSWORD-suffixed name assigned 2
+noise-code/src/sys/windows_security.rs	26	NONE	user-account flag named PASSWD assigned a small bit value
+noise-code/src/sys/windows_security.rs	29	NONE	PASSWORD_EXPIRED flag assigned a seven-digit bit value
+noise-code/src/sys/windows_security.rs	30	NONE	type alias with KEY_HANDLE in the name; the right-hand side is a type
+noise-code/tools/codegen/src/bake_tables.rs	7	NONE	generated function named after a key schedule, carrying no value at all
+noise-code/tools/codegen/src/bake_tables.rs	9	NONE	Literal::u8_unsuffixed token-stream byte, the numeric soup proc-macro codegen emits by the thousand
+noise-code/tools/codegen/src/bake_tables.rs	43	NONE	byte-string spelling of an identifier containing secret, paired with a numeric kind id
+noise-code/tools/codegen/src/bake_tables.rs	47	NONE	api_token spelled as a lexer token name, followed only by its numeric kind
+noise-code/vendor/litevfs/configure	18	NONE	autoconf cache probe for getpass; the value is the word yes
+noise-code/vendor/litevfs/configure	21	NONE	cache probe with passphrase in the variable name, value no
+noise-code/vendor/litevfs/configure	26	NONE	library probe spelling crypt twice in one variable name
+noise-code/vendor/litevfs/configure	29	NONE	PASSWD-named cache variable assigned a program path
+noise-code/vendor/litevfs/configure	31	NONE	PASSWD_PROG cache variable whose value is the word passwd itself
+noise-code/vendor/litevfs/configure	33	NONE	key-size cache variable assigned the number 32
+noise-code/vendor/litevfs/configure	39	NONE	output variable with KEY in the name and a quoted two-digit value
+noise-code/vendor/litevfs/configure	40	NONE	PASSWD-named variable holding the kpasswd port number 464
+noise-code/vendor/litevfs/configure	42	NONE	MKPASSWD output variable assigned a quoted program path
+noise-code/vendor/litevfs/configure	46	NONE	the word passwd quoted as the value of a PASSWD variable, a password-identifier-with-short-value shape
+noise-code/vendor/litevfs/configure	47	NONE	SMBPASSWD variable assigned a quoted path
+noise-code/vendor/litevfs/configure	53	NONE	config.status sed substitution carrying PASSWD on both sides of the comma
+noise-code/vendor/litevfs/litevfs.c	29	NONE	amalgamation source stamp: a 64-hex checksum inside a version define, not a secret identifier
+noise-code/vendor/litevfs/litevfs.c	50	NONE	vendored ioctl define ending in PASS with a hex request code, the sqlite3.c-class noise that produced mass findings
+noise-code/vendor/litevfs/litevfs.c	58	NONE	test-control opcode named SEED assigned 5
+noise-code/vendor/litevfs/litevfs.c	78	NONE	error code named AUTH assigned 23
+noise-code/vendor/litevfs/litevfs.c	85	NONE	sixty-odd uppercase letters of packed SQL keyword text in a comment, an entropy-only temptation with no identifier
+noise-code/vendor/litevfs/litevfs.c	108	NONE	pragma type define named KEY assigned 12
+noise-code/vendor/litevfs/litevfs.c	111	NONE	pragma type define named PASSPHRASE assigned 15
+noise-code/vendor/litevfs/litevfs.c	121	NONE	pragma name table entry quoting hexkey beside small numerics
+noise-code/vendor/litevfs/litevfs.c	123	NONE	the pragma name key as a quoted three-letter string in a struct table
+noise-code/vendor/litevfs/litevfs.c	124	NONE	the pragma name passphrase quoted with no value in sight
+noise-code/vendor/litevfs/litevfs.c	126	NONE	the pragma name textkey in the same table
+noise-code/vendor/litevfs/litevfs.c	137	NONE	first row of a fixed whitening table, dense comma-separated hex bytes
+noise-code/vendor/litevfs/litevfs.c	153	NONE	the golden-ratio hash seed constant 0x9e3779b9
+noise-code/vendor/litevfs/litevfs.c	178	NONE	codec key-size define, value 32
+noise-code/vendor/litevfs/litevfs.c	180	NONE	PBKDF2 iteration count; kdf-flavored identifier with a plain integer
+noise-code/vendor/litevfs/litevfs.c	181	NONE	key-setting function signature; zKey and nKey are parameters, not values
 package-lock-excerpt.json	7	NONE	a package download URL
 package-lock-excerpt.json	8	NONE	a package integrity hash
 package-lock-excerpt.json	13	NONE	a package download URL
@@ -288,6 +443,52 @@ settings.py	23	NONE	a dotted class reference
 settings.py	24	NONE	a path to a key file
 settings.py	25	NONE	a header name
 settings.py	26	NONE	a list of origins
+urls/.env	5	secrets.generic-credentialed-url	postgres URL whose password is admin+password, entirely placeholder vocabulary; the anchored placeholder allowlist suppresses it, the ticket #44 gap
+urls/.env	6	secrets.generic-credentialed-url	mysql URL whose password is super+secret+key, the ticket #44 gap; at 2.95 it also sits under the rule's 3.0 entropy floor
+urls/.env	7	secrets.generic-credentialed-url	empty-username redis URL whose password is hunter2+passphrase, entirely placeholder vocabulary, the ticket #44 gap
+urls/.env	10	secrets.generic-credentialed-url	control: amqp URL carrying a 20-character generated password, the already-detected shape
+urls/.env	11	secrets.generic-credentialed-url	control: mongodb URL whose password spells a placeholder word plus a random tail, which 1.4.1 stopwords dropped
+urls/.env	12	secrets.generic-credentialed-url	control: empty-username redis URL carrying a base64url token as its password
+urls/.env	15	NONE	changeme is the canonical placeholder password every quickstart ships
+urls/.env	16	NONE	guest:guest is the RabbitMQ default and five characters sits below the six-character password minimum
+urls/.env	17	NONE	credential-free redis URL; host:port must not read as user:password
+urls/.env	20	NONE	${BILLING_DB_PASSWORD} environment interpolation standing where the password goes
+urls/.env	21	NONE	$(vault kv get ...) command substitution in the password position; the credential exists only at run time
+urls/SETUP.md	11	NONE	password123, lowercase vocabulary plus counter, the documented-example shape the counter allowlist exists for
+urls/SETUP.md	12	NONE	secret-42, lowercase vocabulary word with a hyphenated counter in a documentation example
+urls/SETUP.md	13	NONE	token_1, lowercase vocabulary word with an underscored counter in a documentation example
+urls/SETUP.md	14	NONE	key_1234, the exact counter password the rule's own comment measured as a false positive
+urls/SETUP.md	18	NONE	the dotenv vault example URI shipped in its error message, reported five times in one node_modules before the counter allowlist
+urls/SETUP.md	24	NONE	${REPORTING_DB_PASSWORD} environment interpolation in a deploy-template example
+urls/SETUP.md	25	NONE	your-password-here, hyphen-joined placeholder vocabulary used as an actual placeholder
+urls/backup.sh	9	secrets.generic-credentialed-url	pg_dump URL whose password is root+admin+secret, entirely placeholder vocabulary, the ticket #44 gap
+urls/backup.sh	13	secrets.generic-credentialed-url	mysqldump URL whose password is letmein+admin+key, entirely placeholder vocabulary, the ticket #44 gap
+urls/backup.sh	16	secrets.generic-credentialed-url	control: mongodump URI carrying a 20-character generated password
+urls/backup.sh	19	secrets.generic-credentialed-url	control: redis-cli -u URL carrying a punctuated generated password
+urls/backup.sh	22	NONE	$(vault kv get ...) command substitution in the password position of a shell assignment
+urls/backup.sh	26	NONE	${METRICS_TOKEN} environment interpolation in the password position
+urls/celeryconfig.py	9	secrets.generic-credentialed-url	empty-username amqp broker URL whose password is secret+token+value, entirely placeholder vocabulary, the ticket #44 gap
+urls/celeryconfig.py	10	secrets.generic-credentialed-url	empty-username redis backend URL whose password is Super-Secret-Passphrase, hyphen-joined placeholder vocabulary, the ticket #44 gap
+urls/celeryconfig.py	13	secrets.generic-credentialed-url	control: amqp URL carrying a 43-character base64url token, the shape a 256-bit value encodes to
+urls/celeryconfig.py	17	NONE	guest:guest RabbitMQ default in a development fallback, below the six-character password minimum
+urls/celeryconfig.py	18	NONE	credential-free redis URL; host:port must not read as user:password
+urls/celeryconfig.py	21	NONE	{{ flower_password }} template interpolation left verbatim by the harness and allowlisted by the brace pattern
+urls/database.yml	12	NONE	changeme development default in a Rails database.yml
+urls/database.yml	16	NONE	password1, lowercase vocabulary plus counter, the test-environment example shape
+urls/database.yml	20	NONE	ERB ENV interpolation in the password position; the angle brackets sit outside the value class
+urls/database.yml	24	secrets.generic-credentialed-url	production postgres URL whose password is my+database+password, entirely placeholder vocabulary, the ticket #44 gap
+urls/database.yml	25	secrets.generic-credentialed-url	mysql replica URL whose password is db+user+password, entirely placeholder vocabulary, the ticket #44 gap
+urls/database.yml	26	secrets.generic-credentialed-url	control: empty-username amqp URL carrying a 16-character generated password
+urls/database.yml	27	secrets.generic-credentialed-url	control: empty-username redis URL whose password spells a placeholder word plus a random tail
+urls/settings.ini	3	secrets.generic-credentialed-url	mysql URL whose password is Admin.Password, dot-separated placeholder vocabulary, the ticket #44 gap
+urls/settings.ini	4	secrets.generic-credentialed-url	control: mysql replica URL carrying a punctuated generated password
+urls/settings.ini	8	secrets.generic-credentialed-url	multi-host mongodb URI whose password is my+secret+token, entirely placeholder vocabulary, the ticket #44 gap
+urls/settings.ini	12	secrets.generic-credentialed-url	empty-username amqp URL whose password is topsecret+creds, entirely placeholder vocabulary, the ticket #44 gap
+urls/settings.ini	13	secrets.generic-credentialed-url	control: amqp URL carrying a 32-character base64 token
+urls/settings.ini	16	secrets.generic-credentialed-url	control: empty-username redis URL carrying a 24-character generated password
+urls/settings.ini	17	NONE	changeit, the JVM-keystore flavor of changeme, on a localhost cache URL
+urls/settings.ini	21	NONE	{{ smtp_password }} template interpolation; lowercase with spaces, so the harness leaves it verbatim
+urls/settings.ini	22	NONE	%(smtp_password)s configparser interpolation, the shape the percent allowlist entry exists for
 web.config	4	ANY	a .NET appSettings api key of exactly 40 base64 characters
 web.config	5	ANY	a .NET appSettings client secret in 40 hex characters
 web.config	6	ANY	a .NET appSettings password
@@ -302,3 +503,60 @@ web.config	24	ANY	an XML password element whose value carries punctuation
 web.config	25	ANY	an XML password element whose value carries an at sign and a colon
 web.config	26	NONE	a placeholder inside a password element
 web.config	27	NONE	an interpolation inside a password element
+xml/App.config	4	NONE	a supportedRuntime sku moniker; Version= inside it is =-bearing identity text, not a secret
+xml/App.config	7	NONE	an update feed URL with no credentials, allowlisted as a scheme:// value
+xml/App.config	8	ANY	a desktop app telemetry api key of 32 base64url characters in appSettings value=
+xml/App.config	9	ANY	a signing secret with wide policy punctuation in appSettings value=; punctuation outside the markup value class may end the capture early, which is part of what is measured
+xml/App.config	10	ANY	a proxy password in appSettings value=
+xml/App.config	11	NONE	a username is not a secret
+xml/App.config	14	NONE	a LocalDB connection string with integrated security carries no credential
+xml/App.config	15	ANY	a connection-string Password= with policy punctuation, reported by the assignment path inside the attribute value
+xml/App.config	18	NONE	an xmlns urn is schema plumbing
+xml/App.config	20	NONE	publicKeyToken is 16 hex characters of public assembly identity, a documented scanner false-positive shape
+xml/App.config	21	NONE	bindingRedirect version ranges are dotted version numbers
+xml/Directory.Build.props	5	NONE	an MSBuild equality condition; == comparisons are =-laden text no rule may report
+xml/Directory.Build.props	8	ANY	a code-signing pfx password in an MSBuild property element
+xml/Directory.Build.props	9	ANY	a 40-character base64url artifact token in a property element: the length the 1.4.1 assignment allowlist dropped, measured here in markup position
+xml/Directory.Build.props	10	ANY	a sig= query fragment in a secret-named property; the internal = trips the =[^=] allowlist in generic-markup-config-secret, known miss, ticket #51
+xml/NuGet.Config	5	NONE	the public nuget.org source URL
+xml/NuGet.Config	6	NONE	an internal feed URL with no credentials
+xml/NuGet.Config	10	NONE	a feed username is not a secret
+xml/NuGet.Config	11	ANY	ClearTextPassword is how NuGet stores a feed credential on disk, the exact shape Azure DevOps PAT leaks take
+xml/NuGet.Config	15	NONE	a %VAR% placeholder NuGet expands from the environment
+xml/NuGet.Config	19	ANY	nuget setapikey writes the key under an apikeys entry whose key attribute is the feed URL, so no keyword-bearing name sits beside the value; known gap
+xml/Payments.Api.csproj	5	NONE	a semantic version
+xml/Payments.Api.csproj	7	NONE	a path to a key file, not key material
+xml/Payments.Api.csproj	9	NONE	an MSBuild condition comparing with ==
+xml/Payments.Api.csproj	10	secrets.generic-credentialed-url	a NuGet restore source with user:password@ inline, the CI leak shape for private feeds
+xml/Payments.Api.csproj	11	ANY	a NuGet feed api key in a property element
+xml/Payments.Api.csproj	12	ANY	a symbol server password with an internal =; the =[^=] allowlist in generic-markup-config-secret drops it, known miss, ticket #51
+xml/Payments.Api.csproj	16	NONE	an assembly-qualified reference; Version=, Culture= and PublicKeyToken= are public identity, a documented scanner false-positive shape
+xml/ivysettings.xml	3	NONE	a repository URL without credentials
+xml/ivysettings.xml	4	NONE	a username property
+xml/ivysettings.xml	5	ANY	an Ant/Ivy password in the name=/value= attribute pair, which the markup rule's key=/value= branch does not cover; known gap
+xml/ivysettings.xml	6	ANY	a keystore passphrase with an internal = in the name=/value= shape; missed twice over, once by the name=/value= gap and once by the =[^=] allowlist, ticket #51
+xml/ivysettings.xml	7	ANY	an Ivy credentials tag whose passwd= attribute the password assignment rule reaches inside the markup
+xml/ivysettings.xml	8	NONE	an entity-escaped value; the fragments around the escape sit below the length floor, and reporting escaped-markup fragments has produced noise
+xml/ivysettings.xml	11	NONE	a resolver root URL with no credentials
+xml/settings.xml	2	NONE	an xmlns namespace URL
+xml/settings.xml	3	NONE	an xmlns:xsi namespace URL
+xml/settings.xml	4	NONE	schemaLocation is a pair of schema URLs
+xml/settings.xml	9	ANY	a Maven server password element, the canonical settings.xml leak
+xml/settings.xml	14	NONE	a Maven master-password-encrypted value; the brace wrapper marks it already protected and the brace sits outside every value class
+xml/settings.xml	19	ANY	a docker registry password with an internal =; the =[^=] allowlist in generic-markup-config-secret drops the element-body branch too, known miss, ticket #51
+xml/settings.xml	24	NONE	a ${env.*} interpolation resolved by Maven at run time
+xml/settings.xml	35	ANY	a proxy password element with policy punctuation
+xml/web.config	4	NONE	an assembly-qualified type name; Version=, Culture= and PublicKeyToken= are the =-bearing identity text the =[^=] entry ostensibly protects, and none of it is secret
+xml/web.config	7	NONE	an OWIN startup type reference in a namespaced key
+xml/web.config	8	ANY	an 88-character base64 Azure storage account key in appSettings; the key name spells AccountKey, which no rule's name class or keyword list covers; known gap
+xml/web.config	9	ANY	a shared access secret whose trailing == padding survives =[^=] because no non-= character follows either =; the positive control for ticket #51
+xml/web.config	10	ANY	an api key of 32 base64 characters in appSettings value=
+xml/web.config	11	ANY	a secret with a single internal =; the =[^=] allowlist in generic-markup-config-secret stands down on it, known miss, ticket #51
+xml/web.config	12	ANY	a SAS token stored as its sig= query fragment in a token-named key; the internal = trips the =[^=] allowlist, known miss, ticket #51
+xml/web.config	13	NONE	password policy prose with an entity escape in a password-named key; spaces break the capture and the text carries no digits
+xml/web.config	14	NONE	a commented-out placeholder; changeme is caught by the placeholder allowlist
+xml/web.config	17	ANY	a SQL connection-string Password= with an internal =, reported by the assignment path whose measured allowlists replaced the blanket =[^=]; the contrast case for ticket #51
+xml/web.config	18	ANY	a redis connection string password with base64 == padding, reported by the assignment path with the comma terminator
+xml/web.config	19	ANY	an Azure storage connection string; AccountKey= matches no generic name and the line carries no keyword, the most-leaked shape the pack cannot see; known gap
+xml/web.config	20	NONE	a trusted connection has no password
+xml/web.config	23	ANY	machineKey validationKey and decryptionKey let anyone forge ASP.NET auth cookies; neither name is in any rule's name class or keyword list; known gap - two credentials on one line, one rule reporting both satisfies ANY

@@ -1,0 +1,33 @@
+# Default values for the storefront chart. Override per environment.
+replicaCount: 2
+
+image:
+  repository: registry.internal/storefront
+  tag: "1.8.2"
+  pullPolicy: IfNotPresent
+
+postgresql:
+  auth:
+    username: storefront
+    password: "{{PWA_20_413}}"
+    replicationPassword: "{{PWA_24_414}}"
+    existingSecret: ""
+
+externalApi:
+  baseUrl: https://api.partner.example.com/v2
+  apiKey: "{{B64URL_43_415}}"
+  githubToken: "{{GHPAT_0_416}}"
+
+smtp:
+  host: smtp.internal
+  port: 587
+  password: "{{ .Values.global.smtpPassword }}"
+
+redis:
+  auth:
+    password: '{{ .Values.global.redisPassword | default "" }}'
+
+resources:
+  limits:
+    cpu: 500m
+    memory: 512Mi

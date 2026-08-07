@@ -15,9 +15,31 @@ survive a measurement. That is the whole argument for this directory.
 
 ## Layout
 
-    tree/            the corpus itself, one directory of realistic files
+    tree/            the corpus itself, realistic files grouped into families
     manifest.tsv     the expectation table, one row per measured line
     README.md        this file
+
+The corpus is organized into **families**: a family is the first directory
+under `tree/`, and files sitting directly in `tree/` form the family `core`.
+Each family measures one territory, and each holds its own recall floor
+(see "The floors"):
+
+    core             the original mixed corpus: .env, compose, properties,
+                     JSON, Dockerfile, source files in six languages
+    keys             private-key material in four formats, plus public
+                     material that must stay quiet
+    k8s              Kubernetes and Helm: Secret data:/stringData:, chart
+                     values, kustomize generators, multi-document manifests
+    urls             credentialed URLs across .env, shell, Python, YAML, INI
+                     and Markdown, centered on the ticket #44 placeholder-
+                     vocabulary gap
+    xml              .NET and JVM XML configuration: App.config, web.config,
+                     MSBuild, NuGet.Config, Maven settings.xml, Ivy - centered
+                     on the ticket #51 =[^=] markup gap
+    noise-artifacts  pure noise, no positives: lockfiles, checksums, PEM
+                     certificates, inlined fonts, minified bundles, sourcemaps
+    noise-code       pure noise, no positives: generated and vendored source
+                     with credential-shaped identifiers beside numeric values
 
 `crates/siloscan-core/Cargo.toml` carries `exclude = ["tests/corpus/**"]`, so
 none of this is packaged into the published crate. It is test material and
@@ -104,6 +126,11 @@ underscores, and anything else in braces is left verbatim.
    expectation, justification. Rows are sorted by path then line.
 3. Run the harness. `the_corpus_and_its_manifest_agree` fails if the row points
    at a line that does not exist or repeats one already claimed.
+4. A new family - a new first-level directory under `tree/` - with any
+   positive rows needs an entry in `RECALL_FLOORS`, set to the value the
+   harness measures, not the value anyone hopes for. The recall test panics on
+   a family with positives and no floor, and fails on a floor entry naming a
+   family without positives.
 
 Expectations are one of:
 
@@ -127,14 +154,28 @@ argue with later, which is how the current rules were arrived at.
 
     cargo test -p siloscan-core --test detection_corpus
 
-`detection_recall_meets_its_floor` and `detection_precision_meets_its_floor`
-print the full list of misses, spurious hits and findings on lines the manifest
-does not classify, then assert:
+`detection_recall_meets_its_floor_per_family` and
+`detection_precision_meets_its_floor` print the per-family recall table and
+the full list of misses, spurious hits and findings on lines the manifest does
+not classify, then assert:
 
-- **recall** - positives reported / positives - at or above `RECALL_FLOOR`.
-- **precision proxy** - negatives left alone / negatives - at or above
+- **recall, per family** - positives reported / positives, held separately for
+  each family against its entry in `RECALL_FLOORS`. One global number would
+  let a regression in a strong family hide behind a fix in a weak one.
+- **precision proxy** - negatives left alone / negatives, global, at or above
   `PRECISION_FLOOR`, which is 1.0. Every negative is justified individually, so
-  one spurious hit is one defect.
+  one spurious hit is one defect wherever it lands.
+
+Every floor is the MEASURED value at the time its family landed - descriptive,
+not aspirational. Families built to hold a known gap start low on purpose:
+`urls` contracts the ticket #44 placeholder-vocabulary URLs, `xml` the ticket
+#51 `=[^=]` markup allowlist plus names (`AccountKey`, `machineKey`, NuGet
+`apikeys`, Ivy `name=`/`value=`) no rule lists, and `k8s` the `data:` decoding
+that arrives with tickets #52/#53. A floor forbids regression below what was
+measured; the ticket that closes a gap raises the floor in the same commit
+that moves the number. The pure-noise families carry no positives and so no
+recall floor - they exist to hold the precision line, and `RECALL_FLOORS` must
+not name them.
 
 ### What the floors do not measure
 

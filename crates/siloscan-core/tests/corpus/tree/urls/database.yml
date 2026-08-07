@@ -1,0 +1,27 @@
+# Rails database configuration for the storefront. Production credentials were
+# pasted in during the 2025 datacenter move and never migrated back to the
+# credential store.
+
+default: &default
+  adapter: postgresql
+  encoding: unicode
+  pool: 5
+
+development:
+  <<: *default
+  url: postgres://postgres:changeme@localhost:5432/storefront_dev
+
+test:
+  <<: *default
+  url: postgres://postgres:password1@localhost:5432/storefront_test
+
+staging:
+  <<: *default
+  url: postgres://storefront:<%= ENV["STAGING_DB_PASSWORD"] %>@pg-staging.internal:5432/storefront
+
+production:
+  <<: *default
+  url: postgres://storefront:{{VOCABPW_6_413}}@pg-primary.internal:5432/storefront
+  replica_url: mysql://storefront_ro:{{VOCABPW_9_414}}@mysql-replica.internal:3306/storefront_analytics
+  queue_url: amqp://:{{PWA_16_415}}@rabbit.internal:5672/storefront
+  cache_url: redis://:{{WORDPW_16_416}}@redis.internal:6379/0

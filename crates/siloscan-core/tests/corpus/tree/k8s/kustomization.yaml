@@ -1,0 +1,26 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: web
+
+resources:
+  - storefront-stack.yaml
+  - session-secret.yaml
+
+images:
+  - name: registry.internal/storefront
+    digest: sha256:4e0a1cf9d27b83e5f16a92d08c7541b3a6ec95d20f8b174c3d9ae60b52c7f381
+
+secretGenerator:
+  - name: storefront-generated
+    type: Opaque
+    literals:
+      - db-password={{PWA_24_417}}
+      - api-token={{B64_40_418}}
+    files:
+      - tls.key=certs/tls.key
+
+configMapGenerator:
+  - name: storefront-runtime-flags
+    literals:
+      - log-level=info
+      - feature-flags=checkout-v2,new-search
