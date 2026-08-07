@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: storefront-runtime
+  namespace: web
+data:
+  java-opts: "-Xms512m -Xmx1024m -XX:+UseG1GC"
+  build-sha: "9fceb02d0ae598e95dc970b74767f19372d61af8"
+  deploy-id: "6ba7b810-9dad-11d1-80b4-00c04fd430c8"
+  ca-bundle.b64: "LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0t"
+  session-cookie: "JSESSIONID"
+  cache-ttl: "3600"
+  truststore-checksum: "sha256:7c222fb2927d828af22f592134e8932480637c0d1f9c8b2e3f5a1c9d0e4b6a85"

@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<settings xmlns="http://maven.apache.org/SETTINGS/1.0.0"
+          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+          xsi:schemaLocation="http://maven.apache.org/SETTINGS/1.0.0 https://maven.apache.org/xsd/settings-1.0.0.xsd">
+  <servers>
+    <server>
+      <id>corp-releases</id>
+      <username>deploy</username>
+      <password>{{PWA_20_918}}</password>
+    </server>
+    <server>
+      <id>corp-snapshots</id>
+      <username>deploy</username>
+      <password>{COQLCE6DU6GtcS5P=}</password>
+    </server>
+    <server>
+      <id>docker-registry</id>
+      <username>svc-docker</username>
+      <password>{{PWEQ_20_919}}</password>
+    </server>
+    <server>
+      <id>ossrh</id>
+      <username>contoso-bot</username>
+      <password>${env.OSSRH_PASSWORD}</password>
+    </server>
+  </servers>
+  <proxies>
+    <proxy>
+      <id>corp</id>
+      <active>true</active>
+      <protocol>http</protocol>
+      <host>proxy.corp.example</host>
+      <port>3128</port>
+      <username>proxyuser</username>
+      <password>{{PWP_12_920}}</password>
+    </proxy>
+  </proxies>
+</settings>

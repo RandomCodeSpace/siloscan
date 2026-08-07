@@ -1,0 +1,54 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: storefront
+  namespace: web
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: storefront
+  template:
+    metadata:
+      labels:
+        app: storefront
+    spec:
+      containers:
+        - name: storefront
+          image: registry.internal/storefront@sha256:9b1c5e8d2f7a403186c4d0e9a7b52f31c88d640e5a1f9c02b7e63d84a05f17c2
+          ports:
+            - containerPort: 8080
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+          envFrom:
+            - secretRef:
+                name: storefront-secrets
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: storefront-secrets
+  namespace: web
+type: Opaque
+data:
+  smtp-password: {{B64PW_20_410}}
+  jwt-signing-key: {{B64PW_32_411}}
+stringData:
+  payment-webhook-secret: "{{B64URL_32_412}}"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: storefront
+  namespace: web
+spec:
+  selector:
+    app: storefront
+  ports:
+    - port: 80
+      targetPort: 8080

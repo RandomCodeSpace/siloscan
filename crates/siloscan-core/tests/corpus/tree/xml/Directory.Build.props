@@ -1,0 +1,12 @@
+<Project>
+  <PropertyGroup>
+    <Company>Contoso</Company>
+    <LangVersion>latest</LangVersion>
+    <ContinuousIntegrationBuild Condition="'$(TF_BUILD)' == 'true'">true</ContinuousIntegrationBuild>
+  </PropertyGroup>
+  <PropertyGroup Label="signing">
+    <CodeSignPfxPassword>{{PWA_18_921}}</CodeSignPfxPassword>
+    <ArtifactStoreToken>{{B64URL_40_922}}</ArtifactStoreToken>
+    <DeployApiSecret>sig={{B64URL_43_923}}</DeployApiSecret>
+  </PropertyGroup>
+</Project>

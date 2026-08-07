@@ -1,0 +1,14 @@
+/* Inlined subset of Inter, produced by fonttools subset + build-fonts.sh. */
+@font-face {
+  font-family: "Inter";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url(data:font/woff2;base64,d09GMgABAAAAAAKNbbfRdsYY9/SUACy75jZzPquJ2LUsD9lqFwK79AqE70sF9C4a57ozYS4qNBWH1RGXIdm60LaxHOUavcLT/jllPdGFZR59VtRQIB2Z5fqPDR1Ct8uGiMLdTllL6x/sTvoC6ac++hYTQLnbw2xfQ3eTgw1PlfBFgSjZ/P9mwCfnnDn+FPPQVtduKxpSPQbat/H6URTMyD) format("woff2");
+}
+
+.icon-lock {
+  background-image: url("data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAL3tYxwnK+RoUIKJGggTIBQezD+Rpml2mnXT2tzk7MdG1eQMBNJ1MqkcigqVCtfPBAYC8ckg7X/TvARxj");
+  background-repeat: no-repeat;
+  background-size: 16px 16px;
+}

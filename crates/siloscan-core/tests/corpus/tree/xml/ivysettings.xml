@@ -1,0 +1,13 @@
+<ivysettings>
+  <properties file="build.properties" />
+  <property name="repo.url" value="https://ivy.corp.example/repo" />
+  <property name="repo.user" value="build" />
+  <property name="repo.password" value="{{PWA_24_924}}" />
+  <property name="repo.keystore.pass" value="{{PWEQ_14_925}}" />
+  <credentials host="ivy.corp.example" realm="Corp Repo" username="build" passwd="{{PWA_16_926}}" />
+  <credentials host="mirror.corp.example" realm="Mirror Repo" username="mirror" passwd="V&amp;9tRqXz4" />
+  <settings defaultResolver="corp" />
+  <resolvers>
+    <ibiblio name="corp" m2compatible="true" root="https://ivy.corp.example/m2" />
+  </resolvers>
+</ivysettings>
