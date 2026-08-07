@@ -35,6 +35,46 @@ jobs:
       - name: Test
         run: cargo test --locked --workspace
 
+  windows:
+    name: Windows (build, test, smoke)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master, 2026-07-16
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - name: Build
+        run: cargo build --locked --workspace
+      - name: Test
+        run: cargo test --locked --workspace
+      # Run the compiled binary against a generated credential. Unit tests
+      # cover the Windows cache internals; this proves a real scan on a real
+      # Windows filesystem finds a secret and writes its cache, including the
+      # NTFS alternate-data-stream salt no other CI job ever executes.
+      # The token is generated at runtime so no credential-shaped literal
+      # lives in this file.
+      - name: Smoke-test the binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          smoke="$RUNNER_TEMP/smoke"
+          mkdir -p "$smoke"
+          python -c "import secrets; print('API_TOKEN=' + secrets.token_hex(20))" > "$smoke/config.env"
+          set +e
+          ./target/debug/siloscan.exe "$smoke" --format json > "$RUNNER_TEMP/out.json"
+          status=$?
+          set -e
+          echo "exit status: $status"
+          test "$status" -le 1
+          python - "$RUNNER_TEMP/out.json" <<'EOF'
+          import json, sys
+          findings = json.load(open(sys.argv[1])).get("findings", [])
+          for f in findings:
+              print(f["rule_id"], f["path"], f["line"])
+          assert findings, "the scan found nothing"
+          EOF
+
   msrv:
     name: MSRV (1.96)
     runs-on: ubuntu-latest
