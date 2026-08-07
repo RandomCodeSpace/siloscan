@@ -105,6 +105,11 @@ const COVERAGE_RULE: &str = concat!(
 /// line the cursor sits on and `\r` returns to its start, so a report line
 /// written raw overwrites itself with whatever follows. A repository reaches
 /// this by pointing `rules` in its own `siloscan.toml` at a rule file it ships.
+///
+/// The escape fixtures are unix-only: the second vector is a file whose name
+/// carries the escape byte, and Windows refuses control characters in file
+/// names, so neither the fixture nor the attack can exist there.
+#[cfg(unix)]
 const ESC_MESSAGE_RULE: &str = concat!(
     "version: 1\n",
     "rules:\n",
@@ -115,15 +120,17 @@ const ESC_MESSAGE_RULE: &str = concat!(
     "      pattern: 'needle'\n",
 );
 
-/// The second vector, and the one needing no config at all: a file name. Any
-/// byte but `/` and NUL is legal in one, so the escape arrives through the
-/// walker without the repository configuring anything.
+/// The second vector, and the one needing no config at all: a file name. On
+/// unix any byte but `/` and NUL is legal in one, so the escape arrives
+/// through the walker without the repository configuring anything.
+#[cfg(unix)]
 const ESC_PATH: &str = "ev\u{1b}[2Kil.js";
 
 /// The fingerprint `siloscan` 1.1.1 produced for the finding in [`ESC_PATH`],
 /// recorded before the terminal escaping existed. Escaping is a rendering
 /// concern, so this value may not move: a baseline written by an older release
 /// has to keep covering the same finding.
+#[cfg(unix)]
 const ESC_FINGERPRINT: &str = "a5421000a7dd76b51bd5b139caaf6746668891ada868f7b47d0437039dea245a";
 
 const SILO_CONFIG: &str = concat!(
@@ -1066,6 +1073,7 @@ fn a_warm_run_over_a_hidden_tree_is_byte_identical_to_the_cold_one() {
 /// One file whose name carries an escape sequence, matched by a rule whose
 /// message carries another: the two ways a scanned repository reaches the
 /// operator's terminal.
+#[cfg(unix)]
 fn esc_fixture() -> (TempDir, TempDir) {
     (
         rules_dir(ESC_MESSAGE_RULE),
@@ -1076,6 +1084,7 @@ fn esc_fixture() -> (TempDir, TempDir) {
 /// Written raw, `ESC [ 2 K` followed by a carriage return erases the report
 /// line and rewrites it, so a repository holding a live credential could render
 /// as a clean scan. The bytes are rendered instead, and the finding still shows.
+#[cfg(unix)]
 #[test]
 fn no_escape_byte_from_a_scanned_repository_reaches_the_terminal() {
     let (rules, src) = esc_fixture();
@@ -1105,6 +1114,7 @@ fn no_escape_byte_from_a_scanned_repository_reaches_the_terminal() {
 /// Escaping is a rendering concern and stops at the human format: the JSON
 /// report still carries the bytes, and the fingerprint an older release wrote
 /// into a baseline still identifies the same finding.
+#[cfg(unix)]
 #[test]
 fn escaping_leaves_the_json_report_and_its_fingerprints_where_they_were() {
     let (rules, src) = esc_fixture();
@@ -1270,8 +1280,10 @@ fn help_documents_only_the_forms_that_work() {
 
     assert_eq!(output.status.code(), Some(0));
     let text = stdout(&output);
-    assert!(text.contains("siloscan [OPTIONS] [PATH]"), "stdout: {text}");
-    assert!(text.contains("siloscan <COMMAND>"), "stdout: {text}");
+    // The binary name is platform-dependent (`siloscan.exe` on Windows); the
+    // assertion is about the usage forms, not the name.
+    assert!(text.contains("[OPTIONS] [PATH]"), "stdout: {text}");
+    assert!(text.contains("<COMMAND>"), "stdout: {text}");
     assert!(!text.contains("[PATH] [COMMAND]"), "stdout: {text}");
 }
 

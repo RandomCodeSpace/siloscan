@@ -5,7 +5,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
-use globset::{Glob, GlobSet, GlobSetBuilder};
+use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -958,10 +958,16 @@ fn compile_globs(
 
     let mut builder = GlobSetBuilder::new();
     for pattern in &patterns {
-        let glob = Glob::new(pattern).map_err(|e| LoadError::BadGlob {
-            origin: origin.to_string(),
-            detail: e.to_string(),
-        })?;
+        // Matched against forward-slash relative paths on every platform, so
+        // the syntax is pinned too: `\` escapes everywhere, not globset's
+        // Windows default of treating it as a separator.
+        let glob = GlobBuilder::new(pattern)
+            .backslash_escape(true)
+            .build()
+            .map_err(|e| LoadError::BadGlob {
+                origin: origin.to_string(),
+                detail: e.to_string(),
+            })?;
         builder.add(glob);
     }
 

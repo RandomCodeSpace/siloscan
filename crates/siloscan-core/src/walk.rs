@@ -1413,9 +1413,15 @@ mod tests {
     /// above with `GIT_CONFIG_GLOBAL` pointed at it.
     fn spawn_global_ignore_child() {
         let dir = tempfile::tempdir().unwrap();
-        let global_ignore = dir.path().join("global_ignore");
+        // Canonical spelling, because the `ignore` crate expands every `~` in
+        // the configured path to the home directory - not only a leading one
+        // (`expand_tilde` in its gitignore.rs). Windows hands out temp paths
+        // with 8.3 short names (`RUNNER~1`), which that expansion corrupts
+        // into a path that opens nothing; the canonical form has no `~`.
+        let base = fs::canonicalize(dir.path()).unwrap();
+        let global_ignore = base.join("global_ignore");
         fs::write(&global_ignore, "secret.txt\n").unwrap();
-        let gitconfig = dir.path().join("gitconfig");
+        let gitconfig = base.join("gitconfig");
         fs::write(
             &gitconfig,
             format!("[core]\nexcludesFile = {}\n", global_ignore.display()),

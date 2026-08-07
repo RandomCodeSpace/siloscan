@@ -623,20 +623,19 @@ impl Cache {
     /// one is the cache this run writes, which is the part that has to be out of
     /// the walk for a warm run to match a cold one.
     ///
-    /// The comparison is made on canonical paths, so `.`, `..` and symlinks in
-    /// either argument do not decide it, and the result is re-spelled against
-    /// `scan_root` as given because that is the spelling the walk produces. A
-    /// directory that does not exist yet canonicalizes to itself and is simply
-    /// not under the root; it is also not in the walk, so there is nothing to
-    /// exclude until the run after it appears.
+    /// The comparison is made on [`resolved`] paths, so `.`, `..`, symlinks
+    /// and Windows short names in either argument do not decide it, and the
+    /// result is re-spelled against `scan_root` as given because that is the
+    /// spelling the walk produces. A directory that does not exist yet
+    /// resolves through its nearest existing ancestor, so the exclusion holds
+    /// from the first run, not the one after the directory appears.
     pub fn exclusion_under(&self, scan_root: &Path) -> Option<PathBuf> {
-        let canonical = |path: &Path| fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-        let base = canonical(scan_root);
+        let base = resolved(scan_root);
         [self.owned.as_deref(), self.root.as_deref()]
             .into_iter()
             .flatten()
             .find_map(|candidate| {
-                let rel = canonical(candidate).strip_prefix(&base).ok()?.to_path_buf();
+                let rel = resolved(candidate).strip_prefix(&base).ok()?.to_path_buf();
                 // The candidate is the scan root itself. Not an exclusion, and
                 // not this candidate's turn to answer.
                 if rel.as_os_str().is_empty() {
@@ -1163,6 +1162,28 @@ fn probe_uid(dir: &Path) -> Option<u32> {
     drop(file);
     let _ = fs::remove_file(&path);
     uid
+}
+
+/// `fs::canonicalize`, extended to paths that do not exist yet: the nearest
+/// existing ancestor is canonicalized and the remaining components are
+/// appended as given.
+///
+/// [`Cache::exclusion_under`] compares a cache directory that may not have
+/// been created against a scan root that exists, and the two must land in one
+/// spelling for `strip_prefix` to mean anything. Falling back to the path as
+/// given is not enough on Windows: canonical paths there are verbatim long
+/// form (`\\?\C:\Users\runneradmin\...`) while the environment may hand out
+/// 8.3 short names (`RUNNER~1`), so a raw fallback never shares a prefix with
+/// a canonicalized base and the exclusion silently vanished - a scan with
+/// `--cache-dir` inside the root walked its own cache.
+fn resolved(path: &Path) -> PathBuf {
+    if let Ok(canonical) = fs::canonicalize(path) {
+        return canonical;
+    }
+    match (path.parent(), path.file_name()) {
+        (Some(parent), Some(name)) if !parent.as_os_str().is_empty() => resolved(parent).join(name),
+        _ => path.to_path_buf(),
+    }
 }
 
 /// The directory under `base` that holds `scan_root`'s entries: a hash of the
@@ -2618,8 +2639,10 @@ mod tests {
 
         // Now with the salt as well, as a wholesale copy of a cache directory
         // would arrive. A fresh instance is used because the first one has
-        // already resolved this directory as saltless.
-        fs::copy(salt_path(&theirs), salt_path(&mine)).unwrap();
+        // already resolved this directory as saltless. Read and write rather
+        // than `fs::copy`: on Windows the salt lives in an NTFS alternate data
+        // stream, and `fs::copy` cannot copy attributes onto a stream.
+        fs::write(salt_path(&mine), fs::read(salt_path(&theirs)).unwrap()).unwrap();
         set_owner_only(&salt_path(&mine));
         let mine = mine_fx.open();
         assert!(

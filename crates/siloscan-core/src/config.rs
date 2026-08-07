@@ -33,7 +33,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use globset::{Glob, GlobSet, GlobSetBuilder};
+use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
 use serde::{Deserialize, Serialize};
 
 pub const CONFIG_NAME: &str = "siloscan.toml";
@@ -726,7 +726,14 @@ impl Config {
         for (name, patterns) in &self.silos {
             let mut builder = GlobSetBuilder::new();
             for pattern in patterns {
-                let glob = Glob::new(pattern)
+                // Globs match the forward-slash relative paths every report
+                // uses, on every platform, so their syntax cannot be
+                // platform-dependent either: `\` escapes, everywhere, rather
+                // than globset's Windows default of treating it as a
+                // separator.
+                let glob = GlobBuilder::new(pattern)
+                    .backslash_escape(true)
+                    .build()
                     .map_err(|e| format!("silo {name}: invalid glob {pattern:?}: {e}"))?;
                 builder.add(glob);
             }
