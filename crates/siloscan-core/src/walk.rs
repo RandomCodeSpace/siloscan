@@ -1416,9 +1416,15 @@ mod tests {
         let global_ignore = dir.path().join("global_ignore");
         fs::write(&global_ignore, "secret.txt\n").unwrap();
         let gitconfig = dir.path().join("gitconfig");
+        // Forward slashes: git config values treat `\` as an escape, so a
+        // Windows path written as-is never resolves. Git accepts `/` in paths
+        // on every platform.
         fs::write(
             &gitconfig,
-            format!("[core]\nexcludesFile = {}\n", global_ignore.display()),
+            format!(
+                "[core]\nexcludesFile = {}\n",
+                global_ignore.display().to_string().replace('\\', "/")
+            ),
         )
         .unwrap();
 
