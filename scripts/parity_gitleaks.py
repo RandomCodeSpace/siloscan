@@ -92,7 +92,9 @@ def ensure_gitleaks(cache_dir):
             tmp_bin = bin_path + ".tmp"
             with open(tmp_bin, "wb") as dst:
                 shutil.copyfileobj(src, dst)
-        os.chmod(tmp_bin, 0o755)
+        # Owner-only: this is a private cache, and nothing but this script
+        # needs to read or run the binary.
+        os.chmod(tmp_bin, 0o700)
         os.replace(tmp_bin, bin_path)
     finally:
         if os.path.exists(archive):
