@@ -1,0 +1,2551 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Siloscan v2 rollout and compatibility contract</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #0a0d10;
+      --panel: #11161b;
+      --panel-2: #171d23;
+      --panel-3: #1e262e;
+      --line: #303943;
+      --text: #f5f2e9;
+      --muted: #a7b0b9;
+      --green: #d7ff68;
+      --cyan: #69d7ff;
+      --good: #7fe39a;
+      --warn: #ffd166;
+      --bad: #ff8297;
+      --violet: #c8a9ff;
+      --shadow: 0 22px 70px rgba(0, 0, 0, .32);
+      --radius: 18px;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html {
+      scroll-behavior: smooth;
+    }
+
+    body {
+      margin: 0;
+      background:
+        radial-gradient(circle at 8% -5%, rgba(105, 215, 255, .13), transparent 32rem),
+        radial-gradient(circle at 94% 8%, rgba(215, 255, 104, .10), transparent 30rem),
+        var(--bg);
+      color: var(--text);
+      font: 15px/1.55 Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    a {
+      color: var(--cyan);
+    }
+
+    code,
+    pre,
+    .mono {
+      font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+    }
+
+    code {
+      color: #e1ffa5;
+      overflow-wrap: anywhere;
+    }
+
+    button,
+    select,
+    input {
+      font: inherit;
+    }
+
+    button,
+    select,
+    input[type="text"] {
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: #0d1115;
+      color: var(--text);
+    }
+
+    button {
+      min-height: 40px;
+      padding: 8px 13px;
+      cursor: pointer;
+      transition: border-color .15s ease, background .15s ease, transform .15s ease;
+    }
+
+    button:hover:not(:disabled) {
+      border-color: var(--green);
+      background: #151b20;
+      transform: translateY(-1px);
+    }
+
+    button:disabled {
+      cursor: not-allowed;
+      opacity: .42;
+    }
+
+    button:focus-visible,
+    select:focus-visible,
+    input:focus-visible,
+    a:focus-visible {
+      outline: 3px solid rgba(105, 215, 255, .35);
+      outline-offset: 2px;
+    }
+
+    pre {
+      margin: 0;
+      overflow: auto;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: #080b0e;
+      padding: 17px;
+      color: #dce5ed;
+      line-height: 1.55;
+      tab-size: 2;
+    }
+
+    h1,
+    h2,
+    h3,
+    p {
+      margin-top: 0;
+    }
+
+    h2 {
+      margin-bottom: 12px;
+      font-size: clamp(28px, 4vw, 45px);
+      line-height: 1.06;
+      letter-spacing: -.035em;
+    }
+
+    h3 {
+      margin-bottom: 7px;
+      font-size: 18px;
+      letter-spacing: -.015em;
+    }
+
+    .shell {
+      width: min(1480px, calc(100% - 32px));
+      margin: 0 auto;
+    }
+
+    .topbar {
+      position: sticky;
+      z-index: 30;
+      top: 0;
+      border-bottom: 1px solid rgba(255, 255, 255, .08);
+      background: rgba(10, 13, 16, .9);
+      backdrop-filter: blur(15px);
+    }
+
+    .topbar .shell {
+      min-height: 58px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 20px;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 11px;
+      font-weight: 780;
+      letter-spacing: -.02em;
+    }
+
+    .brand-mark {
+      width: 28px;
+      height: 28px;
+      display: grid;
+      place-items: center;
+      border: 1px solid rgba(215, 255, 104, .55);
+      border-radius: 8px;
+      background: rgba(215, 255, 104, .08);
+      color: var(--green);
+      font: 800 12px/1 "SFMono-Regular", Consolas, monospace;
+    }
+
+    .nav {
+      display: flex;
+      align-items: center;
+      gap: 17px;
+      font-size: 13px;
+    }
+
+    .nav a {
+      color: var(--muted);
+      text-decoration: none;
+    }
+
+    .nav a:hover {
+      color: var(--text);
+    }
+
+    .hero {
+      padding: 78px 0 44px;
+    }
+
+    .eyebrow {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      border: 1px solid rgba(215, 255, 104, .27);
+      border-radius: 999px;
+      background: rgba(215, 255, 104, .07);
+      padding: 7px 11px;
+      color: var(--green);
+      font: 750 12px/1.2 "SFMono-Regular", Consolas, monospace;
+      letter-spacing: .045em;
+      text-transform: uppercase;
+    }
+
+    .eyebrow::before {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--green);
+      box-shadow: 0 0 14px rgba(215, 255, 104, .75);
+      content: "";
+    }
+
+    h1 {
+      max-width: 1120px;
+      margin: 25px 0 18px;
+      font-size: clamp(44px, 7vw, 88px);
+      line-height: .97;
+      letter-spacing: -.058em;
+    }
+
+    .hero-copy {
+      max-width: 900px;
+      color: #c6cdd4;
+      font-size: clamp(17px, 2vw, 22px);
+    }
+
+    .decision {
+      margin-top: 34px;
+      display: grid;
+      grid-template-columns: 1.2fr .8fr;
+      gap: 1px;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--line);
+      box-shadow: var(--shadow);
+    }
+
+    .decision > div {
+      background: linear-gradient(135deg, #151a20, #101419);
+      padding: 27px;
+    }
+
+    .decision strong {
+      display: block;
+      margin-bottom: 7px;
+      color: var(--green);
+      font-size: 23px;
+      line-height: 1.25;
+      letter-spacing: -.025em;
+    }
+
+    .decision p,
+    .section-copy,
+    .muted {
+      color: var(--muted);
+    }
+
+    .decision ul {
+      margin: 0;
+      padding-left: 20px;
+      color: #d7dde2;
+    }
+
+    .decision li + li {
+      margin-top: 7px;
+    }
+
+    section {
+      padding: 49px 0;
+    }
+
+    .section-head {
+      max-width: 880px;
+      margin-bottom: 24px;
+    }
+
+    .section-copy {
+      margin-bottom: 0;
+      font-size: 17px;
+    }
+
+    .kicker {
+      margin-bottom: 10px;
+      color: var(--cyan);
+      font: 750 12px/1.2 "SFMono-Regular", Consolas, monospace;
+      letter-spacing: .06em;
+      text-transform: uppercase;
+    }
+
+    .grid {
+      display: grid;
+      gap: 16px;
+    }
+
+    .grid > *,
+    .lab > *,
+    .scenario-layout > * {
+      min-width: 0;
+    }
+
+    .grid-2 {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .grid-3 {
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+
+    .card {
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: linear-gradient(145deg, rgba(24, 30, 36, .94), rgba(15, 19, 23, .96));
+      padding: 22px;
+      box-shadow: 0 12px 36px rgba(0, 0, 0, .18);
+    }
+
+    .card p:last-child,
+    .card ul:last-child {
+      margin-bottom: 0;
+    }
+
+    .callout {
+      border-left: 3px solid var(--cyan);
+      background: rgba(105, 215, 255, .06);
+    }
+
+    .callout.warn {
+      border-left-color: var(--warn);
+      background: rgba(255, 209, 102, .06);
+    }
+
+    .callout.bad {
+      border-left-color: var(--bad);
+      background: rgba(255, 130, 151, .06);
+    }
+
+    .pill,
+    .status {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 5px 9px;
+      font: 700 11px/1.2 "SFMono-Regular", Consolas, monospace;
+      letter-spacing: .035em;
+      text-transform: uppercase;
+    }
+
+    .status::before,
+    .pill::before {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: currentColor;
+      content: "";
+    }
+
+    .good {
+      border-color: rgba(127, 227, 154, .35);
+      background: rgba(127, 227, 154, .08);
+      color: var(--good);
+    }
+
+    .warning {
+      border-color: rgba(255, 209, 102, .35);
+      background: rgba(255, 209, 102, .08);
+      color: var(--warn);
+    }
+
+    .danger {
+      border-color: rgba(255, 130, 151, .35);
+      background: rgba(255, 130, 151, .08);
+      color: var(--bad);
+    }
+
+    .info {
+      border-color: rgba(105, 215, 255, .35);
+      background: rgba(105, 215, 255, .08);
+      color: var(--cyan);
+    }
+
+    .table-wrap {
+      overflow: auto;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: rgba(14, 18, 22, .92);
+      box-shadow: var(--shadow);
+    }
+
+    table {
+      width: 100%;
+      min-width: 1040px;
+      border-collapse: collapse;
+    }
+
+    th,
+    td {
+      padding: 15px 16px;
+      border-bottom: 1px solid var(--line);
+      vertical-align: top;
+      text-align: left;
+    }
+
+    th {
+      position: sticky;
+      z-index: 2;
+      top: 58px;
+      background: #171c22;
+      color: #e6ecf1;
+      font-size: 12px;
+      letter-spacing: .04em;
+      text-transform: uppercase;
+    }
+
+    tr:last-child td {
+      border-bottom: 0;
+    }
+
+    tbody tr:hover {
+      background: rgba(255, 255, 255, .018);
+    }
+
+    td:first-child {
+      color: #f8f5ed;
+      font-weight: 720;
+    }
+
+    .matrix td,
+    .matrix th {
+      text-align: center;
+    }
+
+    .matrix td:first-child,
+    .matrix th:first-child {
+      text-align: left;
+    }
+
+    .yes {
+      color: var(--good);
+      font-weight: 750;
+    }
+
+    .partial {
+      color: var(--warn);
+      font-weight: 750;
+    }
+
+    .no {
+      color: var(--bad);
+      font-weight: 750;
+    }
+
+    .lab {
+      display: grid;
+      grid-template-columns: minmax(0, .9fr) minmax(420px, 1.1fr);
+      gap: 18px;
+      align-items: start;
+    }
+
+    .lab-controls {
+      display: grid;
+      gap: 12px;
+    }
+
+    .control-group {
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: rgba(8, 11, 14, .48);
+      padding: 15px;
+    }
+
+    .control-group h3 {
+      font-size: 14px;
+      text-transform: uppercase;
+      letter-spacing: .045em;
+    }
+
+    .button-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+
+    .primary {
+      border-color: rgba(215, 255, 104, .5);
+      background: rgba(215, 255, 104, .10);
+      color: var(--green);
+      font-weight: 730;
+    }
+
+    .danger-button {
+      border-color: rgba(255, 130, 151, .45);
+      color: var(--bad);
+    }
+
+    .status-board {
+      position: sticky;
+      top: 78px;
+    }
+
+    .stage-line {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 14px;
+    }
+
+    .stage-name {
+      font-size: clamp(26px, 4vw, 40px);
+      line-height: 1;
+      letter-spacing: -.04em;
+    }
+
+    .gate-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 9px;
+      margin: 16px 0;
+    }
+
+    .gate {
+      min-height: 76px;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: #0c1013;
+      padding: 11px;
+    }
+
+    .gate small {
+      display: block;
+      margin-bottom: 5px;
+      color: var(--muted);
+    }
+
+    .gate b {
+      font-size: 13px;
+    }
+
+    .next-action {
+      border: 1px solid rgba(105, 215, 255, .24);
+      border-radius: 13px;
+      background: rgba(105, 215, 255, .055);
+      padding: 14px;
+    }
+
+    .next-action strong {
+      color: var(--cyan);
+    }
+
+    .trace {
+      max-height: 240px;
+      margin-top: 14px;
+      overflow: auto;
+      border-top: 1px solid var(--line);
+      padding-top: 12px;
+      color: var(--muted);
+      font: 12px/1.55 "SFMono-Regular", Consolas, monospace;
+    }
+
+    .trace div + div {
+      margin-top: 5px;
+    }
+
+    .tabs {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-bottom: 15px;
+    }
+
+    .tab[aria-selected="true"] {
+      border-color: var(--cyan);
+      background: rgba(105, 215, 255, .09);
+      color: var(--cyan);
+    }
+
+    .scenario-panel {
+      min-height: 250px;
+    }
+
+    .scenario-layout {
+      display: grid;
+      grid-template-columns: 1.05fr .95fr;
+      gap: 20px;
+    }
+
+    .scenario-panel ul {
+      margin-bottom: 0;
+      padding-left: 20px;
+    }
+
+    .timeline {
+      display: grid;
+      gap: 8px;
+      margin: 15px 0 0;
+    }
+
+    .timeline-row {
+      display: grid;
+      grid-template-columns: 34px minmax(0, 1fr);
+      gap: 10px;
+      align-items: start;
+    }
+
+    .timeline-row span:first-child {
+      width: 28px;
+      height: 28px;
+      display: grid;
+      place-items: center;
+      border: 1px solid var(--line);
+      border-radius: 50%;
+      background: #0b0f12;
+      color: var(--cyan);
+      font: 750 12px/1 monospace;
+    }
+
+    .flow {
+      display: grid;
+      grid-template-columns: repeat(7, minmax(110px, 1fr));
+      gap: 10px;
+      overflow-x: auto;
+      padding-bottom: 5px;
+    }
+
+    .flow-node {
+      position: relative;
+      min-height: 112px;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: #10151a;
+      padding: 14px;
+    }
+
+    .flow-node:not(:last-child)::after {
+      position: absolute;
+      z-index: 2;
+      top: 50%;
+      right: -10px;
+      width: 10px;
+      border-top: 1px solid var(--cyan);
+      content: "";
+    }
+
+    .flow-node b {
+      display: block;
+      margin-bottom: 6px;
+      color: var(--cyan);
+    }
+
+    .flow-node small {
+      color: var(--muted);
+    }
+
+    .rule-list {
+      display: grid;
+      gap: 10px;
+      margin: 0;
+      padding: 0;
+      list-style: none;
+    }
+
+    .rule-list li {
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: rgba(12, 16, 19, .72);
+      padding: 13px;
+    }
+
+    .rule-list b {
+      color: var(--green);
+    }
+
+    .footer {
+      margin-top: 40px;
+      border-top: 1px solid var(--line);
+      padding: 30px 0 50px;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    @media (max-width: 1040px) {
+      .decision,
+      .lab,
+      .scenario-layout {
+        grid-template-columns: 1fr;
+      }
+
+      .status-board {
+        position: static;
+      }
+
+      .grid-3 {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    @media (max-width: 760px) {
+      .shell {
+        width: min(100% - 22px, 1480px);
+      }
+
+      .nav {
+        display: none;
+      }
+
+      .hero {
+        padding-top: 52px;
+      }
+
+      .grid-2,
+      .gate-grid {
+        grid-template-columns: 1fr;
+      }
+
+      section {
+        padding: 38px 0;
+      }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      html {
+        scroll-behavior: auto;
+      }
+
+      button {
+        transition: none;
+      }
+    }
+  </style>
+</head>
+<body>
+  <header class="topbar">
+    <div class="shell">
+      <div class="brand">
+        <span class="brand-mark">S2</span>
+        <span>Siloscan rollout contract</span>
+      </div>
+      <nav class="nav" aria-label="Page sections">
+        <a href="#compatibility">Compatibility</a>
+        <a href="#reports">Reports</a>
+        <a href="#lab">Gate lab</a>
+        <a href="#release">Release</a>
+        <a href="#rollback">Rollback</a>
+      </nav>
+    </div>
+  </header>
+
+  <main>
+    <div class="shell hero">
+      <span class="eyebrow">Recommended contract · Rust v2</span>
+      <h1>Ship the simpler journey without spending compatibility.</h1>
+      <p class="hero-copy">
+        One install gives users <code>siloscan</code>, <code>ss</code>, and report review.
+        A bare command detects, scans once, saves one latest report, and exits. Existing
+        explicit invocations keep their v1.5.1 behavior. Published artifacts remain immutable.
+      </p>
+
+      <div class="decision">
+        <div>
+          <span class="kicker">Decision</span>
+          <strong>Add the automatic journey beside the old contract.</strong>
+          <p>
+            Keep the Rust implementation. Preserve the public report writer, schema 1.2,
+            fingerprint algorithm, baseline v1, aliases, standalone TUI, machine streams,
+            archive members, and all explicit scan behavior for the full v2 major.
+          </p>
+        </div>
+        <div>
+          <ul>
+            <li>No feature is removed or silently weakened.</li>
+            <li>No ecosystem rules are invented for launch.</li>
+            <li>Security hardening is outside this decision.</li>
+            <li>The only default change is true automatic mode.</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+
+    <section id="compatibility">
+      <div class="shell">
+        <div class="section-head">
+          <div class="kicker">Compatibility ledger</div>
+          <h2>One recommendation, with every promise named.</h2>
+          <p class="section-copy">
+            “Compatible” means an executable gate, not a reassuring adjective. Each row
+            states the v2 behavior, the support window, and the evidence that blocks release.
+          </p>
+        </div>
+
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Contract</th>
+                <th>v1.5.1</th>
+                <th>v2 decision</th>
+                <th>Window or migration</th>
+                <th>Release gate</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>True automatic mode</td>
+                <td>No dedicated journey</td>
+                <td>No PATH and no v1 scan option: detect exact <code>.</code>, scan once, save latest unless <code>--no-save</code></td>
+                <td>Intentional v2 default. Scripts that require no persistence add <code>--no-save</code>.</td>
+                <td>Bare <code>--no-save</code> parity and automatic-save performance lanes</td>
+              </tr>
+              <tr>
+                <td>Explicit scan grammar</td>
+                <td>PATH or any existing scan option</td>
+                <td>Same findings, paths, filters, metrics, order, status, cache behavior, and human bytes; stateless unless persistence is requested</td>
+                <td>Entire v2 major, with no v2 deprecation</td>
+                <td>v1.5.1 differential oracle</td>
+              </tr>
+              <tr>
+                <td>Persistence controls</td>
+                <td>None</td>
+                <td><code>--save</code> writes latest for the exact requested scope; <code>--output FILE</code> writes only that canonical JSON file; conflicts fail with status 2</td>
+                <td>New additive controls. <code>--output -</code> is invalid.</td>
+                <td>Atomic publication and failure-routing fixtures</td>
+              </tr>
+              <tr>
+                <td>Human output</td>
+                <td>Established explicit bytes</td>
+                <td>Explicit stateless output stays byte exact. Automatic human mode adds project/setup summary, then <code>Report:</code> and <code>Review:</code> only after publication.</td>
+                <td>Entire v2 major</td>
+                <td>Golden byte comparison for explicit mode</td>
+              </tr>
+              <tr>
+                <td>JSON stdout</td>
+                <td>One JSON document</td>
+                <td>Still one document. CLI resolved reports append <code>report_kind</code>, <code>scope</code>, <code>outcome</code>, <code>setup</code> in that order. Save notices use stderr.</td>
+                <td>Additive schema 1.2 fields</td>
+                <td>Deep projection oracle with only four fields allowlisted</td>
+              </tr>
+              <tr>
+                <td>SARIF stdout</td>
+                <td>One SARIF document</td>
+                <td>Unchanged document and ordering. Save notices use stderr.</td>
+                <td>Entire v2 major</td>
+                <td>Deep exact oracle after removing only tool version</td>
+              </tr>
+              <tr>
+                <td>Public core JSON API</td>
+                <td><code>JsonReport</code>, <code>ReportFinding</code>, and <code>to_json</code> are public</td>
+                <td>Keep them unchanged. A separate resolved serializer appends CLI metadata without altering exhaustive public structs or key order.</td>
+                <td>Source compatible through v2</td>
+                <td>Compile fixtures for downstream-style struct literals and old writer</td>
+              </tr>
+              <tr>
+                <td>Report reading</td>
+                <td>Supported 1.x snapshots</td>
+                <td>Explicit review accepts supported marker-free 1.x-shaped reports and strict fully marked v2 reports. Implicit latest accepts only fully marked v2.</td>
+                <td>Prior 1.x remains reviewable for all v2</td>
+                <td>Reader matrix and malformed-marker fixtures</td>
+              </tr>
+              <tr>
+                <td>Baseline and fingerprint</td>
+                <td>Baseline v1; frozen SHA-256 fingerprint input</td>
+                <td>Unchanged bytes and algorithm. Both versions read each other’s baseline.</td>
+                <td>Entire v2 major</td>
+                <td>Cross-version read plus byte/fingerprint equality</td>
+              </tr>
+              <tr>
+                <td>Cache</td>
+                <td>Entries stamped with crate version</td>
+                <td>Version change is a silent miss and rescan. Cache is disposable, never migration or rollback state.</td>
+                <td>No user action</td>
+                <td>Warm/cold output equality and measured warm lanes</td>
+              </tr>
+              <tr>
+                <td><code>ss</code> alias</td>
+                <td>Same CLI under its invoked name</td>
+                <td>Exact feature parity, including review and alias-correct help, errors, and review hint</td>
+                <td>Permanent through v2, no deprecation</td>
+                <td>Run the same contract fixtures through both binaries</td>
+              </tr>
+              <tr>
+                <td><code>siloscan-tui</code></td>
+                <td>Standalone live and snapshot command</td>
+                <td>Remains shipped and supported while <code>siloscan review</code> calls its library path. Both live entry points use the shared resolved plan.</td>
+                <td>Entire v2; removal requires a separately approved major</td>
+                <td>Same plan through both live entry points, plus standalone help/version/live/snapshot/action fixtures</td>
+              </tr>
+              <tr>
+                <td><code>review</code> path collision</td>
+                <td><code>review</code> may be a relative PATH</td>
+                <td>If <code>./review</code> exists and the full v1 scan grammar accepts the arguments, scan it. Otherwise use the subcommand.</td>
+                <td>Compatibility guard remains through v2</td>
+                <td>Collision fixture for file, directory, and missing path</td>
+              </tr>
+              <tr>
+                <td>Default rules</td>
+                <td>Current 220-rule secret pack plus metrics</td>
+                <td>Label the exact unchanged pack <code>default-secrets@1</code> in report metadata only. Keep internal cache source <code>default-pack</code>. Detection adds explanation, not ecosystem rules.</td>
+                <td>Future pack changes require a new version and a separate measured gate</td>
+                <td>Rule IDs, payloads, severities, findings, and cost remain exact</td>
+              </tr>
+              <tr>
+                <td>Release archive</td>
+                <td><code>siloscan</code>, <code>ss</code>, <code>siloscan-tui</code>, licenses, README</td>
+                <td>Keep every member and checksums; extract and run all three binaries natively before publication</td>
+                <td>Entire v2</td>
+                <td>Linux musl, macOS arm64, and Windows x64 archive smoke</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="grid grid-3" style="margin-top: 16px">
+          <article class="card callout">
+            <h3>Automatic means narrow</h3>
+            <p>
+              Only invocations with no PATH and no v1 scan option enter automatic mode.
+              New persistence-only controls do not turn that invocation into legacy mode.
+            </p>
+          </article>
+          <article class="card callout warn">
+            <h3>Option-only scripts remain scripts</h3>
+            <p>
+              <code>siloscan --format json</code> is explicit compatibility mode and stateless.
+              Adding <code>--save</code> requests persistence without changing scan semantics.
+            </p>
+          </article>
+          <article class="card callout bad">
+            <h3>No fake project root</h3>
+            <p>
+              Latest is keyed by the exact requested scope. Detection never promotes the
+              scope to a Git root, manifest root, workspace root, or “owning project.”
+            </p>
+          </article>
+        </div>
+        <div class="card callout warn" style="margin-top: 16px">
+          <h3>Approved TUI setup convergence</h3>
+          <p>
+            v2 removes the standalone TUI’s duplicated setup path and gives
+            <code>siloscan review --live PATH</code> and <code>siloscan-tui PATH</code> the
+            same fresh resolved plan. This can correct v1.5.1 drift such as a
+            config-anchored baseline being resolved from the wrong base. There is no legacy
+            drift mode. Commands and actions remain, every <code>r</code> resolves fresh,
+            and live TUI sessions never auto-publish latest.
+          </p>
+        </div>
+      </div>
+    </section>
+
+    <section id="reports">
+      <div class="shell">
+        <div class="section-head">
+          <div class="kicker">Report evolution</div>
+          <h2>Schema 1.2 stays. Marker completeness decides meaning.</h2>
+          <p class="section-copy">
+            Product version cannot classify the document. The retained public core writer
+            will naturally emit a 2.x product version without resolved metadata. The four
+            v2 marker fields are therefore the only reliable discriminator.
+          </p>
+        </div>
+
+        <div class="card callout warn" style="margin-bottom: 18px">
+          <h3>Compatibility arbitration</h3>
+          <p>
+            This issue #60 contract explicitly supersedes one clause from the closed
+            saved-report decision in issue #61: product major 2 or later no longer selects
+            strict resolved-report validation. Marker completeness does. That narrower
+            correction is required by issue #63’s retained public core writer, which emits
+            product version 2.x without resolved metadata. Every other #61 persistence,
+            shape, identity, atomic-publication, and failure contract remains in force.
+          </p>
+        </div>
+
+        <div class="grid grid-2">
+          <article class="card">
+            <h3>Resolved CLI report</h3>
+            <pre aria-label="Resolved report field order">{
+  "version": "2.0.0",
+  "findings": [],
+  "baselined": [],
+  "suppressed": [],
+  "skipped": [],
+  "schema_version": "1.2",
+  "metrics": {},
+  "anchor": "scan-root",
+  "ignored": {},
+  "warnings": [],
+  "report_kind": "scan",
+  "scope": { "...": "complete shape" },
+  "outcome": { "...": "complete shape" },
+  "setup": { "...": "complete shape" }
+}</pre>
+          </article>
+          <article class="card">
+            <h3>Reader classification</h3>
+            <ul class="rule-list">
+              <li><b>No marker present:</b> legacy/core shape. Require a findings array and either supported schema 1.x or no schema key, which means 1.0. Explicit <code>--report</code> may open it.</li>
+              <li><b>Any marker present:</b> require all four complete fields and <code>report_kind: "scan"</code>. A partial set is malformed.</li>
+              <li><b>Implicit latest:</b> require the complete marked v2 shape. Never treat a loose legacy document as latest.</li>
+              <li><b>Product version:</b> validate its syntax when present and display it. Its major does not classify the shape or relax validation.</li>
+              <li><b>Same-major additions:</b> ignore unknown fields and retain an unknown-string case for setup status enums, so a later additive value does not invalidate the report.</li>
+            </ul>
+          </article>
+        </div>
+
+        <div class="table-wrap matrix" style="margin-top: 18px">
+          <table>
+            <thead>
+              <tr>
+                <th>Reader → / report ↓</th>
+                <th>v1.5.1 marker-free</th>
+                <th>v2 resolved, fully marked</th>
+                <th>v2 partial markers</th>
+                <th>v2 core writer, marker-free</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>v1.5.1 TUI</td>
+                <td><span class="yes">Full v1 view</span></td>
+                <td><span class="partial">Findings and metrics</span><br><small>Ignores new fields; cannot authoritatively show v2 scope/outcome/setup</small></td>
+                <td><span class="partial">Legacy-tolerant view</span><br><small>Why v2 validates before publication</small></td>
+                <td><span class="yes">Legacy-shaped view</span></td>
+              </tr>
+              <tr>
+                <td>v2 explicit <code>--report</code></td>
+                <td><span class="yes">Accepted</span><br><small>Outcome and setup unavailable</small></td>
+                <td><span class="yes">Authoritative</span></td>
+                <td><span class="no">Rejected</span></td>
+                <td><span class="yes">Accepted</span><br><small>Legacy/core label</small></td>
+              </tr>
+              <tr>
+                <td>v2 implicit latest</td>
+                <td><span class="no">Rejected</span></td>
+                <td><span class="yes">Authoritative</span></td>
+                <td><span class="no">Rejected</span></td>
+                <td><span class="no">Rejected</span></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="grid grid-2" style="margin-top: 18px">
+          <article class="card">
+            <h3>Deterministic metadata only</h3>
+            <p class="muted">
+              <code>scope</code>, <code>outcome</code>, and <code>setup</code> serialize
+              requested-scope identity, threshold result, admitted evidence, units,
+              workspaces, languages, source roots, rule sources, capabilities, and explicit
+              overrides. Stable arrays use deterministic order. The canonical saved
+              document ends with exactly one newline.
+            </p>
+          </article>
+          <article class="card callout bad">
+            <h3>Never serialize environment identity</h3>
+            <p>
+              No absolute root, cwd, hostname, command line, report path, cache path,
+              manifest text, runtime handle, or timestamp. Those are not scan facts and
+              make exact reports needlessly unstable.
+            </p>
+          </article>
+        </div>
+        <div class="card callout warn" style="margin-top: 18px">
+          <h3>One intentional malformed-input break</h3>
+          <p>
+            v2 rejects a marker-free object whose <code>findings</code> value is absent or
+            null, including a schema-only object. v1.5.1 could render those impostors as an
+            empty report. No shipped writer produced them, and accepting them can falsely
+            present arbitrary JSON as a clean scan.
+          </p>
+        </div>
+      </div>
+    </section>
+
+    <section id="invocations">
+      <div class="shell">
+        <div class="section-head">
+          <div class="kicker">Invocation boundary</div>
+          <h2>The new default does not leak into old commands.</h2>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Invocation</th>
+                <th>Mode</th>
+                <th>Persistence</th>
+                <th>Compatibility result</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>siloscan</code> or <code>ss</code></td>
+                <td>Automatic</td>
+                <td>Exact-scope latest</td>
+                <td>Detect, scan once, publish to one shared state namespace, print invoked-name review hint</td>
+              </tr>
+              <tr>
+                <td><code>siloscan --no-save</code></td>
+                <td>Automatic</td>
+                <td>None</td>
+                <td>Same detection and scan, no report/review line and no persistence work</td>
+              </tr>
+              <tr>
+                <td><code>siloscan --save</code></td>
+                <td>Automatic</td>
+                <td>Exact-scope latest</td>
+                <td>Explicit spelling of the default save policy</td>
+              </tr>
+              <tr>
+                <td><code>siloscan --output FILE</code></td>
+                <td>Automatic</td>
+                <td>Named canonical JSON only</td>
+                <td>No latest update</td>
+              </tr>
+              <tr>
+                <td><code>siloscan PATH</code></td>
+                <td>Explicit compatibility</td>
+                <td>None</td>
+                <td>v1.5.1 behavior, including byte-exact human output</td>
+              </tr>
+              <tr>
+                <td><code>siloscan --format json</code></td>
+                <td>Explicit compatibility</td>
+                <td>None</td>
+                <td>One JSON document; additive resolved metadata is oracle-allowlisted</td>
+              </tr>
+              <tr>
+                <td><code>siloscan PATH --save</code></td>
+                <td>Explicit compatibility</td>
+                <td>Exact-scope latest</td>
+                <td>Same scan semantics, publication after selected output</td>
+              </tr>
+              <tr>
+                <td><code>siloscan PATH --output FILE</code></td>
+                <td>Explicit compatibility</td>
+                <td>Named canonical JSON only</td>
+                <td>Same scan semantics, no latest update</td>
+              </tr>
+              <tr>
+                <td>Conflicting persistence controls or <code>--output -</code></td>
+                <td>Parse refusal</td>
+                <td>None</td>
+                <td>No scan output, status 2</td>
+              </tr>
+              <tr>
+                <td><code>--no-default-rules</code> with no remaining rules, or missing required policy input</td>
+                <td>Existing setup refusal</td>
+                <td>None</td>
+                <td>Never manufacture a clean result; status 2</td>
+              </tr>
+              <tr>
+                <td><code>siloscan review</code></td>
+                <td>Review latest</td>
+                <td>Read-only</td>
+                <td>Opens exact <code>.</code> scope latest; never scans as fallback</td>
+              </tr>
+              <tr>
+                <td><code>siloscan review PATH</code></td>
+                <td>Review latest</td>
+                <td>Read-only</td>
+                <td>Opens the exact PATH scope latest</td>
+              </tr>
+              <tr>
+                <td><code>siloscan review --report FILE</code></td>
+                <td>Explicit snapshot</td>
+                <td>Read-only</td>
+                <td>Opens a supported v1 or v2 report</td>
+              </tr>
+              <tr>
+                <td><code>siloscan review --live [PATH]</code></td>
+                <td>Explicit live TUI</td>
+                <td>Existing TUI behavior</td>
+                <td>Live scan is opt-in; normal scan never opens the TUI</td>
+              </tr>
+              <tr>
+                <td><code>baseline</code>, <code>test</code>, or <code>cache prune</code></td>
+                <td>Existing subcommand</td>
+                <td>Existing behavior only</td>
+                <td>Never auto-save a scan report</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="section-head" style="margin-top: 28px">
+          <div class="kicker">Stream routing</div>
+          <h3>Publication never contaminates a machine document.</h3>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Case</th>
+                <th>Stdout</th>
+                <th>Stderr</th>
+                <th>Status</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Bare human save</td>
+                <td>Summary, selected scan output, <code>Report:</code>, then <code>Review:</code></td>
+                <td>Existing warnings</td>
+                <td>0 or 1</td>
+              </tr>
+              <tr>
+                <td>Bare human <code>--no-save</code></td>
+                <td>Summary and selected scan output; no publication lines</td>
+                <td>Existing warnings</td>
+                <td>0 or 1</td>
+              </tr>
+              <tr>
+                <td>Explicit stateless human</td>
+                <td>Byte-exact v1.5.1 output</td>
+                <td>Byte-exact compatible diagnostics</td>
+                <td>0 or 1</td>
+              </tr>
+              <tr>
+                <td>JSON or SARIF with persistence</td>
+                <td>Exactly one complete machine document</td>
+                <td>Warnings, then <code>Report:</code> and <code>Review:</code> after publication</td>
+                <td>0 or 1</td>
+              </tr>
+              <tr>
+                <td>Persistence preflight failure</td>
+                <td>Nothing</td>
+                <td>One actionable error; no success lines</td>
+                <td>2</td>
+              </tr>
+              <tr>
+                <td>Post-scan publication failure</td>
+                <td>Complete selected scan output</td>
+                <td>One publication error; no success lines</td>
+                <td>2, overriding a finding status of 1</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="grid grid-2" style="margin-top: 16px">
+          <article class="card callout">
+            <h3>Latest destination hint</h3>
+            <p>
+              Bare or <code>--save</code> uses <code>Review: &lt;invoked-bin&gt; review [PATH]</code>.
+              <code>siloscan</code> and <code>ss</code> name themselves correctly.
+            </p>
+          </article>
+          <article class="card callout">
+            <h3>Named destination hint</h3>
+            <p>
+              <code>--output FILE</code> uses
+              <code>Review: &lt;invoked-bin&gt; review --report FILE</code>. It never points
+              at latest because that destination was not updated.
+            </p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section id="lab">
+      <div class="shell">
+        <div class="section-head">
+          <div class="kicker">Interactive gate lab</div>
+          <h2>Try to move a candidate through the release train.</h2>
+          <p class="section-copy">
+            This reducer models the minimum legal states. It refuses a tag without exact-SHA
+            evidence, distinguishes a suspected performance result from a repeated regression,
+            and never offers an overwrite after registry publication.
+          </p>
+        </div>
+
+        <div class="lab">
+          <div class="card lab-controls">
+            <div class="control-group">
+              <h3>0 · Freeze candidate identity</h3>
+              <div class="button-row">
+                <input id="candidate-sha" type="text" value="candidate-a1b2c3d" aria-label="Candidate SHA" style="min-height: 40px; min-width: 240px; padding: 8px 11px">
+                <button type="button" class="primary" data-action="freeze">Freeze exact SHA</button>
+                <button type="button" data-action="change-sha">Apply edited SHA</button>
+              </div>
+            </div>
+            <div class="control-group">
+              <h3>1 · Candidate checks</h3>
+              <div class="button-row">
+                <button type="button" data-action="targeted-pass">Targeted local checks pass</button>
+                <button type="button" data-action="oracle-pass">Compatibility oracle passes</button>
+                <button type="button" class="danger-button" data-action="oracle-fail">Record compatibility diff</button>
+              </div>
+            </div>
+
+            <div class="control-group">
+              <h3>2 · Performance</h3>
+              <div class="button-row" style="margin-bottom: 9px">
+                <select id="perf-lane" aria-label="Performance lane">
+                  <option value="explicit-no-cache">Explicit · no-cache</option>
+                  <option value="explicit-cold">Explicit · cold</option>
+                  <option value="explicit-warm">Explicit · warm</option>
+                  <option value="bare-no-save-cold">Bare no-save · cold</option>
+                  <option value="bare-no-save-warm">Bare no-save · warm</option>
+                  <option value="auto-save-cold">Auto-save · first publication</option>
+                  <option value="auto-save-warm">Auto-save · replacement</option>
+                </select>
+                <select id="perf-metric" aria-label="Performance metric">
+                  <option value="time">Wall time</option>
+                  <option value="rss">Peak RSS</option>
+                </select>
+              </div>
+              <div class="button-row">
+                <button type="button" data-action="perf-pass">All lanes ≤ 1.05</button>
+                <button type="button" data-action="perf-suspect">First result &gt; 1.05</button>
+                <button type="button" data-action="perf-clear">Fresh runner clears it</button>
+                <button type="button" class="danger-button" data-action="perf-repeat">Fresh runner repeats it</button>
+              </div>
+            </div>
+
+            <div class="control-group">
+              <h3>3 · Native archives</h3>
+              <div class="button-row">
+                <button type="button" data-action="archive-linux">Linux musl passes</button>
+                <button type="button" data-action="archive-macos">macOS arm64 passes</button>
+                <button type="button" data-action="archive-windows">Windows x64 passes</button>
+              </div>
+            </div>
+
+            <div class="control-group">
+              <h3>4 · Exact hosted gate</h3>
+              <div class="button-row">
+                <button type="button" class="primary" data-action="ci-pass">Exact-SHA GitHub CI passes</button>
+                <button type="button" class="danger-button" data-action="ci-stale">Record stale-SHA green</button>
+              </div>
+            </div>
+
+            <div class="control-group">
+              <h3>5 · Immutable publication</h3>
+              <div class="button-row">
+                <button id="tag-button" type="button" class="primary" data-action="tag">Tag v2.0.0</button>
+                <button type="button" data-action="publish-core">Publish core</button>
+                <button type="button" data-action="publish-tui">Publish TUI</button>
+                <button type="button" data-action="publish-cli">Publish CLI</button>
+                <button type="button" class="primary" data-action="publish-release">Publish GitHub release</button>
+              </div>
+            </div>
+
+            <div class="control-group">
+              <h3>Incidents</h3>
+              <div class="button-row">
+                <button type="button" class="danger-button" data-action="incident">Report product regression</button>
+                <button type="button" data-action="patch">Cut new patch candidate</button>
+                <button type="button" data-action="reset">Reset lab</button>
+              </div>
+            </div>
+          </div>
+
+          <aside class="card status-board" aria-live="polite">
+            <div class="stage-line">
+              <div>
+                <div class="kicker">Current state</div>
+                <strong class="stage-name" id="stage-name">Candidate</strong>
+              </div>
+              <span class="status info" id="stage-status">In progress</span>
+            </div>
+            <p class="mono muted" style="font-size: 12px">Stable: 1.5.1 · target: <span id="release-target">v2.0.0</span> · oracle: 880d211 · evidence is SHA-bound</p>
+            <p id="stage-summary" class="muted"></p>
+            <div class="gate-grid" id="gate-grid"></div>
+            <details>
+              <summary class="mono" style="cursor: pointer; color: var(--cyan)">14 performance cells</summary>
+              <div class="gate-grid" id="perf-cell-grid"></div>
+            </details>
+            <div class="next-action">
+              <strong>Next legal move</strong>
+              <div id="next-action"></div>
+            </div>
+            <div class="trace" id="trace" aria-label="State transition trace"></div>
+          </aside>
+        </div>
+      </div>
+    </section>
+
+    <section id="scenarios">
+      <div class="shell">
+        <div class="section-head">
+          <div class="kicker">Guided scenarios</div>
+          <h2>Nine ways the contract can prove itself.</h2>
+          <p class="section-copy">Select a scenario, read the required response, then load it into the free-play reducer.</p>
+        </div>
+        <div class="tabs" id="scenario-tabs" role="tablist" aria-label="Rollout scenarios"></div>
+        <article class="card scenario-panel" id="scenario-panel" role="tabpanel"></article>
+      </div>
+    </section>
+
+    <section id="oracle">
+      <div class="shell">
+        <div class="section-head">
+          <div class="kicker">Compatibility oracle</div>
+          <h2>The exact comparison that earns a v2 tag.</h2>
+          <p class="section-copy">
+            Reference commit <code>880d211a463e97eb3c188f957e5592d88f36dcf8</code>
+            remains authoritative until the candidate passes every lane.
+          </p>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Surface</th>
+                <th>Comparison</th>
+                <th>Allowed difference</th>
+                <th>Block condition</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Explicit human</td>
+                <td>Same fixtures and invocation, byte for byte</td>
+                <td>None</td>
+                <td>Any byte, stream, or status difference</td>
+              </tr>
+              <tr>
+                <td>Explicit JSON</td>
+                <td>Deep structural comparison</td>
+                <td>Product version plus appended <code>report_kind</code>, <code>scope</code>, <code>outcome</code>, <code>setup</code></td>
+                <td>Any other field, value, order-sensitive list, or finding difference</td>
+              </tr>
+              <tr>
+                <td>SARIF</td>
+                <td>Deep structural comparison</td>
+                <td>Tool driver version only</td>
+                <td>Any other difference</td>
+              </tr>
+              <tr>
+                <td>Baseline/fingerprint</td>
+                <td>Byte equality plus cross-version reads</td>
+                <td>None</td>
+                <td>Any changed fingerprint, occurrence, baseline byte, or classification</td>
+              </tr>
+              <tr>
+                <td>Aliases and TUI</td>
+                <td>Same actions through <code>siloscan</code>, <code>ss</code>, and standalone TUI</td>
+                <td>Invoked binary name where expected</td>
+                <td>Missing feature, action, help, error, or snapshot behavior</td>
+              </tr>
+              <tr>
+                <td>Archives</td>
+                <td>Extract release-shaped archive on native target and run every binary</td>
+                <td>Platform suffix and archive format</td>
+                <td>Missing member or any smoke failure</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="section-head" style="margin-top: 30px">
+          <div class="kicker">Frozen feature oracle</div>
+          <h3>Every shipped surface must remain present.</h3>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Area</th>
+                <th>Required proof on reference and candidate</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td>Binary surfaces</td><td>Help, version, and every subcommand help through <code>siloscan</code>, <code>ss</code>, and <code>siloscan-tui</code></td></tr>
+              <tr><td>Embedded pack</td><td>Exact current bundled findings through both aliases; <code>default-secrets@1</code> remains 220 rules</td></tr>
+              <tr><td>Six engines</td><td>Exact normalized findings and metrics for every existing engine</td></tr>
+              <tr><td>Ten AST languages</td><td>One shipped-binary finding per language, with exact location, order, and fingerprint</td></tr>
+              <tr><td>Human, JSON, SARIF</td><td>The byte or structural projections named above</td></tr>
+              <tr><td>Thresholds and filters</td><td>All severities; failure remains based on unfiltered findings</td></tr>
+              <tr><td>Status 0, 1, and 2</td><td>Clean, finding, parse refusal, setup refusal, and publication-failure classes</td></tr>
+              <tr><td>Baselines</td><td>Exact bytes, default and explicit paths, and cross-version reads in both directions</td></tr>
+              <tr><td>Suppressions</td><td>Current-line, next-line, config, baseline, and malformed directive behavior</td></tr>
+              <tr><td>Config and scope</td><td>Anchors, discovery, explicit config, nested path, single file, missing and malformed config</td></tr>
+              <tr><td>Walker</td><td>Ignore sources, binary files, symlink modes, and out-of-root refusal</td></tr>
+              <tr><td>Cache</td><td>Cold, warm, disabled, invalidation, corruption, and prune with identical outputs</td></tr>
+              <tr><td>Fixture command</td><td>Passing, mismatch, and invalid test fixtures</td></tr>
+              <tr><td>TUI live</td><td>Both entry points share one resolved plan; preserve views, navigation, mutation, rescan, and terminal restoration</td></tr>
+              <tr><td>TUI snapshot</td><td>Views and read-only refusals with no file mutation and one shared loader</td></tr>
+              <tr><td>One-command journey</td><td>Bare, no-save, save, output, latest review, explicit report review, and cross-alias state</td></tr>
+              <tr><td>Detection</td><td>Complete, partial, invalid, mixed, generic, and offline refusal behavior without new profiles</td></tr>
+              <tr><td>Persistence</td><td>First write, identical repeat, replacement, interrupted write, stale temporary, corrupt latest, exact-scope miss, and concurrent last-success wins</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="card" style="margin-top: 18px">
+          <h3>Performance rule</h3>
+          <div class="grid grid-3">
+            <div>
+              <span class="pill info">Paths</span>
+              <p class="muted" style="margin-top: 10px">
+                Explicit unchanged: no-cache, cold, warm. Bare reference versus v2
+                <code>--no-save</code>: cold, warm. Bare reference versus auto-save:
+                cold first publication, warm replacement.
+              </p>
+            </div>
+            <div>
+              <span class="pill info">Method</span>
+              <p class="muted" style="margin-top: 10px">
+                Nine paired ABBA samples on one GitHub Actions runner. Compare wall time
+                and OS peak RSS medians independently. Keep raw samples as artifacts.
+              </p>
+            </div>
+            <div>
+              <span class="pill warning">Decision</span>
+              <p class="muted" style="margin-top: 10px">
+                Ratio above 1.05 is suspected. Repeat the complete pair on a fresh runner.
+                The same path, cache state, and metric above 1.05 twice blocks. Reference
+                MAD above 20% invalidates the run. Faster lanes never offset slower ones.
+              </p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="release">
+      <div class="shell">
+        <div class="section-head">
+          <div class="kicker">Release train</div>
+          <h2>Qualify first. Publish once.</h2>
+          <p class="section-copy">
+            GitHub CI owns repository-level proof. Local verification stays targeted to the
+            changed contracts, as requested.
+          </p>
+        </div>
+
+        <div class="flow" aria-label="Release sequence" style="grid-template-columns: repeat(8, minmax(110px, 1fr))">
+          <div class="flow-node"><b>1 · Candidate</b><small>Pin one commit. Build no public release.</small></div>
+          <div class="flow-node"><b>2 · Targeted</b><small>Run only tests for changed code and contracts.</small></div>
+          <div class="flow-node"><b>3 · Oracle</b><small>Compare v1.5.1, reports, readers, aliases, baselines, and performance.</small></div>
+          <div class="flow-node"><b>4 · Archives</b><small>Build release shape, extract, and smoke three binaries natively.</small></div>
+          <div class="flow-node"><b>5 · Exact CI</b><small>Require green checks attached to the candidate SHA.</small></div>
+          <div class="flow-node"><b>6 · Tag + draft</b><small>Fix the tag to that SHA and stage verified assets privately.</small></div>
+          <div class="flow-node"><b>7 · Registry</b><small>Publish core, wait, TUI, wait, then CLI.</small></div>
+          <div class="flow-node"><b>8 · Release</b><small>Re-verify and expose immutable checksums, archives, and supporting assets.</small></div>
+        </div>
+
+        <div class="grid grid-3" style="margin-top: 18px">
+          <article class="card">
+            <h3>Inside each archive: exactly seven members</h3>
+            <ul>
+              <li><code>siloscan</code></li>
+              <li><code>ss</code></li>
+              <li><code>siloscan-tui</code></li>
+              <li><code>README.md</code></li>
+              <li><code>LICENSE</code></li>
+              <li><code>NOTICE</code></li>
+              <li><code>THIRD-PARTY-LICENSES</code></li>
+            </ul>
+          </article>
+          <article class="card">
+            <h3>Sibling assets and separate gates</h3>
+            <ul>
+              <li>Checksum file beside each archive, never inside it</li>
+              <li>Existing SBOM and checksum assets remain separate</li>
+              <li><code>cargo package --locked --workspace</code> succeeds</li>
+              <li>Native extraction verifies the seven members and runs all three binaries</li>
+              <li>Empty-root <code>cargo install siloscan</code> proves aliases and linked review without a second install</li>
+            </ul>
+          </article>
+          <article class="card callout warn">
+            <h3>Registry order is a contract</h3>
+            <p>
+              v2 CLI depends on the TUI library. The only legal crates.io order is
+              <code>siloscan-core → siloscan-tui → siloscan</code>, with registry-index
+              availability verified before publishing each dependent crate.
+            </p>
+          </article>
+        </div>
+        <div class="card callout bad" style="margin-top: 18px">
+          <h3>Current baseline is not release-ready</h3>
+          <p>
+            Exact-main GitHub Actions run <a href="https://github.com/RandomCodeSpace/siloscan/actions/runs/33348294251">33348294251</a>
+            is red in Linux Clippy under Rust 1.98. Current workflows also lack the full
+            compatibility, performance, exact-SHA, extracted-archive, and install gates.
+            The v2 candidate cannot inherit a green label from partial jobs or another SHA.
+          </p>
+        </div>
+      </div>
+    </section>
+
+    <section id="rollback">
+      <div class="shell">
+        <div class="section-head">
+          <div class="kicker">Rollback</div>
+          <h2>Rollback means a new state, not rewritten history.</h2>
+        </div>
+        <div class="grid grid-3">
+          <article class="card">
+            <span class="pill good">Before publication</span>
+            <h3 style="margin-top: 13px">Block and replace the candidate</h3>
+            <p class="muted">
+              A compatibility diff, malformed report, baseline shift, repeated performance
+              regression, archive failure, or stale CI blocks tagging. Fix on a new commit
+              and rerun every affected gate.
+            </p>
+          </article>
+          <article class="card">
+            <span class="pill warning">Partial crates publish</span>
+            <h3 style="margin-top: 13px">Hold, then resume or patch</h3>
+            <p class="muted">
+              Published versions cannot be overwritten. For a transient registry failure,
+              resume the remaining same-version sequence. For a product defect, yank only
+              unusable v2 crates and publish a corrected patch from a new commit.
+            </p>
+          </article>
+          <article class="card">
+            <span class="pill danger">After public release</span>
+            <h3 style="margin-top: 13px">Preserve and supersede</h3>
+            <p class="muted">
+              Keep the tag and assets immutable. Users can pin 1.5.1. Preserve baseline v1,
+              publish v2.0.1 from a new commit, and yank only a release that is unusable.
+              Never move a tag, replace public assets, delete user reports, or pretend a
+              published crate did not exist.
+            </p>
+          </article>
+        </div>
+
+        <div class="card callout bad" style="margin-top: 18px">
+          <h3>Non-waivable blockers</h3>
+          <p>
+            Explicit behavior diff, partial v2 marker set, baseline or fingerprint shift,
+            failed native archive smoke, repeated same-lane performance ratio above 1.05,
+            or GitHub CI that is missing or belongs to another SHA.
+          </p>
+        </div>
+      </div>
+    </section>
+
+    <section id="non-goals">
+      <div class="shell">
+        <div class="section-head">
+          <div class="kicker">Boundaries</div>
+          <h2>What v2 does not smuggle into the release.</h2>
+        </div>
+        <div class="grid grid-3">
+          <article class="card">
+            <h3>No rule-policy expansion</h3>
+            <p class="muted">
+              Project detection never invents architecture silos, coverage thresholds,
+              suppressions, baselines, source filtering, severity policy, generated-code
+              policy, or a primary ecosystem.
+            </p>
+          </article>
+          <article class="card">
+            <h3>No ecosystem add-ons</h3>
+            <p class="muted">
+              Launch keeps the unchanged default secret pack and metrics. A future profile
+              needs a new version plus evidence for noise, compatibility, and cost. Build
+              capability alone is not evidence.
+            </p>
+          </article>
+          <article class="card">
+            <h3>No security-hardening detour</h3>
+            <p class="muted">
+              Security hardening is excluded. Existing secret detection is still a shipped
+              feature and remains protected by the no-regression oracle.
+            </p>
+          </article>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <div class="shell">
+      Siloscan v2 compatibility prototype · pinned reference 880d211 · implementation is not authorized by this artifact
+    </div>
+  </footer>
+
+  <script type="module">
+    "use strict";
+
+    const REFERENCE_SHA = "880d211a463e97eb3c188f957e5592d88f36dcf8";
+    const PERF_LANES = [
+      ["explicit-no-cache", "Explicit · no-cache"],
+      ["explicit-cold", "Explicit · cold"],
+      ["explicit-warm", "Explicit · warm"],
+      ["bare-no-save-cold", "Bare no-save · cold"],
+      ["bare-no-save-warm", "Bare no-save · warm"],
+      ["auto-save-cold", "Auto-save · first"],
+      ["auto-save-warm", "Auto-save · replace"]
+    ];
+
+    function perfCellsWith(value) {
+      const cells = {};
+      PERF_LANES.forEach(function (lane) {
+        cells[lane[0] + ":time"] = value;
+        cells[lane[0] + ":rss"] = value;
+      });
+      return cells;
+    }
+
+    function initialState(candidateSha, releaseVersion) {
+      return {
+        stage: "editing",
+        candidateSha: candidateSha || "candidate-a1b2c3d",
+        releaseVersion: releaseVersion || "v2.0.0",
+        evidenceSha: null,
+        rejectedSha: null,
+        targeted: "pending",
+        oracle: "pending",
+        performance: "pending",
+        perfCells: perfCellsWith("pending"),
+        suspectedPerfKey: null,
+        archives: {
+          linux: "pending",
+          macos: "pending",
+          windows: "pending"
+        },
+        ci: "pending",
+        tag: null,
+        draft: false,
+        crates: {
+          core: "pending",
+          tui: "pending",
+          cli: "pending"
+        },
+        release: "pending",
+        incident: null,
+        notice: "Edit a candidate SHA, then freeze it before recording evidence.",
+        trace: ["Reference fixed at " + REFERENCE_SHA.slice(0, 7) + "."]
+      };
+    }
+
+    function nextPatchVersion(version) {
+      const match = /^v(\d+)\.(\d+)\.(\d+)$/.exec(version);
+      if (!match) return "v2.0.1";
+      return "v" + match[1] + "." + match[2] + "." + (Number(match[3]) + 1);
+    }
+
+    function appendTrace(state, message, changes) {
+      return Object.assign({}, state, changes, {
+        notice: message,
+        trace: state.trace.concat(message)
+      });
+    }
+
+    function blocked(state, message) {
+      return appendTrace(state, "Blocked: " + message, {});
+    }
+
+    function archiveCount(state) {
+      return Object.values(state.archives).filter(function (value) {
+        return value === "pass";
+      }).length;
+    }
+
+    function allCandidateGatesPass(state) {
+      return Boolean(
+        state.evidenceSha &&
+        state.evidenceSha === state.candidateSha &&
+        state.targeted === "pass" &&
+        state.oracle === "pass" &&
+        state.performance === "pass" &&
+        archiveCount(state) === 3 &&
+        state.ci === "pass"
+      );
+    }
+
+    function settle(state) {
+      if (state.stage === "frozen" && allCandidateGatesPass(state)) {
+        return appendTrace(
+          state,
+          "Every required gate is green for exact SHA " + state.candidateSha + ". Tagging is now legal.",
+          { stage: "releasable" }
+        );
+      }
+      return state;
+    }
+
+    function rejectCandidate(state, reason, fieldChanges) {
+      const failed = Object.assign({}, state, fieldChanges || {}, {
+        stage: "editing",
+        evidenceSha: null,
+        rejectedSha: state.candidateSha,
+        incident: reason
+      });
+      return appendTrace(
+        failed,
+        "Candidate " + state.candidateSha + " rejected: " + reason + " Change the SHA before freezing again.",
+        {}
+      );
+    }
+
+    function requireFrozen(state, actionName) {
+      if (state.stage !== "frozen" && state.stage !== "releasable") {
+        return blocked(state, actionName + " requires a frozen candidate.");
+      }
+      if (state.evidenceSha !== state.candidateSha) {
+        return blocked(state, actionName + " belongs to a different SHA.");
+      }
+      return null;
+    }
+
+    function reducer(state, action) {
+      let guard;
+      let next;
+
+      switch (action.type) {
+        case "RESET":
+          return initialState("candidate-a1b2c3d", "v2.0.0");
+
+        case "CHANGE_SHA":
+          if (state.stage === "publishing" || state.stage === "released") {
+            return blocked(state, "publication has started; use recovery and a new patch version.");
+          }
+          if (!action.sha || action.sha.trim().length < 7) {
+            return blocked(state, "candidate identity must contain at least seven characters.");
+          }
+          if (action.sha.trim() === state.candidateSha && state.stage === "editing") {
+            return appendTrace(state, "Candidate SHA is unchanged.", {});
+          }
+          next = initialState(action.sha.trim(), state.releaseVersion);
+          next.trace = state.trace.concat(
+            "Candidate changed to " + action.sha.trim() + ". All previous evidence was discarded."
+          );
+          next.notice = "Candidate changed. Freeze the new exact SHA.";
+          return next;
+
+        case "FREEZE":
+          if (state.stage !== "editing") {
+            return blocked(state, "only an editing candidate can be frozen.");
+          }
+          if (!state.candidateSha || state.candidateSha.length < 7) {
+            return blocked(state, "candidate identity must contain at least seven characters.");
+          }
+          if (state.rejectedSha === state.candidateSha) {
+            return blocked(state, "this exact SHA was rejected; change the candidate first.");
+          }
+          return appendTrace(
+            state,
+            "Candidate " + state.candidateSha + " frozen. Every gate must record this exact SHA.",
+            {
+              stage: "frozen",
+              evidenceSha: state.candidateSha,
+              incident: null
+            }
+          );
+
+        case "TARGETED_PASS":
+          guard = requireFrozen(state, "Targeted checks");
+          if (guard) return guard;
+          return settle(appendTrace(state, "Targeted tests for changed contracts passed.", { targeted: "pass" }));
+
+        case "ORACLE_PASS":
+          guard = requireFrozen(state, "Compatibility oracle");
+          if (guard) return guard;
+          return settle(appendTrace(state, "The v1.5.1 feature and data oracle passed.", { oracle: "pass" }));
+
+        case "ORACLE_FAIL":
+          guard = requireFrozen(state, "Compatibility oracle");
+          if (guard) return guard;
+          return rejectCandidate(state, "an unapproved compatibility difference was recorded", { oracle: "fail" });
+
+        case "PERF_PASS":
+          guard = requireFrozen(state, "Performance gate");
+          if (guard) return guard;
+          return settle(appendTrace(state, "Every elapsed-time and peak-RSS lane is at or below 1.05.", {
+            performance: "pass",
+            perfCells: perfCellsWith("pass"),
+            suspectedPerfKey: null
+          }));
+
+        case "PERF_SUSPECT":
+          guard = requireFrozen(state, "Performance gate");
+          if (guard) return guard;
+          if (!action.key || !Object.prototype.hasOwnProperty.call(state.perfCells, action.key)) {
+            return blocked(state, "select a valid performance lane and metric.");
+          }
+          next = perfCellsWith("pass");
+          next[action.key] = "suspected";
+          return appendTrace(
+            state,
+            action.key + " exceeded 1.05. It is suspected, not passed or failed; repeat the complete pair on a fresh runner.",
+            {
+              performance: "suspected",
+              perfCells: next,
+              suspectedPerfKey: action.key
+            }
+          );
+
+        case "PERF_CLEAR":
+          guard = requireFrozen(state, "Fresh-runner performance check");
+          if (guard) return guard;
+          if (state.performance !== "suspected") {
+            return blocked(state, "there is no suspected performance lane to clear.");
+          }
+          next = Object.assign({}, state.perfCells);
+          next[state.suspectedPerfKey] = "pass";
+          return settle(appendTrace(state, "The fresh-runner repeat cleared " + state.suspectedPerfKey + ".", {
+            performance: "pass",
+            perfCells: next,
+            suspectedPerfKey: null
+          }));
+
+        case "PERF_REPEAT":
+          guard = requireFrozen(state, "Fresh-runner performance check");
+          if (guard) return guard;
+          if (state.performance !== "suspected") {
+            return blocked(state, "record a first suspected ratio before a repeated regression.");
+          }
+          next = Object.assign({}, state.perfCells);
+          next[state.suspectedPerfKey] = "fail";
+          return rejectCandidate(state, state.suspectedPerfKey + " exceeded 1.05 twice", {
+            performance: "fail",
+            perfCells: next
+          });
+
+        case "ARCHIVE_LINUX":
+        case "ARCHIVE_MACOS":
+        case "ARCHIVE_WINDOWS": {
+          guard = requireFrozen(state, "Native archive smoke");
+          if (guard) return guard;
+          const target = action.type.split("_")[1].toLowerCase();
+          const archives = Object.assign({}, state.archives);
+          archives[target] = "pass";
+          return settle(appendTrace(state, target + " extracted archive passed all three binary smokes.", { archives: archives }));
+        }
+
+        case "CI_PASS":
+          guard = requireFrozen(state, "GitHub CI");
+          if (guard) return guard;
+          return settle(appendTrace(state, "GitHub CI is green for exact SHA " + state.candidateSha + ".", { ci: "pass" }));
+
+        case "CI_STALE":
+          guard = requireFrozen(state, "GitHub CI");
+          if (guard) return guard;
+          return appendTrace(
+            state,
+            "A green run exists, but it belongs to another SHA. It is not release evidence.",
+            { ci: "stale" }
+          );
+
+        case "TAG":
+          if (state.stage !== "releasable" || !allCandidateGatesPass(state)) {
+            return blocked(state, "tagging requires every gate green for this exact candidate.");
+          }
+          return appendTrace(
+            state,
+            state.releaseVersion + " fixed to " + state.candidateSha + "; draft release opened. Immutable publication may now begin.",
+            {
+              stage: "publishing",
+              tag: state.releaseVersion,
+              draft: true
+            }
+          );
+
+        case "PUBLISH_CORE":
+          if (state.stage !== "publishing") {
+            return blocked(state, "crate publication requires the tagged publishing state.");
+          }
+          if (state.crates.core === "published") {
+            return blocked(state, "siloscan-core " + state.releaseVersion.slice(1) + " is already immutable.");
+          }
+          return appendTrace(
+            state,
+            "siloscan-core " + state.releaseVersion.slice(1) + " published and its registry checksum and VCS SHA verified.",
+            { crates: Object.assign({}, state.crates, { core: "published" }) }
+          );
+
+        case "PUBLISH_TUI":
+          if (state.stage !== "publishing") {
+            return blocked(state, "crate publication requires the tagged publishing state.");
+          }
+          if (state.crates.core !== "published") {
+            return blocked(state, "publish and verify siloscan-core before its TUI dependent.");
+          }
+          if (state.crates.tui === "published") {
+            return blocked(state, "siloscan-tui " + state.releaseVersion.slice(1) + " is already immutable.");
+          }
+          return appendTrace(
+            state,
+            "siloscan-tui " + state.releaseVersion.slice(1) + " published and verified after core became available.",
+            { crates: Object.assign({}, state.crates, { tui: "published" }) }
+          );
+
+        case "PUBLISH_CLI":
+          if (state.stage !== "publishing") {
+            return blocked(state, "crate publication requires the tagged publishing state.");
+          }
+          if (state.crates.tui !== "published") {
+            return blocked(state, "publish and verify siloscan-tui before its CLI dependent.");
+          }
+          if (state.crates.cli === "published") {
+            return blocked(state, "siloscan " + state.releaseVersion.slice(1) + " is already immutable.");
+          }
+          return appendTrace(
+            state,
+            "siloscan " + state.releaseVersion.slice(1) + " published and one-install smoke verified both aliases and review.",
+            { crates: Object.assign({}, state.crates, { cli: "published" }) }
+          );
+
+        case "PUBLISH_RELEASE":
+          if (state.stage !== "publishing") {
+            return blocked(state, "the GitHub release can become public only from publishing.");
+          }
+          if (state.crates.core !== "published" || state.crates.tui !== "published" || state.crates.cli !== "published") {
+            return blocked(state, "all three crates must be published and verified in dependency order.");
+          }
+          return appendTrace(
+            state,
+            "Draft assets were re-downloaded and verified. " + state.releaseVersion + " is public and immutable.",
+            {
+              stage: "released",
+              draft: false,
+              release: "published"
+            }
+          );
+
+        case "INCIDENT":
+          if (state.stage === "publishing" || state.stage === "released") {
+            return appendTrace(
+              Object.assign({}, state, {
+                stage: "recovery",
+                incident: "a protected product contract failed after immutable publication began"
+              }),
+              "Recovery required. Preserve published bytes, recommend v1.5.1, and qualify a new patch.",
+              {}
+            );
+          }
+          if (state.stage === "frozen" || state.stage === "releasable") {
+            return rejectCandidate(state, "a product regression was found before publication", {});
+          }
+          return blocked(state, "there is no frozen or published candidate to report against.");
+
+        case "PATCH":
+          if (state.stage !== "recovery") {
+            return blocked(state, "a patch candidate starts from recovery, not as a substitute for failed gates.");
+          }
+          next = initialState(state.candidateSha + "-patch", nextPatchVersion(state.releaseVersion));
+          next.trace = state.trace.concat(
+            "Started " + next.releaseVersion + " as a new patch candidate. Published tags, crates, assets, reports, and baselines remain untouched."
+          );
+          next.notice = "Edit the patch SHA, freeze it, and repeat every gate.";
+          return next;
+
+        case "LOAD_SCENARIO":
+          return action.state;
+
+        default:
+          return blocked(state, "unknown transition " + action.type + ".");
+      }
+    }
+
+    const stageCopy = {
+      editing: {
+        name: "Editing",
+        tone: "info",
+        label: "Not frozen",
+        summary: "Source identity can still change. No gate evidence is reusable.",
+        next: "Freeze one exact candidate SHA."
+      },
+      frozen: {
+        name: "Frozen",
+        tone: "warning",
+        label: "Qualifying",
+        summary: "Every result must belong to the same candidate SHA.",
+        next: "Complete every pending candidate, oracle, performance, archive, and hosted-CI gate."
+      },
+      releasable: {
+        name: "Releasable",
+        tone: "good",
+        label: "Tag legal",
+        summary: "All required evidence is green for one exact SHA.",
+        next: "Fix the target release to this SHA and open the draft release."
+      },
+      publishing: {
+        name: "Publishing",
+        tone: "warning",
+        label: "Immutable state",
+        summary: "The tag is fixed and registry publication may already be irreversible.",
+        next: "Publish and verify core, TUI, CLI, then expose the verified draft."
+      },
+      released: {
+        name: "Released",
+        tone: "good",
+        label: "Complete",
+        summary: "Crates, archives, checksums, tag, and public release all identify the same source.",
+        next: "Stop. A later protected-contract failure enters recovery."
+      },
+      recovery: {
+        name: "Recovery",
+        tone: "danger",
+        label: "Patch required",
+        summary: "Published history remains immutable. This version cannot return to releasable.",
+        next: "Keep v1.5.1 available and start a fully gated patch candidate."
+      }
+    };
+
+    function displayValue(value) {
+      const labels = {
+        pending: "Pending",
+        pass: "Pass",
+        fail: "Failed",
+        suspected: "Fresh rerun",
+        stale: "Wrong SHA",
+        published: "Published"
+      };
+      return labels[value] || value;
+    }
+
+    function valueTone(value) {
+      if (value === "pass" || value === "published") return "yes";
+      if (value === "fail" || value === "stale") return "no";
+      if (value === "suspected") return "partial";
+      return "";
+    }
+
+    function escapeHtml(value) {
+      return String(value)
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;")
+        .replaceAll("'", "&#039;");
+    }
+
+    function scenarioBase(candidateSha) {
+      const state = initialState(candidateSha);
+      state.stage = "frozen";
+      state.evidenceSha = candidateSha;
+      state.notice = "Scenario loaded.";
+      state.trace = ["Scenario candidate " + candidateSha + " frozen."];
+      return state;
+    }
+
+    function greenCandidate(candidateSha) {
+      const state = scenarioBase(candidateSha);
+      state.stage = "releasable";
+      state.targeted = "pass";
+      state.oracle = "pass";
+      state.performance = "pass";
+      state.perfCells = perfCellsWith("pass");
+      state.archives = { linux: "pass", macos: "pass", windows: "pass" };
+      state.ci = "pass";
+      return state;
+    }
+
+    function scenarioState(kind) {
+      let state;
+      if (kind === "happy") {
+        state = greenCandidate("happy-7ab12cd");
+        state.stage = "released";
+        state.tag = "v2.0.0";
+        state.draft = false;
+        state.crates = { core: "published", tui: "published", cli: "published" };
+        state.release = "published";
+        state.notice = "Happy path complete. Every public artifact points at the qualified SHA.";
+        state.trace.push("core → TUI → CLI verified; draft assets verified; release published.");
+        return state;
+      }
+      if (kind === "commit-reset") {
+        state = initialState("changed-44ce901");
+        state.notice = "A one-line commit changed the candidate. Every earlier green result was discarded.";
+        state.trace = [
+          "Old SHA candidate-11aa22b was fully green.",
+          "Candidate changed to changed-44ce901. All evidence reset."
+        ];
+        return state;
+      }
+      if (kind === "perf-clear") {
+        state = scenarioBase("perf-clear-26cc951");
+        state.performance = "pass";
+        state.perfCells = perfCellsWith("pass");
+        state.notice = "The first ratio was suspected; the complete fresh-runner pair cleared it.";
+        state.trace.push("warm RSS ratio 1.07 suspected.", "Fresh runner returned 1.02; performance gate passed.");
+        return state;
+      }
+      if (kind === "perf-repeat") {
+        state = initialState("perf-bad-018fafe");
+        state.rejectedSha = state.candidateSha;
+        state.performance = "fail";
+        state.perfCells = perfCellsWith("pass");
+        state.perfCells["explicit-warm:rss"] = "fail";
+        state.suspectedPerfKey = "explicit-warm:rss";
+        state.incident = "the same warm RSS lane exceeded 1.05 twice";
+        state.notice = "The candidate is rejected. A faster lane cannot offset this repeated regression.";
+        state.trace = ["warm RSS ratio 1.08 suspected.", "Fresh runner repeated 1.07. Candidate rejected."];
+        return state;
+      }
+      if (kind === "compat-diff") {
+        state = initialState("diff-bad-98aed10");
+        state.rejectedSha = state.candidateSha;
+        state.oracle = "fail";
+        state.incident = "explicit JSON changed an unapproved field";
+        state.notice = "The candidate is rejected before tagging.";
+        state.trace = ["Explicit JSON projection changed metrics.totals.lines. Candidate rejected."];
+        return state;
+      }
+      if (kind === "partial-publish") {
+        state = greenCandidate("partial-9c772bd");
+        state.stage = "publishing";
+        state.tag = "v2.0.0";
+        state.draft = true;
+        state.crates = { core: "published", tui: "pending", cli: "pending" };
+        state.notice = "Core is immutable. If TUI publication failed transiently, verify identical bytes and resume. Code changes require a patch.";
+        state.trace.push("v2.0.0 tagged.", "siloscan-core published.", "TUI registry request failed before acceptance.");
+        return state;
+      }
+      if (kind === "post-release") {
+        state = greenCandidate("released-bad-31fa3ce");
+        state.stage = "recovery";
+        state.tag = "v2.0.0";
+        state.crates = { core: "published", tui: "published", cli: "published" };
+        state.release = "published";
+        state.incident = "automatic replacement produced a corrupt latest report";
+        state.notice = "Keep v2.0.0 immutable, recommend v1.5.1, and qualify v2.0.1.";
+        state.trace.push("v2.0.0 released.", "Protected persistence contract failed in production.", "Recovery entered.");
+        return state;
+      }
+      if (kind === "legacy-report") {
+        state = scenarioBase("reader-6f123aa");
+        state.notice = "Explicit review accepts the marker-free report as legacy/core. Outcome is unavailable, never clean. Implicit latest rejects it.";
+        state.trace.push("Marker-free schema 1.2 with findings array classified as legacy/core.", "Explicit read accepted; latest lookup rejected.");
+        return state;
+      }
+      state = scenarioBase("stale-ci-9aa5c21");
+      state.targeted = "pass";
+      state.oracle = "pass";
+      state.performance = "pass";
+      state.perfCells = perfCellsWith("pass");
+      state.archives = { linux: "pass", macos: "pass", windows: "pass" };
+      state.ci = "stale";
+      state.notice = "A green run for another commit is worthless. Tagging remains blocked.";
+      state.trace.push("Every local and oracle gate passed.", "Hosted green run names 8bb4d10, not stale-ci-9aa5c21.");
+      return state;
+    }
+
+    const scenarios = [
+      {
+        id: "happy",
+        label: "Happy path",
+        title: "One exact candidate becomes v2.0.0",
+        verdict: "Release complete",
+        tone: "good",
+        summary: "All gates identify one SHA. The tag, packages, extracted archives, checksums, and public release preserve that identity.",
+        steps: [
+          "Freeze one candidate SHA.",
+          "Pass targeted tests, the full oracle, every performance lane, native archive smokes, and exact-SHA CI.",
+          "Tag and open a draft.",
+          "Publish core, wait and verify; publish TUI, wait and verify; publish CLI and run one-install smoke.",
+          "Re-download draft assets, verify them, then publish."
+        ],
+        forbidden: "No release job rebuilds different bytes or borrows a green run."
+      },
+      {
+        id: "commit-reset",
+        label: "SHA changed",
+        title: "A one-line commit invalidates every green check",
+        verdict: "Return to editing",
+        tone: "warning",
+        summary: "Evidence attaches to source identity, not intent. Documentation and workflow commits count too.",
+        steps: [
+          "Candidate A reaches releasable.",
+          "One line changes and creates candidate B.",
+          "Candidate B starts with no reusable evidence.",
+          "Freeze B and rerun every required gate."
+        ],
+        forbidden: "Do not claim candidate A’s checks for candidate B."
+      },
+      {
+        id: "perf-clear",
+        label: "Noise clears",
+        title: "One performance ratio above 1.05 triggers a fresh runner",
+        verdict: "Continue after clear",
+        tone: "good",
+        summary: "A first excess is suspected. It is neither a pass nor an immediate rejection.",
+        steps: [
+          "Record the exact path, cache state, and metric.",
+          "Repeat the complete paired ABBA job on a fresh runner.",
+          "The fresh ratio is at or below 1.05, so that lane passes.",
+          "Keep both raw sample sets."
+        ],
+        forbidden: "Do not average the slow lane against a faster lane."
+      },
+      {
+        id: "perf-repeat",
+        label: "Perf blocks",
+        title: "The same performance cell exceeds 1.05 twice",
+        verdict: "Candidate rejected",
+        tone: "danger",
+        summary: "A repeated regression in either wall time or peak RSS is a hard blocker.",
+        steps: [
+          "First complete pair marks the cell suspected.",
+          "Fresh-runner complete pair repeats the excess.",
+          "Reject the SHA and fix the owning path.",
+          "Freeze a new SHA and rerun."
+        ],
+        forbidden: "No waiver, offset, reduced inventory, detached save, or skipped synchronization."
+      },
+      {
+        id: "compat-diff",
+        label: "Parity blocks",
+        title: "An explicit output differs outside the allowlist",
+        verdict: "Candidate rejected",
+        tone: "danger",
+        summary: "Existing explicit behavior is the protected contract. A different metric, finding, fingerprint, byte, stream, or status blocks.",
+        steps: [
+          "Normalize only product version and the four approved JSON tail fields.",
+          "Identify the first unapproved difference.",
+          "Reject the candidate before tagging.",
+          "Correct the owning logic and repeat the oracle."
+        ],
+        forbidden: "Do not expand the allowlist to make a regression disappear."
+      },
+      {
+        id: "partial-publish",
+        label: "Partial crates",
+        title: "Core is published and the TUI step fails",
+        verdict: "Publishing is incomplete",
+        tone: "warning",
+        summary: "The core version now exists forever. A transient failure can resume only with identical package bytes and the same VCS SHA.",
+        steps: [
+          "Keep the GitHub release as a draft.",
+          "Verify the published core checksum and VCS SHA against the tag.",
+          "Retry TUI only when the bytes remain identical.",
+          "Any source correction starts a new patch version."
+        ],
+        forbidden: "Never overwrite core 2.0.0 or blindly restart publication."
+      },
+      {
+        id: "post-release",
+        label: "Released defect",
+        title: "A protected contract fails after v2.0.0 is public",
+        verdict: "Recovery and patch",
+        tone: "danger",
+        summary: "Rollback is a forward patch. Provenance and user data remain untouched.",
+        steps: [
+          "Stop recommending v2.0.0 and keep v1.5.1 available.",
+          "Yank only versions that are unusable for fresh resolution.",
+          "Leave tags, assets, reports, caches, and baselines intact.",
+          "Qualify v2.0.1 through the entire state machine."
+        ],
+        forbidden: "Do not move the tag, replace assets, delete state, or rewrite crate history."
+      },
+      {
+        id: "legacy-report",
+        label: "Legacy reader",
+        title: "A marker-free product-2 report opens explicitly, not as latest",
+        verdict: "Readable with limits",
+        tone: "info",
+        summary: "The preserved public core writer is still useful. It simply lacks authoritative scope and outcome metadata.",
+        steps: [
+          "Require a real findings array; accept supported schema 1.x or assume 1.0 when the schema key is absent.",
+          "Label scope and outcome unavailable.",
+          "Hide match text for pre-1.2 reports.",
+          "Require all four resolved fields for implicit latest."
+        ],
+        forbidden: "Never call an outcome-less report clean or use product major as the shape discriminator."
+      },
+      {
+        id: "stale-ci",
+        label: "Wrong-SHA CI",
+        title: "Hosted checks are green for a different commit",
+        verdict: "Tag blocked",
+        tone: "danger",
+        summary: "GitHub CI is authoritative only when its source SHA equals the frozen candidate and tag target.",
+        steps: [
+          "Compare candidate SHA, aggregate-check SHA, main tip, and proposed tag target.",
+          "Reject stale or missing evidence.",
+          "Run the hosted gates for the exact candidate.",
+          "Tag only while all identities still match."
+        ],
+        forbidden: "A green branch, earlier PR head, or prior tag is not evidence for this candidate."
+      }
+    ];
+
+    let state = initialState("candidate-a1b2c3d");
+    let selectedScenario = "happy";
+
+    const actionMap = {
+      "freeze": "FREEZE",
+      "targeted-pass": "TARGETED_PASS",
+      "oracle-pass": "ORACLE_PASS",
+      "oracle-fail": "ORACLE_FAIL",
+      "perf-pass": "PERF_PASS",
+      "perf-suspect": "PERF_SUSPECT",
+      "perf-clear": "PERF_CLEAR",
+      "perf-repeat": "PERF_REPEAT",
+      "archive-linux": "ARCHIVE_LINUX",
+      "archive-macos": "ARCHIVE_MACOS",
+      "archive-windows": "ARCHIVE_WINDOWS",
+      "ci-pass": "CI_PASS",
+      "ci-stale": "CI_STALE",
+      "tag": "TAG",
+      "publish-core": "PUBLISH_CORE",
+      "publish-tui": "PUBLISH_TUI",
+      "publish-cli": "PUBLISH_CLI",
+      "publish-release": "PUBLISH_RELEASE",
+      "incident": "INCIDENT",
+      "patch": "PATCH",
+      "reset": "RESET"
+    };
+
+    function gateMarkup(label, value, detail) {
+      return (
+        '<div class="gate">' +
+          "<small>" + escapeHtml(label) + "</small>" +
+          '<b class="' + valueTone(value) + '">' + escapeHtml(displayValue(value)) + "</b>" +
+          (detail ? "<small>" + escapeHtml(detail) + "</small>" : "") +
+        "</div>"
+      );
+    }
+
+    function renderState() {
+      const copy = stageCopy[state.stage];
+      document.getElementById("stage-name").textContent = copy.name;
+      const status = document.getElementById("stage-status");
+      status.className = "status " + copy.tone;
+      status.textContent = copy.label;
+      document.getElementById("stage-summary").textContent = copy.summary + " " + state.notice;
+      document.getElementById("next-action").textContent = copy.next;
+      document.getElementById("candidate-sha").value = state.candidateSha;
+      document.getElementById("release-target").textContent = state.releaseVersion;
+      document.getElementById("tag-button").textContent = "Tag " + state.releaseVersion;
+
+      const candidateValue = state.evidenceSha === state.candidateSha ? "pass" : "pending";
+      document.getElementById("gate-grid").innerHTML = [
+        gateMarkup("Candidate identity", candidateValue, state.evidenceSha || "not frozen"),
+        gateMarkup("Targeted local", state.targeted),
+        gateMarkup("Compatibility oracle", state.oracle),
+        gateMarkup("Performance", state.performance),
+        gateMarkup("Native archives", archiveCount(state) === 3 ? "pass" : "pending", archiveCount(state) + "/3"),
+        gateMarkup("Exact-SHA GitHub CI", state.ci),
+        gateMarkup("Registry", state.crates.cli === "published" ? "published" : "pending", [
+          state.crates.core === "published" ? "core" : null,
+          state.crates.tui === "published" ? "TUI" : null,
+          state.crates.cli === "published" ? "CLI" : null
+        ].filter(Boolean).join(" → ") || "not started"),
+        gateMarkup("GitHub release", state.release)
+      ].join("");
+
+      document.getElementById("perf-cell-grid").innerHTML = PERF_LANES.flatMap(function (lane) {
+        return [
+          gateMarkup(lane[1] + " · time", state.perfCells[lane[0] + ":time"]),
+          gateMarkup(lane[1] + " · RSS", state.perfCells[lane[0] + ":rss"])
+        ];
+      }).join("");
+
+      document.getElementById("trace").innerHTML = state.trace
+        .slice()
+        .reverse()
+        .map(function (line) {
+          return "<div>" + escapeHtml(line) + "</div>";
+        })
+        .join("");
+    }
+
+    function renderScenarioTabs() {
+      document.getElementById("scenario-tabs").innerHTML = scenarios.map(function (scenario) {
+        const selected = scenario.id === selectedScenario;
+        return (
+          '<button type="button" class="tab" role="tab" data-scenario="' + scenario.id + '"' +
+          ' aria-selected="' + String(selected) + '">' +
+          escapeHtml(scenario.label) +
+          "</button>"
+        );
+      }).join("");
+    }
+
+    function renderScenarioPanel() {
+      const scenario = scenarios.find(function (item) {
+        return item.id === selectedScenario;
+      });
+      document.getElementById("scenario-panel").innerHTML =
+        '<div class="scenario-layout">' +
+          "<div>" +
+            '<span class="status ' + scenario.tone + '">' + escapeHtml(scenario.verdict) + "</span>" +
+            '<h3 style="margin-top: 14px">' + escapeHtml(scenario.title) + "</h3>" +
+            '<p class="muted">' + escapeHtml(scenario.summary) + "</p>" +
+            '<button type="button" class="primary" data-load-scenario="' + scenario.id + '">Load this state in the lab</button>' +
+          "</div>" +
+          "<div>" +
+            '<div class="kicker">Required response</div>' +
+            '<div class="timeline">' +
+              scenario.steps.map(function (step, index) {
+                return '<div class="timeline-row"><span>' + (index + 1) + "</span><div>" + escapeHtml(step) + "</div></div>";
+              }).join("") +
+            "</div>" +
+            '<p class="muted" style="margin-top: 14px"><strong style="color: var(--bad)">Forbidden:</strong> ' +
+              escapeHtml(scenario.forbidden) +
+            "</p>" +
+          "</div>" +
+        "</div>";
+    }
+
+    function dispatch(action) {
+      state = reducer(state, action);
+      renderState();
+    }
+
+    document.querySelectorAll("[data-action]").forEach(function (button) {
+      button.addEventListener("click", function () {
+        const name = button.getAttribute("data-action");
+        if (name === "change-sha") {
+          dispatch({
+            type: "CHANGE_SHA",
+            sha: document.getElementById("candidate-sha").value
+          });
+          return;
+        }
+        if (name === "freeze") {
+          const inputSha = document.getElementById("candidate-sha").value.trim();
+          if (inputSha !== state.candidateSha) {
+            state = reducer(state, { type: "CHANGE_SHA", sha: inputSha });
+          }
+          dispatch({ type: "FREEZE" });
+          return;
+        }
+        if (name === "perf-suspect") {
+          const lane = document.getElementById("perf-lane").value;
+          const metric = document.getElementById("perf-metric").value;
+          dispatch({ type: "PERF_SUSPECT", key: lane + ":" + metric });
+          return;
+        }
+        dispatch({ type: actionMap[name] });
+      });
+    });
+
+    document.getElementById("scenario-tabs").addEventListener("click", function (event) {
+      const tab = event.target.closest("[data-scenario]");
+      if (!tab) return;
+      selectedScenario = tab.getAttribute("data-scenario");
+      renderScenarioTabs();
+      renderScenarioPanel();
+    });
+
+    document.getElementById("scenario-panel").addEventListener("click", function (event) {
+      const button = event.target.closest("[data-load-scenario]");
+      if (!button) return;
+      const id = button.getAttribute("data-load-scenario");
+      dispatch({ type: "LOAD_SCENARIO", state: scenarioState(id) });
+      document.getElementById("lab").scrollIntoView({ behavior: "smooth", block: "start" });
+    });
+
+    renderState();
+    renderScenarioTabs();
+    renderScenarioPanel();
+  </script>
+</body>
+</html>
