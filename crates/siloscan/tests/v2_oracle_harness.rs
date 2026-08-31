@@ -320,9 +320,22 @@ fn fail_comparison(
     diff_bytes.extend_from_slice(&diff.stderr);
     fs::write(dir.join("raw.diff"), diff_bytes).expect("write raw diff artifact");
 
+    let diff = command_output(
+        Command::new("git")
+            .args(["diff", "--no-index", "--text", "--no-ext-diff", "--"])
+            .arg(dir.join("expected.normalized"))
+            .arg(dir.join("actual.normalized")),
+        "create normalized oracle diff",
+    );
+    let mut normalized_diff = diff.stdout;
+    normalized_diff.extend_from_slice(&diff.stderr);
+    fs::write(dir.join("normalized.diff"), &normalized_diff)
+        .expect("write normalized diff artifact");
+
     panic!(
-        "{case}: {reason}; raw artifacts retained at {}",
-        dir.display()
+        "{case}: {reason}; artifacts retained at {}\nnormalized diff:\n{}",
+        dir.display(),
+        String::from_utf8_lossy(&normalized_diff)
     );
 }
 
