@@ -521,23 +521,45 @@ fn assert_stable(case: &str, first: &Output, second: &Output) {
     }
 }
 
-fn strip_help_trailing_whitespace(bytes: &[u8]) -> Result<Vec<u8>, String> {
+fn normalize_help(bytes: &[u8], binary_name: &str) -> Result<Vec<u8>, String> {
     let normalized = normalize_text_line_endings(bytes);
     let text = std::str::from_utf8(&normalized).map_err(|error| error.to_string())?;
+    let windows_name = format!("{binary_name}.exe");
+    let usage_name = format!("Usage: {windows_name}");
+    let usage_continuation = format!("       {windows_name}");
     Ok(text
         .split('\n')
-        .map(|line| line.trim_end_matches([' ', '\t']))
+        .map(|line| {
+            let line = line.trim_end_matches([' ', '\t']);
+            if let Some(suffix) = line.strip_prefix(&usage_name)
+                && (suffix.is_empty() || suffix.starts_with(' '))
+            {
+                return format!("Usage: {binary_name}{suffix}");
+            }
+            if let Some(suffix) = line.strip_prefix(&usage_continuation)
+                && (suffix.is_empty() || suffix.starts_with(' '))
+            {
+                return format!("       {binary_name}{suffix}");
+            }
+            line.to_owned()
+        })
         .collect::<Vec<_>>()
         .join("\n")
         .into_bytes())
 }
 
-fn assert_help(case: &str, golden: &[u8], reference: &Output, candidate: &Output) {
+fn assert_help(
+    case: &str,
+    binary_name: &str,
+    golden: &[u8],
+    reference: &Output,
+    candidate: &Output,
+) {
     assert_process(&format!("{case}-reference"), reference, 0);
     assert_process(&format!("{case}-candidate"), candidate, 0);
-    let golden = strip_help_trailing_whitespace(golden)
+    let golden = normalize_help(golden, binary_name)
         .unwrap_or_else(|error| panic!("{case}: invalid golden help: {error}"));
-    let reference_help = strip_help_trailing_whitespace(&reference.stdout)
+    let reference_help = normalize_help(&reference.stdout, binary_name)
         .unwrap_or_else(|error| panic!("{case}: invalid reference help: {error}"));
     if reference_help != golden {
         fail_comparison(
@@ -552,7 +574,7 @@ fn assert_help(case: &str, golden: &[u8], reference: &Output, candidate: &Output
         );
     }
 
-    let candidate_help = strip_help_trailing_whitespace(&candidate.stdout)
+    let candidate_help = normalize_help(&candidate.stdout, binary_name)
         .unwrap_or_else(|error| panic!("{case}: invalid candidate help: {error}"));
     if candidate_help != golden {
         fail_comparison(
@@ -731,7 +753,13 @@ fn check_cli_inventory(oracle: &Path, reference: &ReferenceBuild) {
             let candidate_output = isolated_run(candidate_binary, &args, None);
             let golden = fs::read(oracle.join("golden").join(format!("{case}.stdout")))
                 .expect("help capture should be readable");
-            assert_help(&case, &golden, &reference_output, &candidate_output);
+            assert_help(
+                &case,
+                binary_name,
+                &golden,
+                &reference_output,
+                &candidate_output,
+            );
         }
     }
 
@@ -1063,6 +1091,15 @@ fn check_cache_modes(oracle: &Path, reference: &ReferenceBuild) {
 
 #[test]
 fn explicit_v1_compatibility() {
+    assert_eq!(
+        normalize_help(
+            b"Usage: siloscan.exe [OPTIONS]\r\n       siloscan.exe <COMMAND>\r\n",
+            "siloscan",
+        )
+        .expect("Windows help sample should normalize"),
+        b"Usage: siloscan [OPTIONS]\n       siloscan <COMMAND>\n"
+    );
+
     let oracle = oracle_root();
     verify_oracle_bundle(&oracle);
 
