@@ -1,0 +1,2020 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Siloscan v2 ResolvedScanPlan contract prototype</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #0b0d10;
+      --panel: #11151a;
+      --panel-2: #171c22;
+      --panel-3: #1d242c;
+      --line: #2b343e;
+      --text: #f4f1e8;
+      --muted: #a5adb6;
+      --accent: #d8ff66;
+      --accent-2: #69d5ff;
+      --good: #78e08f;
+      --warn: #ffc857;
+      --bad: #ff7a90;
+      --violet: #c5a3ff;
+      --shadow: 0 18px 60px rgba(0, 0, 0, .32);
+      --radius: 18px;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html {
+      scroll-behavior: smooth;
+    }
+
+    body {
+      margin: 0;
+      background:
+        radial-gradient(circle at 8% -10%, rgba(105, 213, 255, .12), transparent 30rem),
+        radial-gradient(circle at 92% 10%, rgba(216, 255, 102, .10), transparent 28rem),
+        var(--bg);
+      color: var(--text);
+      font: 15px/1.55 Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    a {
+      color: var(--accent-2);
+    }
+
+    button,
+    input,
+    select {
+      font: inherit;
+    }
+
+    button,
+    select,
+    input[type="text"] {
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: #0e1216;
+      color: var(--text);
+    }
+
+    button {
+      min-height: 40px;
+      padding: 8px 13px;
+      cursor: pointer;
+      transition: border-color .15s ease, transform .15s ease, background .15s ease;
+    }
+
+    button:hover {
+      border-color: var(--accent);
+      transform: translateY(-1px);
+    }
+
+    button:focus-visible,
+    input:focus-visible,
+    select:focus-visible {
+      outline: 3px solid rgba(105, 213, 255, .32);
+      outline-offset: 2px;
+    }
+
+    code,
+    pre {
+      font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+    }
+
+    code {
+      color: #dfffa1;
+    }
+
+    pre {
+      margin: 0;
+      overflow: auto;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: #090c0f;
+      padding: 17px;
+      color: #dce5ed;
+      line-height: 1.55;
+      tab-size: 4;
+    }
+
+    .shell {
+      width: min(1480px, calc(100% - 32px));
+      margin: 0 auto;
+    }
+
+    .topbar {
+      position: sticky;
+      z-index: 20;
+      top: 0;
+      border-bottom: 1px solid rgba(255, 255, 255, .08);
+      background: rgba(11, 13, 16, .88);
+      backdrop-filter: blur(14px);
+    }
+
+    .topbar .shell {
+      min-height: 58px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 20px;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 11px;
+      font-weight: 750;
+      letter-spacing: -.01em;
+    }
+
+    .brand-mark {
+      width: 27px;
+      height: 27px;
+      display: grid;
+      place-items: center;
+      border: 1px solid rgba(216, 255, 102, .55);
+      border-radius: 8px;
+      background: rgba(216, 255, 102, .08);
+      color: var(--accent);
+      font: 700 13px/1 "SFMono-Regular", Consolas, monospace;
+    }
+
+    .nav {
+      display: flex;
+      align-items: center;
+      gap: 18px;
+      font-size: 13px;
+    }
+
+    .nav a {
+      color: var(--muted);
+      text-decoration: none;
+    }
+
+    .nav a:hover {
+      color: var(--text);
+    }
+
+    .hero {
+      padding: 76px 0 42px;
+    }
+
+    .eyebrow {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      border: 1px solid rgba(216, 255, 102, .25);
+      border-radius: 999px;
+      background: rgba(216, 255, 102, .07);
+      padding: 6px 10px;
+      color: var(--accent);
+      font: 700 12px/1.2 "SFMono-Regular", Consolas, monospace;
+      letter-spacing: .04em;
+      text-transform: uppercase;
+    }
+
+    .eyebrow::before {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--accent);
+      content: "";
+      box-shadow: 0 0 14px rgba(216, 255, 102, .75);
+    }
+
+    h1 {
+      max-width: 1050px;
+      margin: 24px 0 18px;
+      font-size: clamp(42px, 7vw, 86px);
+      line-height: .98;
+      letter-spacing: -.055em;
+    }
+
+    .hero-copy {
+      max-width: 850px;
+      margin: 0;
+      color: #c2c9d0;
+      font-size: clamp(17px, 2vw, 22px);
+      line-height: 1.5;
+    }
+
+    .decision {
+      margin-top: 34px;
+      display: grid;
+      grid-template-columns: 1.25fr .75fr;
+      gap: 1px;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--line);
+      box-shadow: var(--shadow);
+    }
+
+    .decision > div {
+      background: linear-gradient(135deg, #151a20, #101419);
+      padding: 27px;
+    }
+
+    .decision h2 {
+      margin: 0 0 8px;
+      font-size: 20px;
+      letter-spacing: -.02em;
+    }
+
+    .decision p {
+      margin: 0;
+      color: var(--muted);
+    }
+
+    .answer {
+      color: var(--accent);
+      font-size: 22px;
+      font-weight: 780;
+      letter-spacing: -.025em;
+    }
+
+    .decision-list {
+      margin: 14px 0 0;
+      padding: 0;
+      list-style: none;
+    }
+
+    .decision-list li {
+      display: flex;
+      gap: 9px;
+      margin-top: 8px;
+      color: #cbd2d8;
+    }
+
+    .decision-list li::before {
+      color: var(--accent);
+      content: "→";
+    }
+
+    section {
+      padding: 42px 0;
+    }
+
+    .section-head {
+      max-width: 780px;
+      margin-bottom: 22px;
+    }
+
+    .kicker {
+      color: var(--accent-2);
+      font: 700 12px/1.2 "SFMono-Regular", Consolas, monospace;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+    }
+
+    h2 {
+      margin: 9px 0 8px;
+      font-size: clamp(27px, 4vw, 42px);
+      line-height: 1.12;
+      letter-spacing: -.035em;
+    }
+
+    h3 {
+      margin: 0 0 8px;
+      font-size: 18px;
+      letter-spacing: -.015em;
+    }
+
+    .section-head p,
+    .muted {
+      color: var(--muted);
+    }
+
+    .flow {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(0, 1fr));
+      gap: 10px;
+    }
+
+    .flow-card {
+      position: relative;
+      min-height: 176px;
+      border: 1px solid var(--line);
+      border-radius: 15px;
+      background: var(--panel);
+      padding: 17px;
+    }
+
+    .flow-card:not(:last-child)::after {
+      position: absolute;
+      z-index: 2;
+      top: 50%;
+      right: -16px;
+      width: 20px;
+      color: var(--accent);
+      content: "→";
+      text-align: center;
+    }
+
+    .step {
+      margin-bottom: 17px;
+      color: var(--accent);
+      font: 700 12px/1 "SFMono-Regular", Consolas, monospace;
+    }
+
+    .flow-card p {
+      margin: 8px 0 0;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .grid-2 {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+      gap: 18px;
+    }
+
+    .card {
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--panel);
+      padding: 22px;
+      box-shadow: 0 10px 40px rgba(0, 0, 0, .14);
+    }
+
+    .card p:last-child {
+      margin-bottom: 0;
+    }
+
+    .callout {
+      border-left: 3px solid var(--accent);
+      background: rgba(216, 255, 102, .06);
+    }
+
+    .lab {
+      display: grid;
+      grid-template-columns: 390px minmax(0, 1fr);
+      gap: 18px;
+      align-items: start;
+    }
+
+    .controls {
+      position: sticky;
+      top: 78px;
+    }
+
+    .control-group {
+      margin-top: 18px;
+    }
+
+    .control-group:first-of-type {
+      margin-top: 0;
+    }
+
+    .control-label {
+      display: block;
+      margin-bottom: 7px;
+      color: #d8dde2;
+      font-size: 13px;
+      font-weight: 700;
+    }
+
+    select,
+    input[type="text"] {
+      width: 100%;
+      min-height: 42px;
+      padding: 8px 11px;
+    }
+
+    .choice-row {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+    }
+
+    .choice {
+      position: relative;
+    }
+
+    .choice input {
+      position: absolute;
+      opacity: 0;
+      pointer-events: none;
+    }
+
+    .choice span {
+      min-height: 42px;
+      display: grid;
+      place-items: center;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: #0e1216;
+      color: var(--muted);
+      cursor: pointer;
+    }
+
+    .choice input:checked + span {
+      border-color: var(--accent);
+      background: rgba(216, 255, 102, .08);
+      color: var(--text);
+    }
+
+    .choice input:focus-visible + span {
+      outline: 3px solid rgba(105, 213, 255, .32);
+      outline-offset: 2px;
+    }
+
+    .switch-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 18px;
+      min-height: 42px;
+      margin-top: 8px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: #0e1216;
+      padding: 8px 11px;
+    }
+
+    .switch-row label {
+      cursor: pointer;
+    }
+
+    input[type="checkbox"] {
+      width: 18px;
+      height: 18px;
+      accent-color: var(--accent);
+    }
+
+    .guide {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 18px;
+    }
+
+    .guide button {
+      flex: 1 1 135px;
+      font-size: 13px;
+    }
+
+    .primary {
+      border-color: rgba(216, 255, 102, .55);
+      background: var(--accent);
+      color: #111607;
+      font-weight: 800;
+    }
+
+    .output {
+      min-width: 0;
+    }
+
+    .output-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+    }
+
+    .state-card {
+      min-width: 0;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: var(--panel-2);
+      padding: 16px;
+    }
+
+    .state-card.wide {
+      grid-column: 1 / -1;
+    }
+
+    .state-title {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      margin-bottom: 13px;
+    }
+
+    .state-title h3 {
+      margin: 0;
+    }
+
+    .tag {
+      display: inline-flex;
+      align-items: center;
+      border: 1px solid currentColor;
+      border-radius: 999px;
+      padding: 3px 7px;
+      font: 700 10px/1.2 "SFMono-Regular", Consolas, monospace;
+      text-transform: uppercase;
+    }
+
+    .tag.good { color: var(--good); }
+    .tag.warn { color: var(--warn); }
+    .tag.bad { color: var(--bad); }
+    .tag.info { color: var(--accent-2); }
+    .tag.violet { color: var(--violet); }
+
+    .kv {
+      display: grid;
+      grid-template-columns: minmax(110px, .8fr) minmax(0, 1.6fr);
+      gap: 8px 13px;
+      margin: 0;
+      font-size: 13px;
+    }
+
+    .kv dt {
+      color: var(--muted);
+    }
+
+    .kv dd {
+      min-width: 0;
+      margin: 0;
+      overflow-wrap: anywhere;
+      color: #e4e9ed;
+    }
+
+    .trace {
+      position: relative;
+      display: grid;
+      grid-template-columns: repeat(6, minmax(0, 1fr));
+      gap: 7px;
+    }
+
+    .trace::before {
+      position: absolute;
+      top: 15px;
+      right: 5%;
+      left: 5%;
+      height: 1px;
+      background: var(--line);
+      content: "";
+    }
+
+    .trace-item {
+      position: relative;
+      z-index: 1;
+      text-align: center;
+    }
+
+    .trace-dot {
+      width: 31px;
+      height: 31px;
+      display: grid;
+      place-items: center;
+      margin: 0 auto 8px;
+      border: 1px solid var(--accent);
+      border-radius: 50%;
+      background: #101419;
+      color: var(--accent);
+      font: 700 11px/1 "SFMono-Regular", Consolas, monospace;
+    }
+
+    .trace-item strong {
+      display: block;
+      font-size: 12px;
+    }
+
+    .trace-item span {
+      display: block;
+      margin-top: 3px;
+      color: var(--muted);
+      font-size: 11px;
+    }
+
+    .evidence-list,
+    .capability-list {
+      display: grid;
+      gap: 8px;
+    }
+
+    .evidence-row,
+    .capability-row {
+      display: grid;
+      grid-template-columns: minmax(115px, .65fr) minmax(90px, .45fr) minmax(0, 1.8fr);
+      gap: 10px;
+      align-items: start;
+      border-top: 1px solid var(--line);
+      padding-top: 9px;
+      font-size: 12px;
+    }
+
+    .evidence-row:first-child,
+    .capability-row:first-child {
+      border-top: 0;
+      padding-top: 0;
+    }
+
+    .status-text {
+      font-family: "SFMono-Regular", Consolas, monospace;
+    }
+
+    .status-text.enabled,
+    .status-text.complete { color: var(--good); }
+    .status-text.partial,
+    .status-text.skipped { color: var(--warn); }
+    .status-text.invalid,
+    .status-text.unavailable { color: var(--bad); }
+    .status-text.not-configured { color: var(--muted); }
+
+    .warning-box {
+      margin-top: 12px;
+      border: 1px solid rgba(255, 200, 87, .38);
+      border-radius: 11px;
+      background: rgba(255, 200, 87, .07);
+      padding: 11px 13px;
+      color: #f3d99b;
+      font-size: 13px;
+    }
+
+    .table-wrap {
+      overflow-x: auto;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--panel);
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      text-align: left;
+      font-size: 13px;
+    }
+
+    th,
+    td {
+      border-bottom: 1px solid var(--line);
+      padding: 13px 15px;
+      vertical-align: top;
+    }
+
+    th {
+      background: var(--panel-2);
+      color: var(--muted);
+      font-size: 11px;
+      letter-spacing: .06em;
+      text-transform: uppercase;
+    }
+
+    tr:last-child td {
+      border-bottom: 0;
+    }
+
+    .recommended-row td {
+      background: rgba(216, 255, 102, .045);
+    }
+
+    .verdict {
+      font-weight: 800;
+    }
+
+    .verdict.good { color: var(--good); }
+    .verdict.bad { color: var(--bad); }
+
+    .checks {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 12px;
+    }
+
+    .check {
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: var(--panel);
+      padding: 17px;
+    }
+
+    .check strong {
+      display: block;
+      margin-bottom: 5px;
+    }
+
+    .check span {
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .review {
+      margin: 45px 0 80px;
+      border: 1px solid rgba(105, 213, 255, .32);
+      border-radius: var(--radius);
+      background: linear-gradient(135deg, rgba(105, 213, 255, .09), rgba(216, 255, 102, .06));
+      padding: 28px;
+    }
+
+    .review p {
+      max-width: 780px;
+      color: #cbd3da;
+    }
+
+    .review code {
+      display: inline-block;
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      background: #0b0f12;
+      padding: 3px 7px;
+    }
+
+    footer {
+      border-top: 1px solid var(--line);
+      padding: 22px 0 40px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    @media (max-width: 1080px) {
+      .flow {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+
+      .flow-card:not(:last-child)::after {
+        display: none;
+      }
+
+      .lab {
+        grid-template-columns: 1fr;
+      }
+
+      .controls {
+        position: static;
+      }
+    }
+
+    @media (max-width: 760px) {
+      .shell {
+        width: min(100% - 22px, 1480px);
+      }
+
+      .nav {
+        display: none;
+      }
+
+      .hero {
+        padding-top: 54px;
+      }
+
+      .decision,
+      .grid-2,
+      .output-grid,
+      .checks,
+      .flow {
+        grid-template-columns: 1fr;
+      }
+
+      .trace {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        row-gap: 16px;
+      }
+
+      .trace::before {
+        display: none;
+      }
+
+      .evidence-row,
+      .capability-row {
+        grid-template-columns: 1fr;
+        gap: 3px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <header class="topbar">
+    <div class="shell">
+      <div class="brand">
+        <span class="brand-mark">SS</span>
+        <span>Siloscan v2 contract lab</span>
+      </div>
+      <nav class="nav" aria-label="Prototype sections">
+        <a href="#seam">Seam</a>
+        <a href="#contract">Rust API</a>
+        <a href="#lab">Scenario lab</a>
+        <a href="#precedence">Precedence</a>
+        <a href="#decision">Decision</a>
+      </nav>
+    </div>
+  </header>
+
+  <main>
+    <div class="shell hero">
+      <span class="eyebrow">Wayfinder prototype · review artifact</span>
+      <h1>One scan plan.<br>One admitted inventory.</h1>
+      <p class="hero-copy">
+        A concrete Rust ownership seam for zero-config detection without moving policy into the CLI,
+        duplicating setup in the TUI, walking twice, or changing the existing engine contracts.
+      </p>
+
+      <div class="decision" aria-label="Recommended design">
+        <div>
+          <h2>The recommendation</h2>
+          <div class="answer">Public, opaque <code>ResolvedScanPlan</code> in <code>siloscan-core</code>.</div>
+          <ul class="decision-list">
+            <li>Private fields, no serialization, no public struct literal.</li>
+            <li>Own loaded setup; derive borrowed <code>ScanOptions</code> only while executing.</li>
+            <li>Move one prepared inventory into the existing engines.</li>
+            <li>Return a resolved-report wrapper, leaving public <code>ScanReport</code> source-compatible.</li>
+          </ul>
+        </div>
+        <div>
+          <h2>Why it must be public</h2>
+          <p>
+            The CLI and TUI are separately published crates. Rust has no workspace-private visibility.
+            <code>#[doc(hidden)]</code> is still public API, and a session wrapper merely gives the same
+            contract another name.
+          </p>
+        </div>
+      </div>
+    </div>
+
+    <section id="seam">
+      <div class="shell">
+        <div class="section-head">
+          <span class="kicker">Owning seam</span>
+          <h2>Resolution happens once, at the core boundary.</h2>
+          <p>
+            The CLI keeps arguments, persistence, presentation, and exit status. The TUI keeps terminal
+            behavior. Core becomes the only owner of config, rules, baseline, cache, detection, and scan inputs.
+          </p>
+        </div>
+
+        <div class="flow" aria-label="Resolved scan flow">
+          <article class="flow-card">
+            <div class="step">01 · REQUEST</div>
+            <h3>Preserve intent</h3>
+            <p>Exact requested path plus whether PATH was omitted. Explicit overrides remain distinguishable.</p>
+          </article>
+          <article class="flow-card">
+            <div class="step">02 · STATIC SETUP</div>
+            <h3>Load stronger inputs</h3>
+            <p>Config, anchoring, walk policy, baseline source, coverage source, and cache location.</p>
+          </article>
+          <article class="flow-card">
+            <div class="step">03 · INVENTORY</div>
+            <h3>Walk once</h3>
+            <p>Use current ignore and symlink rules. Remove the cache-owned path before detection.</p>
+          </article>
+          <article class="flow-card">
+            <div class="step">04 · RESOLVE</div>
+            <h3>Detect and freeze</h3>
+            <p>Project facts, additive profile selection, final rules, cache key, evidence, and capabilities.</p>
+          </article>
+          <article class="flow-card">
+            <div class="step">05 · EXECUTE</div>
+            <h3>Reuse engines</h3>
+            <p>Build temporary <code>ScanOptions</code> and move the admitted inventory into the existing scanner.</p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section id="contract">
+      <div class="shell">
+        <div class="section-head">
+          <span class="kicker">Concrete Rust contract</span>
+          <h2>A small public surface, not a public data dump.</h2>
+          <p>
+            The executable plan is opaque. The serialized explanation is a separate deterministic value.
+            This keeps parser internals and runtime handles out of semver and out of reports.
+          </p>
+        </div>
+
+        <div class="grid-2">
+          <article class="card">
+            <h3>Public interface</h3>
+            <pre><code>#[derive(Debug, Clone)]
+pub struct ScanRequest {
+    inner: Arc&lt;ScanRequestInner&gt;, // private
+}
+
+impl ScanRequest {
+    pub fn automatic() -&gt; Self; // root is exactly "."
+    pub fn explicit(root: impl Into&lt;PathBuf&gt;) -&gt; Self;
+    pub fn with_config(self, path: PathBuf) -&gt; Self;
+    pub fn with_rule_dirs(self, dirs: Vec&lt;PathBuf&gt;) -&gt; Self;
+    pub fn without_embedded_rules(self) -&gt; Self;
+    pub fn with_baseline(self, path: PathBuf) -&gt; Self;
+    pub fn with_coverage(self, path: PathBuf) -&gt; Self;
+    pub fn without_cache(self) -&gt; Self;
+    pub fn with_cache_dir(self, path: PathBuf) -&gt; Self;
+    pub fn with_ignore_options(
+        self,
+        value: IgnoreOptions,
+    ) -&gt; Self;
+    pub fn following_symlinks(self) -&gt; Self;
+}
+
+pub struct ResolvedScanPlan {
+    inner: ResolvedScanPlanInner, // private
+}
+
+impl ResolvedScanPlan {
+    pub fn resolve(request: &ScanRequest)
+        -&gt; Result&lt;Self, ResolveError&gt;;
+
+    pub fn execute(
+        self,
+        progress: &mut dyn FnMut(Progress),
+    ) -&gt; Result&lt;ResolvedScanReport, String&gt;;
+}
+
+pub struct ResolveError {
+    message: String, // Display preserves current setup wording
+}</code></pre>
+            <p class="muted">
+              <code>automatic()</code> has no root argument because it represents an omitted positional PATH.
+              Every supplied PATH, including <code>.</code>, uses <code>explicit(PATH)</code>.
+            </p>
+          </article>
+
+          <article class="card">
+            <h3>Owned implementation state</h3>
+            <pre><code>enum InvocationKind { Automatic, Explicit }
+
+enum CacheRequest {
+    Default,
+    Disabled,
+    Directory(PathBuf),
+}
+
+struct ScanRequestInner {
+    root: PathBuf,
+    invocation: InvocationKind,
+    config: Option&lt;PathBuf&gt;,
+    rule_dirs: Vec&lt;PathBuf&gt;,
+    no_embedded_rules: bool,
+    baseline: Option&lt;PathBuf&gt;,
+    coverage: Option&lt;PathBuf&gt;,
+    cache: CacheRequest,
+    ignore: IgnoreOptions,
+    follow_symlinks: bool,
+    explicit_overrides: BTreeSet&lt;String&gt;,
+}
+
+struct ResolvedScanPlanInner {
+    request: ScanRequest,
+    root: PathBuf,
+    baseline_root: PathBuf,
+    anchoring: Anchoring,
+    config: Option&lt;Arc&lt;Config&gt;&gt;,
+    rules: Arc&lt;RuleSet&gt;,
+    baseline: Option&lt;Arc&lt;Baseline&gt;&gt;,
+    coverage: Option&lt;Arc&lt;CoverageReport&gt;&gt;,
+    cache: Option&lt;Arc&lt;Cache&gt;&gt;,
+    ignore: IgnoreOptions,
+    follow_symlinks: bool,
+    inventory: WalkResult,
+    setup: ScanSetupReport,
+}
+
+pub struct ResolvedScanReport {
+    pub scan: ScanReport,         // unchanged v1 type
+    pub setup: ScanSetupReport,   // deterministic facts
+    output: ScanOutputContext,    // opaque runtime view
+}
+
+pub struct ScanOutputContext {
+    root: PathBuf,
+    baseline_root: PathBuf,
+    anchoring: Anchoring,
+    rules: Arc&lt;RuleSet&gt;,
+    config: Option&lt;Arc&lt;Config&gt;&gt;,
+}
+
+impl ResolvedScanReport {
+    pub fn context(&self) -&gt; &ScanOutputContext;
+    pub fn into_parts(self) -&gt; (
+        ScanReport,
+        ScanSetupReport,
+        ScanOutputContext,
+    );
+}
+
+impl ScanOutputContext {
+    pub fn scan_root(&self) -&gt; &Path;
+    pub fn baseline_root(&self) -&gt; &Path;
+    pub fn anchoring(&self) -&gt; &Anchoring;
+    pub fn rules(&self) -&gt; &RuleSet;
+    pub fn config(&self) -&gt; Option&lt;&Config&gt;;
+}</code></pre>
+            <div class="warning-box">
+              <strong>Deliberate boundary:</strong> <code>ScanReport</code> stays unchanged. Adding a field to
+              that currently exhaustive public struct would break external struct literals. The v2 JSON writer
+              appends <code>setup</code>; the Rust embedding API keeps compiling.
+            </div>
+          </article>
+        </div>
+
+        <div class="grid-2" style="margin-top: 18px">
+          <article class="card callout">
+            <h3>Destructure before borrowing</h3>
+            <pre><code>pub fn execute(
+    self,
+    progress: &mut dyn FnMut(Progress),
+) -&gt; Result&lt;ResolvedScanReport, String&gt; {
+    let ResolvedScanPlanInner {
+        request: _, root, baseline_root, anchoring,
+        config, rules, baseline, coverage, cache,
+        ignore, follow_symlinks, inventory, setup,
+    } = self.inner;
+
+    let scan = {
+        let mut options = ScanOptions::default();
+        options.baseline = baseline.as_deref();
+        options.cache = cache.as_deref();
+        options.config = config.as_deref();
+        options.coverage = coverage.as_deref();
+        options.ignore = ignore;
+        options.follow_symlinks = follow_symlinks;
+
+        scan_prepared(
+            &root, &rules, &options, inventory,
+            &anchoring, progress,
+        )?
+    }; // all temporary borrows end here
+
+    let output = ScanOutputContext {
+        root, baseline_root, anchoring, rules, config,
+    };
+    Ok(ResolvedScanReport { scan, setup, output })
+}</code></pre>
+            <p class="muted">
+              The plan never stores <code>ScanOptions</code>. Destructuring first makes the inventory an
+              independent owned local; the temporary options borrow only sibling locals and are dropped before
+              those values move into the output context.
+            </p>
+          </article>
+
+          <article class="card">
+            <h3>Private scanner extraction</h3>
+            <pre><code>fn scan_prepared(
+    root: &Path,
+    rules: &RuleSet,
+    options: &ScanOptions&lt;'_&gt;,
+    inventory: WalkResult,
+    anchoring: &Anchoring,
+    progress: &mut dyn FnMut(Progress),
+) -&gt; Result&lt;ScanReport, String&gt;;</code></pre>
+            <p class="muted">
+              Existing <code>scan</code>, <code>scan_with_progress</code>, and <code>scan_opts</code> retain their
+              signatures and behavior. They collect the current inventory and delegate to this private body.
+              No engine API changes.
+            </p>
+          </article>
+        </div>
+
+        <div class="grid-2" style="margin-top: 18px">
+          <article class="card">
+            <h3>Deterministic report view</h3>
+            <pre><code>#[non_exhaustive]
+pub struct ScanSetupReport {
+    pub evidence: Vec&lt;ProjectEvidence&gt;,
+    pub units: Vec&lt;ProjectUnit&gt;,
+    pub workspaces: Vec&lt;WorkspaceRelation&gt;,
+    pub languages: Vec&lt;String&gt;,
+    pub source_roots: Vec&lt;SourceRoot&gt;,
+    pub rule_sources: Vec&lt;RuleSource&gt;,
+    pub capabilities: Vec&lt;CapabilityState&gt;,
+    pub explicit_overrides: Vec&lt;String&gt;,
+}
+
+#[non_exhaustive]
+pub enum EvidenceStatus {
+    Complete,
+    Partial,
+    Invalid,
+}
+
+#[non_exhaustive]
+pub struct ProjectEvidence {
+    pub id: String,
+    pub ecosystem: String,
+    pub kind: String,
+    pub path: String,
+    pub status: EvidenceStatus,
+    pub detector_version: String,
+    pub accepted: Vec&lt;String&gt;,
+    pub unresolved: Vec&lt;String&gt;,
+}
+
+#[non_exhaustive]
+pub struct ProjectUnit {
+    pub ecosystem: String,
+    pub root: String,
+    pub evidence: Vec&lt;String&gt;, // evidence IDs
+}
+
+#[non_exhaustive]
+pub struct WorkspaceRelation {
+    pub kind: String,
+    pub parent: String,
+    pub member: String,
+    pub evidence: String,
+}
+
+#[non_exhaustive]
+pub struct SourceRoot {
+    pub path: String,
+    pub kind: String,
+    pub evidence: String,
+}
+
+#[non_exhaustive]
+pub struct RuleSource {
+    pub id: String,
+    pub origin: String,
+}</code></pre>
+          </article>
+
+          <article class="card">
+            <h3>Capability state cannot go silent</h3>
+            <pre><code>#[non_exhaustive]
+pub enum CapabilityStatus {
+    Enabled,
+    Skipped,
+    Unavailable,
+    NotConfigured,
+}
+
+pub struct CapabilityState {
+    id: String,
+    status: CapabilityStatus,
+    reason: Option&lt;String&gt;,
+}
+
+impl CapabilityState {
+    pub fn enabled(id: impl Into&lt;String&gt;) -&gt; Self;
+
+    pub fn not_enabled(
+        id: impl Into&lt;String&gt;,
+        status: CapabilityStatus,
+        reason: impl Into&lt;String&gt;,
+    ) -&gt; Self;
+
+    pub fn id(&self) -&gt; &str;
+    pub fn status(&self) -&gt; &CapabilityStatus;
+    pub fn reason(&self) -&gt; Option&lt;&str&gt;;
+}</code></pre>
+            <p class="muted">
+              The constructor requires a reason for every non-enabled state, while accessors keep the report
+              inspectable by the TUI and Rust embedders without making its representation public. Final vectors
+              are sorted by normalized relative path, ecosystem, kind, then stable string ID. The JSON writer
+              preserves all existing fields, appends <code>report_kind</code>, <code>scope</code>,
+              <code>outcome</code>, then <code>setup</code>. SARIF stays unchanged.
+            </p>
+            <div class="warning-box">
+              Never serialize the canonical absolute root, working directory, command line, cache path,
+              persistence destination, manifest text, host, or timestamp.
+            </div>
+          </article>
+        </div>
+
+        <div class="grid-2" style="margin-top: 18px">
+          <article class="card">
+            <h3>CLI consumes one plan</h3>
+            <pre><code>let destination = persistence.preflight(&args)?;
+let request = scan_request_from_clap(args);
+
+let mut resolved =
+    ResolvedScanPlan::resolve(&request)?
+        .execute(&mut |_| {})?;
+
+let failed = fails_before_filter(&resolved.scan);
+filter_for_output(&mut resolved.scan);
+render_and_publish(resolved, destination, failed)?;</code></pre>
+            <p class="muted">
+              Scope and destination preflight happens before the expensive walk. Format, filtering,
+              persistence publication, stdout routing, and process exit remain in the CLI.
+            </p>
+          </article>
+
+          <article class="card">
+            <h3>TUI consumes one fresh plan per scan</h3>
+            <pre><code>pub enum ReviewSession {
+    SavedReport { /* no scan request */ },
+    Live { request: ScanRequest },
+}
+
+// Initial scan and every r:
+let request = request.clone();
+thread::spawn(move || {
+    let result = match ResolvedScanPlan::resolve(&request) {
+        Ok(plan) =&gt; plan.execute(&mut send_progress),
+        Err(error) =&gt; Err(error.to_string()),
+    };
+    send_result(result)
+});</code></pre>
+            <p class="muted">
+              The TUI retains only the owned request between scans. It does not reload setup itself.
+              A new immutable plan sees added files, removed files, changed evidence, and the reloaded baseline.
+            </p>
+          </article>
+        </div>
+
+        <div class="grid-2" style="margin-top: 18px">
+          <article class="card">
+            <h3>Existing renderer stays public and unchanged</h3>
+            <pre><code>pub fn to_json(
+    report: &ScanReport,
+    rules: &RuleSet,
+    anchor: Anchor,
+    min_severity: Option&lt;Severity&gt;,
+) -&gt; String;
+
+pub fn to_resolved_json(
+    report: &ScanReport,
+    setup: &ScanSetupReport,
+    context: &ScanOutputContext,
+    scope: &ScopeMetadata,
+    outcome: &OutcomeMetadata,
+    min_severity: Option&lt;Severity&gt;,
+) -&gt; String;</code></pre>
+            <p class="muted">
+              Existing embedders keep <code>output::to_json</code>. The new writer reuses its projection and
+              appends the settled v2 metadata plus <code>setup</code>. Existing SARIF remains unchanged and
+              receives <code>context.rules()</code> and <code>context.anchoring()</code>.
+            </p>
+          </article>
+
+          <article class="card">
+            <h3>Settled writer metadata</h3>
+            <pre><code>#[non_exhaustive]
+pub enum ScopeKind {
+    Directory,
+    File,
+}
+
+pub struct ScopeMetadata {
+    identity: String,
+    kind: ScopeKind,
+    path_base_ancestor_levels: u32,
+}
+
+pub struct OutcomeMetadata {
+    fail_on: Severity,
+    threshold_reached: bool,
+}
+
+impl ScopeMetadata {
+    pub fn new(
+        identity: String,
+        kind: ScopeKind,
+        ancestor_levels: u32,
+    ) -&gt; Self;
+}
+
+impl OutcomeMetadata {
+    pub fn new(
+        fail_on: Severity,
+        threshold_reached: bool,
+    ) -&gt; Self;
+}</code></pre>
+            <p class="muted">
+              The CLI supplies these after applying the already-settled persistence and fail-before-filter
+              contracts. The TUI calls <code>into_parts()</code>, keeps the opaque output context for effective
+              rules and config, and gives the unchanged inner <code>ScanReport</code> to its current row model.
+            </p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section id="lab">
+      <div class="shell">
+        <div class="section-head">
+          <span class="kicker">Interactive contract model</span>
+          <h2>Change the request. Watch ownership and precedence resolve.</h2>
+          <p>
+            This models the proposed contract, not production scan output. The later profile-policy ticket owns
+            exact embedded profile names and human summary wording.
+          </p>
+        </div>
+
+        <div class="lab">
+          <aside class="card controls" aria-label="Prototype controls">
+            <div class="control-group">
+              <label class="control-label" for="scenario">Project evidence</label>
+              <select id="scenario">
+                <option value="rust">Rust workspace</option>
+                <option value="polyglot">Mixed Rust + JavaScript + Python</option>
+                <option value="partial">Valid Cargo + malformed package.json</option>
+                <option value="generic">Generic source tree</option>
+              </select>
+            </div>
+
+            <fieldset class="control-group" style="border:0;padding:0;margin-inline:0">
+              <legend class="control-label">PATH provenance</legend>
+              <div class="choice-row">
+                <label class="choice">
+                  <input type="radio" name="invocation" value="automatic" checked>
+                  <span>PATH omitted</span>
+                </label>
+                <label class="choice">
+                  <input type="radio" name="invocation" value="explicit">
+                  <span>PATH explicit</span>
+                </label>
+              </div>
+            </fieldset>
+
+            <div class="control-group">
+              <label class="control-label" for="root">Requested scan root</label>
+              <input id="root" type="text" value="." spellcheck="false">
+              <span class="muted">Fixed to <code>.</code> when PATH is omitted.</span>
+            </div>
+
+            <div class="control-group">
+              <label class="control-label" for="config">Config source</label>
+              <select id="config">
+                <option value="discovered">Bounded discovery</option>
+                <option value="explicit">Explicit --config</option>
+                <option value="none">No config</option>
+                <option value="invalid">Malformed config</option>
+              </select>
+            </div>
+
+            <div class="control-group">
+              <label class="control-label" for="cache">Cache request</label>
+              <select id="cache">
+                <option value="default">Current platform default</option>
+                <option value="custom">Explicit --cache-dir</option>
+                <option value="disabled">Explicit --no-cache</option>
+              </select>
+            </div>
+
+            <div class="control-group">
+              <label class="control-label" for="ignore">Walk policy</label>
+              <select id="ignore">
+                <option value="self-contained">Current self-contained default</option>
+                <option value="all-files">Explicit --no-ignore</option>
+                <option value="parent">Explicit parent ignore sources</option>
+              </select>
+            </div>
+
+            <div class="control-group">
+              <div class="switch-row">
+                <label for="defaults">Embedded default pack</label>
+                <input id="defaults" type="checkbox" checked>
+              </div>
+              <div class="switch-row">
+                <label for="rules">Explicit rule directory</label>
+                <input id="rules" type="checkbox">
+              </div>
+              <div class="switch-row">
+                <label for="baseline">Explicit baseline file</label>
+                <input id="baseline" type="checkbox">
+              </div>
+              <div class="switch-row">
+                <label for="coverage">Explicit coverage report</label>
+                <input id="coverage" type="checkbox">
+              </div>
+              <div class="switch-row">
+                <label for="symlinks">Follow in-root symlinks</label>
+                <input id="symlinks" type="checkbox">
+              </div>
+              <div class="switch-row">
+                <label for="scan-options">Any CLI scan option supplied</label>
+                <input id="scan-options" type="checkbox">
+              </div>
+            </div>
+
+            <div class="guide" aria-label="Guided scenarios">
+              <button type="button" data-guide="auto">Bare Cargo</button>
+              <button type="button" data-guide="explicit">Explicit parity</button>
+              <button type="button" data-guide="partial">Partial evidence</button>
+              <button type="button" data-guide="polyglot">Mixed repo</button>
+            </div>
+            <button id="rescan" class="primary" type="button" style="width:100%;margin-top:10px">
+              Simulate TUI rescan
+            </button>
+          </aside>
+
+          <div class="output" aria-live="polite">
+            <div class="output-grid">
+              <article class="state-card wide">
+                <div class="state-title">
+                  <h3>Execution trace</h3>
+                  <span class="tag good" id="walk-count">one walk</span>
+                </div>
+                <div class="trace">
+                  <div class="trace-item">
+                    <div class="trace-dot">1</div>
+                    <strong>Validate</strong>
+                    <span>exact scope</span>
+                  </div>
+                  <div class="trace-item">
+                    <div class="trace-dot">2</div>
+                    <strong>Load</strong>
+                    <span>strong inputs</span>
+                  </div>
+                  <div class="trace-item">
+                    <div class="trace-dot">3</div>
+                    <strong>Walk</strong>
+                    <span id="file-count">148 paths</span>
+                  </div>
+                  <div class="trace-item">
+                    <div class="trace-dot">4</div>
+                    <strong>Detect</strong>
+                    <span>same inventory</span>
+                  </div>
+                  <div class="trace-item">
+                    <div class="trace-dot">5</div>
+                    <strong>Freeze</strong>
+                    <span>final rule key</span>
+                  </div>
+                  <div class="trace-item">
+                    <div class="trace-dot">6</div>
+                    <strong>Execute</strong>
+                    <span>current engines</span>
+                  </div>
+                </div>
+                <div id="fatal" class="warning-box" hidden></div>
+              </article>
+
+              <article class="state-card">
+                <div class="state-title">
+                  <h3>Resolved ownership</h3>
+                  <span class="tag info">core</span>
+                </div>
+                <dl class="kv" id="ownership"></dl>
+              </article>
+
+              <article class="state-card">
+                <div class="state-title">
+                  <h3>Caller behavior</h3>
+                  <span class="tag violet">front ends</span>
+                </div>
+                <dl class="kv" id="callers"></dl>
+              </article>
+
+              <article class="state-card">
+                <div class="state-title">
+                  <h3>Project evidence</h3>
+                  <span class="tag info" id="project-kind">rust</span>
+                </div>
+                <div class="evidence-list" id="evidence"></div>
+              </article>
+
+              <article class="state-card">
+                <div class="state-title">
+                  <h3>Capabilities</h3>
+                  <span class="tag good">explained</span>
+                </div>
+                <div class="capability-list" id="capabilities"></div>
+              </article>
+
+              <article class="state-card wide">
+                <div class="state-title">
+                  <h3>Ephemeral <code>ScanOptions</code></h3>
+                  <span class="tag good">derived, not stored</span>
+                </div>
+                <pre><code id="options-code"></code></pre>
+              </article>
+
+              <article class="state-card wide">
+                <div class="state-title">
+                  <h3>Resolved report carrier</h3>
+                  <span class="tag good">no source break</span>
+                </div>
+                <pre><code id="report-code"></code></pre>
+              </article>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="precedence">
+      <div class="shell">
+        <div class="section-head">
+          <span class="kicker">Field-by-field precedence</span>
+          <h2>Detection fills gaps. It never becomes policy.</h2>
+          <p>
+            Explicit inputs and current config semantics stay authoritative. Project evidence adds facts and,
+            only on the omitted-PATH journey, may enable low-noise embedded profiles chosen by the next ticket.
+          </p>
+        </div>
+
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Resolved field</th>
+                <th>Precedence</th>
+                <th>Hard boundary</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Scan root</td>
+                <td>Exact PATH, otherwise <code>.</code></td>
+                <td>Never promote to Git, manifest, workspace, or common root.</td>
+              </tr>
+              <tr>
+                <td>Config</td>
+                <td>Explicit file → current bounded discovery and owning-root include logic → none</td>
+                <td>Malformed Siloscan config remains fatal.</td>
+              </tr>
+              <tr>
+                <td>Anchor, silos, limits, source roots</td>
+                <td>Loaded config → current defaults</td>
+                <td>Detected hints do not rewrite config or invent architecture.</td>
+              </tr>
+              <tr>
+                <td>Language mapping</td>
+                <td>Working config mapping → current extension inference</td>
+                <td>The currently inert config field is not reported as active until wired or rejected.</td>
+              </tr>
+              <tr>
+                <td>Embedded rules</td>
+                <td>Current default pack → automatic-journey detected profiles</td>
+                <td><code>--no-default-rules</code> disables both groups.</td>
+              </tr>
+              <tr>
+                <td>Rule directories</td>
+                <td>Explicit directories → config directories</td>
+                <td>Current load order and duplicate-ID refusal remain.</td>
+              </tr>
+              <tr>
+                <td>Detected profiles</td>
+                <td>Eligible only when PATH was omitted</td>
+                <td>Explicit-path scans record metadata but cannot change findings.</td>
+              </tr>
+              <tr>
+                <td>Baseline</td>
+                <td>Explicit file → current anchor-aware default → absent</td>
+                <td>Detection cannot create, relocate, or accept a baseline.</td>
+              </tr>
+              <tr>
+                <td>Coverage</td>
+                <td>Explicit report only</td>
+                <td>Detection cannot invent coverage data or thresholds.</td>
+              </tr>
+              <tr>
+                <td>Cache</td>
+                <td>Disable → explicit directory → current platform default</td>
+                <td>Exclude location before detection; bind key after final rules.</td>
+              </tr>
+              <tr>
+                <td>Walk</td>
+                <td>Explicit ignore/symlink flags → current defaults</td>
+                <td>Detector reads the admitted inventory and never traverses again.</td>
+              </tr>
+              <tr>
+                <td>Persistence and output</td>
+                <td>CLI request only</td>
+                <td>Outside the plan. Detection never selects save, format, filter, or exit status.</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <section id="decision">
+      <div class="shell">
+        <div class="section-head">
+          <span class="kicker">Design comparison</span>
+          <h2>Three viable shapes. One has fewer lies.</h2>
+          <p>
+            The comparison is included for auditability. The recommendation is already selected; this is not a
+            request to choose among them.
+          </p>
+        </div>
+
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Shape</th>
+                <th>Strength</th>
+                <th>Cost</th>
+                <th>Verdict</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Public plan with public fields</td>
+                <td>Easy to inspect and construct.</td>
+                <td>Freezes loader state, detector internals, cache ownership, and future fields into semver.</td>
+                <td class="verdict bad">Reject</td>
+              </tr>
+              <tr>
+                <td>Private plan behind public session wrapper</td>
+                <td>Can rename internal plan fields freely.</td>
+                <td>The wrapper exposes the same lifecycle contract under another concept and complicates rescans.</td>
+                <td class="verdict bad">Reject</td>
+              </tr>
+              <tr class="recommended-row">
+                <td><strong>Public opaque plan + resolved report wrapper</strong></td>
+                <td>Honest cross-crate API, one owning value, existing <code>ScanReport</code> remains intact.</td>
+                <td>A small new stable constructor/execution contract.</td>
+                <td class="verdict good">Recommend</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="checks" style="margin-top: 18px">
+          <article class="check">
+            <strong>Compatibility</strong>
+            <span>Legacy scan entry points, fields, findings, fingerprints, outputs, and engine behavior remain.</span>
+          </article>
+          <article class="check">
+            <strong>Fresh TUI rescans</strong>
+            <span>The TUI retains <code>ScanRequest</code> and resolves a new immutable plan for every <code>r</code>.</span>
+          </article>
+          <article class="check">
+            <strong>Performance</strong>
+            <span>One walk, one inventory, no report clone, no per-unit scan, and final cache binding only once.</span>
+          </article>
+          <article class="check">
+            <strong>Determinism</strong>
+            <span>Sorted relative facts, stable status strings, reasons for every non-enabled capability.</span>
+          </article>
+          <article class="check">
+            <strong>Persistence sequencing</strong>
+            <span>CLI preflights scope and destination before the expensive resolve-and-scan phase.</span>
+          </article>
+          <article class="check">
+            <strong>Stop gate</strong>
+            <span>No implementation accepted above 5% repeated cold, warm, or peak-RSS regression.</span>
+          </article>
+        </div>
+
+        <div class="review">
+          <span class="kicker">Required review point</span>
+          <h2>Concrete reaction needed</h2>
+          <p>
+            Approving this artifact fixes the seam for the downstream summary/profile prototype:
+            public opaque <code>ResolvedScanPlan</code>, one prepared inventory, ephemeral
+            <code>ScanOptions</code>, fresh TUI plan per rescan, and
+            <code>ResolvedScanReport</code> wrapping the unchanged legacy report.
+          </p>
+          <p>
+            Suggested response: <code>approve the ResolvedScanPlan seam</code>, or name the one contract that
+            should change. No production code is changed by this prototype.
+          </p>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <div class="shell">
+      Behavioral reference: Siloscan v1.5.1 at 880d211a463e97eb3c188f957e5592d88f36dcf8.
+      Security hardening is outside this map.
+    </div>
+  </footer>
+
+  <script type="module">
+    const scenarios = {
+      rust: {
+        kind: "Rust workspace",
+        files: 148,
+        languages: ["Rust", "TOML"],
+        units: "3 Cargo packages",
+        evidence: [
+          ["Cargo", "complete", "Cargo.toml · workspace members crates/* resolved"],
+          ["Cargo", "complete", "crates/core/Cargo.toml · package"],
+          ["Cargo", "complete", "crates/cli/Cargo.toml · package"]
+        ]
+      },
+      polyglot: {
+        kind: "Mixed repository",
+        files: 326,
+        languages: ["Rust", "JavaScript", "TypeScript", "Python"],
+        units: "5 units across 3 ecosystems",
+        evidence: [
+          ["Cargo", "complete", "Cargo.toml · workspace with 2 packages"],
+          ["npm", "complete", "web/package.json · static workspace member"],
+          ["TypeScript", "partial", "web/tsconfig.json · JSONC evaluation disabled"],
+          ["Python", "complete", "tools/pyproject.toml · project table"]
+        ]
+      },
+      partial: {
+        kind: "Partial mixed setup",
+        files: 181,
+        languages: ["Rust", "JavaScript"],
+        units: "2 proven Cargo units; JS unit unresolved",
+        evidence: [
+          ["Cargo", "complete", "Cargo.toml · workspace retained"],
+          ["Cargo", "complete", "crates/core/Cargo.toml · package retained"],
+          ["npm", "invalid", "web/package.json · invalid JSON; generic scan still applies"]
+        ]
+      },
+      generic: {
+        kind: "Generic source tree",
+        files: 63,
+        languages: ["C", "Python"],
+        units: "No proven project units",
+        evidence: [
+          ["Generic", "partial", "No supported primary manifest; file-language facts retained"]
+        ]
+      }
+    };
+
+    const el = {
+      scenario: document.querySelector("#scenario"),
+      root: document.querySelector("#root"),
+      config: document.querySelector("#config"),
+      cache: document.querySelector("#cache"),
+      ignore: document.querySelector("#ignore"),
+      defaults: document.querySelector("#defaults"),
+      rules: document.querySelector("#rules"),
+      baseline: document.querySelector("#baseline"),
+      coverage: document.querySelector("#coverage"),
+      symlinks: document.querySelector("#symlinks"),
+      scanOptions: document.querySelector("#scan-options"),
+      ownership: document.querySelector("#ownership"),
+      callers: document.querySelector("#callers"),
+      evidence: document.querySelector("#evidence"),
+      capabilities: document.querySelector("#capabilities"),
+      options: document.querySelector("#options-code"),
+      report: document.querySelector("#report-code"),
+      projectKind: document.querySelector("#project-kind"),
+      fileCount: document.querySelector("#file-count"),
+      walkCount: document.querySelector("#walk-count"),
+      fatal: document.querySelector("#fatal"),
+      rescan: document.querySelector("#rescan")
+    };
+
+    let rescanRevision = 0;
+
+    function invocation() {
+      return document.querySelector("input[name='invocation']:checked").value;
+    }
+
+    function escapeHtml(value) {
+      return String(value)
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;")
+        .replaceAll("'", "&#039;");
+    }
+
+    function rows(items) {
+      return items.map(function (item) {
+        return "<dt>" + escapeHtml(item[0]) + "</dt><dd>" + escapeHtml(item[1]) + "</dd>";
+      }).join("");
+    }
+
+    function evidenceRows(items) {
+      return items.map(function (item) {
+        return [
+          "<div class='evidence-row'>",
+          "<strong>", escapeHtml(item[0]), "</strong>",
+          "<span class='status-text ", escapeHtml(item[1]), "'>", escapeHtml(item[1]), "</span>",
+          "<span class='muted'>", escapeHtml(item[2]), "</span>",
+          "</div>"
+        ].join("");
+      }).join("");
+    }
+
+    function capabilityRows(items) {
+      return items.map(function (item) {
+        return [
+          "<div class='capability-row'>",
+          "<strong>", escapeHtml(item[0]), "</strong>",
+          "<span class='status-text ", escapeHtml(item[1]), "'>", escapeHtml(item[1]), "</span>",
+          "<span class='muted'>", escapeHtml(item[2]), "</span>",
+          "</div>"
+        ].join("");
+      }).join("");
+    }
+
+    function render() {
+      const scenario = scenarios[el.scenario.value];
+      const mode = invocation();
+      const automatic = mode === "automatic";
+      const fatalConfig = el.config.value === "invalid";
+      const defaults = el.defaults.checked;
+      if (automatic) {
+        el.root.value = ".";
+      }
+      el.root.disabled = automatic;
+      const root = automatic ? "." : (el.root.value.trim() || ".");
+      const extraFiles = rescanRevision;
+      const fileTotal = scenario.files + extraFiles;
+
+      const configValue = {
+        discovered: "current bounded discovery",
+        explicit: "explicit --config",
+        none: "none",
+        invalid: "fatal parse error before walk"
+      }[el.config.value];
+
+      const cacheValue = {
+        default: "platform default; exclude before detection",
+        custom: "explicit directory; exclude before detection",
+        disabled: "disabled by caller"
+      }[el.cache.value];
+
+      const walkValue = {
+        "self-contained": "current in-root ignore defaults",
+        "all-files": "explicit all-files policy",
+        parent: "explicit parent ignore sources"
+      }[el.ignore.value];
+
+      const ruleSources = [];
+      if (defaults) {
+        ruleSources.push("current default pack");
+      }
+      if (automatic && defaults) {
+        ruleSources.push("detected-profile slot (exact policy deferred)");
+      }
+      if (el.rules.checked) {
+        ruleSources.push("explicit rule directory");
+      }
+      if (el.config.value === "discovered" || el.config.value === "explicit") {
+        ruleSources.push("config rule directories");
+      }
+      if (ruleSources.length === 0) {
+        ruleSources.push("none → current no-rules refusal");
+      }
+      const noRules = ruleSources[0].startsWith("none");
+      const stopped = fatalConfig || noRules;
+
+      const bare = automatic && root === "." && !el.scanOptions.checked;
+      const saveMode = bare ? "CLI selects automatic latest" : "CLI selects stateless unless --save/--output";
+      const profileMode = !defaults
+        ? "disabled with embedded defaults"
+        : automatic
+          ? "eligible; exact matrix belongs to profile-policy ticket"
+          : "metadata only; explicit findings stay v1-compatible";
+
+      el.fileCount.textContent = stopped ? "not walked" : fileTotal + " admitted paths";
+      el.walkCount.textContent = stopped ? "stopped" : "one walk";
+      el.walkCount.className = "tag " + (stopped ? "bad" : "good");
+      el.projectKind.textContent = scenario.kind;
+      el.projectKind.className = "tag " + (el.scenario.value === "partial" ? "warn" : "info");
+
+      el.ownership.innerHTML = rows([
+        ["Scope", root + " (never promoted)"],
+        ["PATH provenance", automatic ? "omitted" : "explicit"],
+        ["Config", configValue],
+        ["Anchor", el.config.value === "none" ? "scan-root" : "resolved from config"],
+        ["Inventory", fileTotal + " sorted paths, owned once"],
+        ["Languages", scenario.languages.join(", ")],
+        ["Units", scenario.units],
+        ["Rules", ruleSources.join(" → ")],
+        ["Profiles", profileMode],
+        ["Cache", cacheValue],
+        ["Baseline", el.baseline.checked ? "explicit baseline file" : "current anchor-aware optional default"],
+        ["Walk", walkValue + (el.symlinks.checked ? "; follow in-root symlinks" : "; no symlink following")]
+      ]);
+
+      el.callers.innerHTML = rows([
+        ["CLI", "build request → preflight save → resolve → execute → render/publish"],
+        ["TUI live", "retain request; resolve one fresh plan in worker per scan"],
+        ["TUI rescan", "new inventory and baseline on every r" + (rescanRevision ? " · revision " + rescanRevision : "")],
+        ["Snapshot review", "bypasses resolver; reads saved report only"],
+        ["Persistence", saveMode],
+        ["Exit/filter", "CLI-owned; fail-on remains before min-severity"],
+        ["Machine stdout", "one JSON or SARIF document; notices go to stderr"]
+      ]);
+
+      el.evidence.innerHTML = evidenceRows(scenario.evidence);
+
+      const hasConfig = el.config.value === "discovered" || el.config.value === "explicit";
+      const capabilities = [
+        ["Secret engine", defaults ? "enabled" : (el.rules.checked ? "enabled" : "not-configured"), defaults ? "current embedded secret rules retained" : "depends on caller rule set"],
+        ["Regex engine", defaults ? "enabled" : (el.rules.checked ? "enabled" : "not-configured"), defaults ? "current embedded regex rules retained" : "depends on caller rule set"],
+        ["AST engine", defaults ? "enabled" : (el.rules.checked ? "enabled" : "not-configured"), defaults ? "available grammars run where rules require them" : "no AST rule proven"],
+        ["Boundary engine", hasConfig && (defaults || el.rules.checked) ? "enabled" : "not-configured", hasConfig ? "config owns silos; rules decide execution" : "no config may define silos"],
+        ["Coverage engine", el.coverage.checked ? "enabled" : "not-configured", el.coverage.checked ? "explicit coverage report supplied" : "detection never invents coverage"],
+        ["Duplication", "enabled", "current metrics run once over the admitted inventory"]
+      ];
+      el.capabilities.innerHTML = capabilityRows(capabilities);
+
+      el.options.textContent = [
+        "let ResolvedScanPlanInner { root, rules, baseline, cache,",
+        "    config, coverage, ignore, follow_symlinks, inventory, ..",
+        "} = self.inner;",
+        "let scan = {",
+        "    let mut options = ScanOptions::default();",
+        "    options.baseline = baseline.as_deref();",
+        "    options.cache = " + (el.cache.value === "disabled" ? "None;" : "cache.as_deref();"),
+        "    options.config = " + (hasConfig ? "config.as_deref();" : "None;"),
+        "    options.coverage = " + (el.coverage.checked ? "coverage.as_deref();" : "None;"),
+        "    options.ignore = ignore; // " + JSON.stringify(walkValue),
+        "    options.follow_symlinks = follow_symlinks; // " + String(el.symlinks.checked),
+        "",
+        "    scan_prepared(&root, &rules, &options, inventory, ...)?",
+        "}; // options and its borrows end before output context moves",
+        "// No engine receives a new concept."
+      ].join("\n");
+
+      el.report.textContent = [
+        "ResolvedScanReport {",
+        "    scan: ScanReport { /* existing fields and meanings unchanged */ },",
+        "    setup: ScanSetupReport {",
+        "        evidence: " + scenario.evidence.length + " sorted record(s),",
+        "        languages: [" + scenario.languages.map(function (name) { return JSON.stringify(name); }).join(", ") + "],",
+        "        capabilities: 6 explained states,",
+        "        explicit_overrides: [" + [
+          mode === "explicit" ? '"path"' : null,
+          el.config.value === "explicit" ? '"config"' : null,
+          !defaults ? '"embedded-rules"' : null,
+          el.rules.checked ? '"rule-dirs"' : null,
+          el.baseline.checked ? '"baseline"' : null,
+          el.coverage.checked ? '"coverage"' : null,
+          el.cache.value !== "default" ? '"cache"' : null,
+          el.ignore.value !== "self-contained" ? '"ignore"' : null,
+          el.symlinks.checked ? '"follow-symlinks"' : null
+        ].filter(Boolean).join(", ") + "]",
+        "    },",
+        "    output: /* private effective rules + anchoring for renderers */,",
+        "}"
+      ].join("\n");
+
+      el.fatal.hidden = !stopped;
+      el.fatal.textContent = fatalConfig
+        ? "Resolution stops here: malformed siloscan.toml keeps its current fatal behavior. Project detection and scanning do not run."
+        : noRules
+          ? "Resolution stops here: no embedded, explicit, or configured rules remain. The current no-rules refusal is preserved."
+          : "";
+    }
+
+    function setInvocation(value) {
+      document.querySelector("input[name='invocation'][value='" + value + "']").checked = true;
+    }
+
+    function guide(name) {
+      rescanRevision = 0;
+      if (name === "auto") {
+        el.scenario.value = "rust";
+        setInvocation("automatic");
+        el.root.value = ".";
+        el.config.value = "discovered";
+        el.cache.value = "default";
+        el.ignore.value = "self-contained";
+        el.defaults.checked = true;
+        el.rules.checked = false;
+        el.baseline.checked = false;
+        el.coverage.checked = false;
+        el.symlinks.checked = false;
+        el.scanOptions.checked = false;
+      } else if (name === "explicit") {
+        el.scenario.value = "rust";
+        setInvocation("explicit");
+        el.root.value = "services/api";
+        el.config.value = "explicit";
+        el.cache.value = "custom";
+        el.ignore.value = "self-contained";
+        el.defaults.checked = true;
+        el.rules.checked = true;
+        el.baseline.checked = true;
+        el.coverage.checked = true;
+        el.symlinks.checked = false;
+        el.scanOptions.checked = true;
+      } else if (name === "partial") {
+        el.scenario.value = "partial";
+        setInvocation("automatic");
+        el.root.value = ".";
+        el.config.value = "none";
+        el.cache.value = "default";
+        el.ignore.value = "self-contained";
+        el.defaults.checked = true;
+        el.rules.checked = false;
+        el.baseline.checked = false;
+        el.coverage.checked = false;
+        el.symlinks.checked = false;
+        el.scanOptions.checked = false;
+      } else if (name === "polyglot") {
+        el.scenario.value = "polyglot";
+        setInvocation("automatic");
+        el.root.value = ".";
+        el.config.value = "discovered";
+        el.cache.value = "default";
+        el.ignore.value = "parent";
+        el.defaults.checked = true;
+        el.rules.checked = true;
+        el.baseline.checked = false;
+        el.coverage.checked = false;
+        el.symlinks.checked = true;
+        el.scanOptions.checked = true;
+      }
+      render();
+    }
+
+    document.querySelectorAll("select, input").forEach(function (control) {
+      control.addEventListener("input", render);
+      control.addEventListener("change", render);
+    });
+
+    document.querySelectorAll("[data-guide]").forEach(function (button) {
+      button.addEventListener("click", function () {
+        guide(button.dataset.guide);
+      });
+    });
+
+    el.rescan.addEventListener("click", function () {
+      rescanRevision += 1;
+      render();
+      el.rescan.textContent = "TUI rescan resolved · revision " + rescanRevision;
+    });
+
+    render();
+  </script>
+</body>
+</html>
