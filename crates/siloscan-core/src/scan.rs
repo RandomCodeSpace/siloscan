@@ -487,6 +487,44 @@ fn run_with_workers(
     on_progress: &mut dyn FnMut(Progress),
     workers: usize,
 ) -> Result<ScanReport, String> {
+    // The walk counts what it excluded as it goes. Reported whatever the scan
+    // finds: a tree whose one credential sits behind a `.gitignore` line must
+    // not be reportable as a tree with nothing in it.
+    let project_dirs = options
+        .config
+        .map(|config| config.project_ignore_dirs(root))
+        .unwrap_or_default();
+    let inventory = walk::collect_files_counted_with(
+        root,
+        &walk::WalkOptions::new(&options.ignore)
+            .in_project(&project_dirs)
+            .follow_symlinks(options.follow_symlinks),
+    );
+
+    scan_prepared_with_workers(
+        root,
+        rules,
+        options,
+        silo_sets,
+        anchoring,
+        inventory,
+        on_progress,
+        workers,
+    )
+}
+
+/// Scan one owned inventory without traversing the root again.
+#[allow(clippy::too_many_arguments)]
+fn scan_prepared_with_workers(
+    root: &Path,
+    rules: &RuleSet,
+    options: &ScanOptions,
+    silo_sets: Option<Vec<(String, GlobSet)>>,
+    anchoring: &Anchoring,
+    inventory: walk::WalkResult,
+    on_progress: &mut dyn FnMut(Progress),
+    workers: usize,
+) -> Result<ScanReport, String> {
     let mut findings: Vec<Finding> = Vec::new();
     let mut suppressed: Vec<Finding> = Vec::new();
     let mut skipped: Vec<SkippedFile> = Vec::new();
@@ -503,23 +541,11 @@ fn run_with_workers(
     let mut contents: BTreeMap<String, String> = BTreeMap::new();
     let mut file_metrics: BTreeMap<String, FileMetrics> = BTreeMap::new();
 
-    // The walk counts what it excluded as it goes. Reported whatever the scan
-    // finds: a tree whose one credential sits behind a `.gitignore` line must
-    // not be reportable as a tree with nothing in it.
-    let project_dirs = options
-        .config
-        .map(|config| config.project_ignore_dirs(root))
-        .unwrap_or_default();
     let walk::WalkResult {
         mut files,
         ignored: ignored_entries,
         mut symlinks,
-    } = walk::collect_files_counted_with(
-        root,
-        &walk::WalkOptions::new(&options.ignore)
-            .in_project(&project_dirs)
-            .follow_symlinks(options.follow_symlinks),
-    );
+    } = inventory;
 
     // The cache is not content under review, and when it lands under the scan
     // root it is also not a stable part of the tree: a cold run writes entries a
@@ -1615,6 +1641,42 @@ rules:
     ) -> crate::cache::Cache {
         let scope = crate::cache::PathScope::new(anchoring.anchor(), anchoring.prefix());
         crate::cache::Cache::open_in(base, root, rules, &scope)
+    }
+
+    #[test]
+    fn prepared_scan_uses_one_admitted_walk_and_matches_legacy_bytes() {
+        let dir = tempdir();
+        write(dir.path(), "src/first.rs", b"needle\n");
+        write(dir.path(), ".gitignore", b"ignored.rs\n");
+        write(dir.path(), "ignored.rs", b"needle\n");
+
+        let rules = ruleset();
+        let options = ScanOptions::default();
+        let anchoring = Anchoring::default();
+        let legacy = scan(dir.path(), &rules, None);
+        let inventory = walk::collect_files_counted(dir.path(), &options.ignore);
+        // This match arrives after admission. A prepared scanner that walks a
+        // second time reports it and disagrees with the legacy result below.
+        write(dir.path(), "src/late.rs", b"needle\n");
+
+        let prepared = super::scan_prepared_with_workers(
+            dir.path(),
+            &rules,
+            &options,
+            None,
+            &anchoring,
+            inventory,
+            &mut |_| {},
+            1,
+        )
+        .expect("prepared rules compile");
+
+        assert_eq!(
+            serde_json::to_string(&legacy).unwrap(),
+            serde_json::to_string(&prepared).unwrap()
+        );
+        assert_eq!(prepared.findings.len(), 1, "the late file was not admitted");
+        assert_eq!(prepared.findings[0].path, "src/first.rs");
     }
 
     /// The walk policy is a scan input, so `ScanOptions::ignore` has to reach
