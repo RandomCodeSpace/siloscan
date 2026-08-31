@@ -1,0 +1,51 @@
+Record every current finding as accepted, so later scans report only new ones
+
+Usage: ss baseline [OPTIONS] [PATH]
+
+Arguments:
+  [PATH]
+          Path to scan
+
+          [default: .]
+
+Options:
+      --rules <DIR>
+          Rule directories
+
+      --no-default-rules
+          Do not load the built-in rule pack (a run that ends up with no rules at all checks nothing and is refused with exit 2)
+
+      --config <FILE>
+          Repository config (defaults to the nearest `siloscan.toml` at PATH, or above it only when a `.git` marker exists at or above PATH; pass this explicitly for an exported tree that has none)
+
+      --coverage-report <FILE>
+          Coverage report to feed coverage rules (lcov or cobertura); required when any coverage rule is loaded, since a gate with no input reports nothing and would read as a pass
+
+      --follow-symlinks
+          Follow symlinks whose target is inside the scan root; targets outside it are never followed
+
+          A baseline records what a scan found, so this has to be available here and has to mean the same thing: a baseline taken with it off does not cover the findings a scan with it on will report.
+
+      --no-cache
+          Do not read or write the scan cache
+
+      --cache-dir <DIR>
+          Read and write cache entries under DIR instead of this user's cache directory
+
+      --no-ignore
+          Scan every file: ignore no `.gitignore` and no `.ignore`
+
+      --no-gitignore
+          Ignore `.ignore` files but not `.gitignore` files
+
+      --respect-parent-ignores
+          Also honor ignore files in directories above the scan root
+
+      --respect-git-exclude
+          Also honor `<PATH>/.git/info/exclude`
+
+      --respect-global-gitignore
+          Also honor git's global `core.excludesFile`
+
+  -h, --help
+          Print help (see a summary with '-h')

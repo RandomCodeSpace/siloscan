@@ -1,0 +1,39 @@
+{
+  "version": "1.5.1",
+  "findings": [
+    {
+      "rule_id": "secrets.aws-access-token",
+      "severity": "error",
+      "message": "Identified a pattern that may indicate AWS credentials, risking unauthorized cloud resource access and data breaches on AWS platforms.",
+      "path": "example.env",
+      "line": 1,
+      "column": 19,
+      "matched": "<redacted>",
+      "fingerprint": "20892a933ab9d9f105d06d145c6cd87a50cbf3dda0afa99af9d15c3a371012c7"
+    }
+  ],
+  "baselined": [],
+  "suppressed": [],
+  "skipped": [],
+  "schema_version": "1.2",
+  "metrics": {
+    "files": {
+      "example.env": {
+        "lines": 1,
+        "duplicated_lines": 0
+      }
+    },
+    "totals": {
+      "lines": 1,
+      "code_lines": 0,
+      "duplicated_lines": 0,
+      "duplication_density": 0.0
+    }
+  },
+  "anchor": "scan-root",
+  "ignored": {
+    "files": 0,
+    "directories": 0
+  },
+  "warnings": []
+}

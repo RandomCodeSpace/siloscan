@@ -1,0 +1,347 @@
+{
+  "version": "1.5.1",
+  "findings": [
+    {
+      "rule_id": "oracle.duplication",
+      "severity": "warning",
+      "message": "duplication over budget",
+      "path": ".",
+      "line": 1,
+      "column": 1,
+      "matched": "density 18.8% (max 1.0%)",
+      "fingerprint": "42254455d99c2197d63a5a457e61a847571fe636a5eda1a89fb4293a6840e60f"
+    },
+    {
+      "rule_id": "oracle.ast",
+      "severity": "warning",
+      "message": "syntax identifier found",
+      "path": "src/api/handler.js",
+      "line": 1,
+      "column": 8,
+      "matched": "database_name",
+      "fingerprint": "ce558eb84cffb1e412df446b2a3df111a870154da593a13aacb65f86b85bdd90"
+    },
+    {
+      "rule_id": "oracle.boundary",
+      "severity": "error",
+      "message": "api must not import db",
+      "path": "src/api/handler.js",
+      "line": 1,
+      "column": 27,
+      "matched": "../db/client",
+      "fingerprint": "f6a0d704f3c61abddbd97c093d18ae29e6e28e427521c4242e7d6a73614d464b"
+    },
+    {
+      "rule_id": "oracle.ast",
+      "severity": "warning",
+      "message": "syntax identifier found",
+      "path": "src/api/handler.js",
+      "line": 2,
+      "column": 14,
+      "matched": "api_name",
+      "fingerprint": "8768a87a8403f37eca611eae1db5b6267a12b3ea31fb1c5c3fcd426bd880bcd2"
+    },
+    {
+      "rule_id": "oracle.ast",
+      "severity": "warning",
+      "message": "syntax identifier found",
+      "path": "src/api/handler.js",
+      "line": 2,
+      "column": 25,
+      "matched": "database_name",
+      "fingerprint": "59c551dbce509aaa558c8ac389d4c80885ebc5c030ab58f4b92f7a4783a94fa8"
+    },
+    {
+      "rule_id": "oracle.coverage",
+      "severity": "warning",
+      "message": "coverage below 80 percent",
+      "path": "src/coverage/low.rs",
+      "line": 1,
+      "column": 1,
+      "matched": "1/4 lines (25.0%)",
+      "fingerprint": "d5c59c15b314b77d883ab7bf9915d74f7748ae4ca7779cf12f263b3ac4745903"
+    },
+    {
+      "rule_id": "oracle.ast",
+      "severity": "warning",
+      "message": "syntax identifier found",
+      "path": "src/coverage/low.rs",
+      "line": 1,
+      "column": 4,
+      "matched": "covered",
+      "fingerprint": "b9a44bc15b67b2b655716222a50c48a4d5a417075ac911118ff87bc499ef37a0"
+    },
+    {
+      "rule_id": "oracle.ast",
+      "severity": "warning",
+      "message": "syntax identifier found",
+      "path": "src/coverage/low.rs",
+      "line": 2,
+      "column": 9,
+      "matched": "uncovered_one",
+      "fingerprint": "73209da0299f15c3d961bed289929ae527827a5ace488781357cbff3f5cc6062"
+    },
+    {
+      "rule_id": "oracle.ast",
+      "severity": "warning",
+      "message": "syntax identifier found",
+      "path": "src/coverage/low.rs",
+      "line": 3,
+      "column": 9,
+      "matched": "uncovered_two",
+      "fingerprint": "3abe18790660419ba21260f5176bff00ab582781690bd13efd38299aeba22dfc"
+    },
+    {
+      "rule_id": "metrics.duplicate-block",
+      "severity": "info",
+      "message": "duplicated block, also at src/dup/b.txt:1",
+      "path": "src/dup/a.txt",
+      "line": 1,
+      "column": 1,
+      "matched": "3 duplicated lines (block 64c5ab1fdbb8)",
+      "fingerprint": "ee448073a1de966967ff31ae29524747c7b9f17c13b2cd8511e4a6b847e1c58e"
+    },
+    {
+      "rule_id": "metrics.duplicate-block",
+      "severity": "info",
+      "message": "duplicated block, also at src/dup/a.txt:1",
+      "path": "src/dup/b.txt",
+      "line": 1,
+      "column": 1,
+      "matched": "3 duplicated lines (block 64c5ab1fdbb8)",
+      "fingerprint": "b3e0685a912632565beab4bcba28bb897f01d174876f232cb52edfba55052474"
+    },
+    {
+      "rule_id": "oracle.ast",
+      "severity": "warning",
+      "message": "syntax identifier found",
+      "path": "src/lang/Sample.cs",
+      "line": 1,
+      "column": 7,
+      "matched": "CSharpName",
+      "fingerprint": "b5fee896302bc02258b510e97f5b34c17d32796f36789529c8486f14933f86d3"
+    },
+    {
+      "rule_id": "oracle.ast",
+      "severity": "warning",
+      "message": "syntax identifier found",
+      "path": "src/lang/Sample.java",
+      "line": 1,
+      "column": 7,
+      "matched": "JavaName",
+      "fingerprint": "cd4f834b51210ad627852e232f7667a87634469709a8583ab8a0508196088d8a"
+    },
+    {
+      "rule_id": "oracle.ast",
+      "severity": "warning",
+      "message": "syntax identifier found",
+      "path": "src/lang/sample.c",
+      "line": 1,
+      "column": 5,
+      "matched": "c_name",
+      "fingerprint": "af33f5b38c3e0d44e9627d85a6360dae1625fd1a5213c0dda3c149b923b02018"
+    },
+    {
+      "rule_id": "oracle.ast",
+      "severity": "warning",
+      "message": "syntax identifier found",
+      "path": "src/lang/sample.cpp",
+      "line": 1,
+      "column": 5,
+      "matched": "cpp_name",
+      "fingerprint": "b7356bd38df26fd942db8fbde0a84a972d5c4e34bb75656e642ea746fb11fa8c"
+    },
+    {
+      "rule_id": "oracle.ast",
+      "severity": "warning",
+      "message": "syntax identifier found",
+      "path": "src/lang/sample.go",
+      "line": 1,
+      "column": 9,
+      "matched": "go_name",
+      "fingerprint": "fbb300fabc4d1857d9f4e8869b212ade10d59199e050569bf78425d56eca57c7"
+    },
+    {
+      "rule_id": "oracle.ast",
+      "severity": "warning",
+      "message": "syntax identifier found",
+      "path": "src/lang/sample.js",
+      "line": 1,
+      "column": 7,
+      "matched": "javascript_name",
+      "fingerprint": "c2cbcb80fbb81cea05edd1e00576919865b427eab91fbc26f7f12e630fac0269"
+    },
+    {
+      "rule_id": "oracle.ast",
+      "severity": "warning",
+      "message": "syntax identifier found",
+      "path": "src/lang/sample.py",
+      "line": 1,
+      "column": 1,
+      "matched": "python_name",
+      "fingerprint": "715c9bb09569b771e5f2e83de189d010c789eb30042c5ac35a4e841d181dd85a"
+    },
+    {
+      "rule_id": "oracle.ast",
+      "severity": "warning",
+      "message": "syntax identifier found",
+      "path": "src/lang/sample.rb",
+      "line": 1,
+      "column": 1,
+      "matched": "ruby_name",
+      "fingerprint": "661cf03ef73060e72839009c5b1d27ee02d1eaa5bea48c3bfa4ab6ae3bea09da"
+    },
+    {
+      "rule_id": "oracle.ast",
+      "severity": "warning",
+      "message": "syntax identifier found",
+      "path": "src/lang/sample.rs",
+      "line": 1,
+      "column": 4,
+      "matched": "rust_name",
+      "fingerprint": "38d264a94fb804e292ffcab1eb6d33677ebe16c4f8c2e72e9b38f73075419e27"
+    },
+    {
+      "rule_id": "oracle.ast",
+      "severity": "warning",
+      "message": "syntax identifier found",
+      "path": "src/lang/sample.ts",
+      "line": 1,
+      "column": 7,
+      "matched": "typescript_name",
+      "fingerprint": "cc01fca7d7f3b8261381d2e50bdfedb1eaa6d09635815ce279951b3be4bb4610"
+    },
+    {
+      "rule_id": "oracle.regex",
+      "severity": "error",
+      "message": "regex marker found",
+      "path": "src/markers.txt",
+      "line": 1,
+      "column": 1,
+      "matched": "ORACLE_REGEX",
+      "fingerprint": "1f79fee858447f0ca2be40d6bca802e47446aab458e5170a31d195739364eab9"
+    },
+    {
+      "rule_id": "oracle.secret",
+      "severity": "error",
+      "message": "synthetic token found",
+      "path": "src/markers.txt",
+      "line": 3,
+      "column": 14,
+      "matched": "<redacted>",
+      "fingerprint": "ca45f4d625eec213ee9ab6e3fb5a21b05d2a66424439ab39cc1b0ecf8765de69"
+    }
+  ],
+  "baselined": [],
+  "suppressed": [
+    {
+      "rule_id": "oracle.regex",
+      "severity": "error",
+      "message": "regex marker found",
+      "path": "src/markers.txt",
+      "line": 2,
+      "column": 1,
+      "matched": "ORACLE_REGEX",
+      "fingerprint": "3c1df9cee0c89e7e3cee4734acbe59d875b95c508e2507754fa5276d11ce14b1"
+    }
+  ],
+  "skipped": [],
+  "schema_version": "1.2",
+  "metrics": {
+    "files": {
+      "siloscan.toml": {
+        "lines": 6,
+        "duplicated_lines": 0
+      },
+      "src/api/handler.js": {
+        "lines": 2,
+        "code_lines": 2,
+        "duplicated_lines": 0
+      },
+      "src/coverage/low.rs": {
+        "lines": 4,
+        "code_lines": 4,
+        "duplicated_lines": 0
+      },
+      "src/db/client.js": {
+        "lines": 1,
+        "code_lines": 1,
+        "duplicated_lines": 0
+      },
+      "src/dup/a.txt": {
+        "lines": 3,
+        "duplicated_lines": 3
+      },
+      "src/dup/b.txt": {
+        "lines": 3,
+        "duplicated_lines": 3
+      },
+      "src/lang/Sample.cs": {
+        "lines": 1,
+        "code_lines": 1,
+        "duplicated_lines": 0
+      },
+      "src/lang/Sample.java": {
+        "lines": 1,
+        "code_lines": 1,
+        "duplicated_lines": 0
+      },
+      "src/lang/sample.c": {
+        "lines": 1,
+        "code_lines": 1,
+        "duplicated_lines": 0
+      },
+      "src/lang/sample.cpp": {
+        "lines": 1,
+        "code_lines": 1,
+        "duplicated_lines": 0
+      },
+      "src/lang/sample.go": {
+        "lines": 1,
+        "code_lines": 1,
+        "duplicated_lines": 0
+      },
+      "src/lang/sample.js": {
+        "lines": 1,
+        "code_lines": 1,
+        "duplicated_lines": 0
+      },
+      "src/lang/sample.py": {
+        "lines": 1,
+        "code_lines": 1,
+        "duplicated_lines": 0
+      },
+      "src/lang/sample.rb": {
+        "lines": 1,
+        "code_lines": 1,
+        "duplicated_lines": 0
+      },
+      "src/lang/sample.rs": {
+        "lines": 1,
+        "code_lines": 1,
+        "duplicated_lines": 0
+      },
+      "src/lang/sample.ts": {
+        "lines": 1,
+        "code_lines": 1,
+        "duplicated_lines": 0
+      },
+      "src/markers.txt": {
+        "lines": 3,
+        "duplicated_lines": 0
+      }
+    },
+    "totals": {
+      "lines": 32,
+      "code_lines": 17,
+      "duplicated_lines": 6,
+      "duplication_density": 18.75
+    }
+  },
+  "anchor": "scan-root",
+  "ignored": {
+    "files": 0,
+    "directories": 0
+  },
+  "warnings": []
+}

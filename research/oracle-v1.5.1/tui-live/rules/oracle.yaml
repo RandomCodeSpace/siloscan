@@ -1,0 +1,7 @@
+version: 1
+rules:
+  - id: oracle.regex
+    severity: error
+    message: regex marker found
+    regex:
+      pattern: 'ORACLE_REGEX'

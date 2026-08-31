@@ -1,0 +1,11 @@
+Check a fixture tree against its inline `siloscan-expect:` markers
+
+Usage: siloscan test [OPTIONS] <FIXTURE_DIR>
+
+Arguments:
+  <FIXTURE_DIR>  Fixture directory
+
+Options:
+      --rules <DIR>       Rule directories
+      --no-default-rules  Do not load the built-in rule pack (a run that ends up with no rules at all checks nothing and is refused with exit 2)
+  -h, --help              Print help

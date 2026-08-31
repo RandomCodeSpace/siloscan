@@ -1,0 +1,46 @@
+version: 1
+rules:
+  - id: oracle.regex
+    severity: error
+    message: regex marker found
+    regex:
+      pattern: 'ORACLE_REGEX'
+  - id: oracle.secret
+    severity: error
+    message: synthetic token found
+    secret:
+      pattern: 'ORACLE_TOKEN=([A-Za-z0-9]{16})'
+      group: 1
+      entropy: 3.0
+      keywords: [ORACLE_TOKEN]
+  - id: oracle.ast
+    severity: warning
+    message: syntax identifier found
+    ast:
+      rust: '(identifier) @report'
+      python: '(identifier) @report'
+      javascript: '(identifier) @report'
+      typescript: '(identifier) @report'
+      go: '(package_identifier) @report'
+      java: '(identifier) @report'
+      c: '(identifier) @report'
+      cpp: '(identifier) @report'
+      csharp: '(identifier) @report'
+      ruby: '(identifier) @report'
+  - id: oracle.boundary
+    severity: error
+    message: api must not import db
+    boundary:
+      from: api
+      deny: [db]
+  - id: oracle.coverage
+    severity: warning
+    message: coverage below 80 percent
+    coverage:
+      min: 80
+  - id: oracle.duplication
+    severity: warning
+    message: duplication over budget
+    duplication:
+      max_percent: 1
+      scope: scan
