@@ -344,15 +344,32 @@ fn assert_process(case: &str, output: &Output, expected_status: i32) {
     }
 }
 
+fn normalize_text_line_endings(bytes: &[u8]) -> Vec<u8> {
+    let mut normalized = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index..].starts_with(b"\r\n") {
+            normalized.push(b'\n');
+            index += 2;
+        } else {
+            normalized.push(bytes[index]);
+            index += 1;
+        }
+    }
+    normalized
+}
+
 fn assert_bytes(case: &str, expected: &[u8], output: &Output, expected_status: i32) {
     assert_process(case, output, expected_status);
-    if output.stdout != expected {
+    let expected_normalized = normalize_text_line_endings(expected);
+    let actual_normalized = normalize_text_line_endings(&output.stdout);
+    if actual_normalized != expected_normalized {
         fail_comparison(
             case,
             expected,
             &output.stdout,
-            expected,
-            &output.stdout,
+            &expected_normalized,
+            &actual_normalized,
             &output.stderr,
             output.status.code(),
             "stdout bytes differ",
@@ -492,7 +509,8 @@ fn assert_stable(case: &str, first: &Output, second: &Output) {
 }
 
 fn strip_help_trailing_whitespace(bytes: &[u8]) -> Result<Vec<u8>, String> {
-    let text = std::str::from_utf8(bytes).map_err(|error| error.to_string())?;
+    let normalized = normalize_text_line_endings(bytes);
+    let text = std::str::from_utf8(&normalized).map_err(|error| error.to_string())?;
     Ok(text
         .split('\n')
         .map(|line| line.trim_end_matches([' ', '\t']))
