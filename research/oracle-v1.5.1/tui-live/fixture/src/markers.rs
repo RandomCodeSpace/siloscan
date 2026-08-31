@@ -1,0 +1,4 @@
+ORACLE_REGEX
+ORACLE_REGEX siloscan-ignore-line: oracle.regex
+ORACLE_TOKEN=aG7xQ2vT9pL4zR1b
+ORACLE_REGEX

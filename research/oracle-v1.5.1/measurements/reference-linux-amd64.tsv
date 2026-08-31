@@ -1,0 +1,31 @@
+# reference_commit=880d211a463e97eb3c188f957e5592d88f36dcf8
+# siloscan_sha256=3d11c8b4faedad7e78ae10b8d00200e3989a08c12a3a298b2ca032e22c6ae748
+# build=cargo build --locked --release -p siloscan -p siloscan-tui
+# toolchain=rustc 1.97.1 (8bab26f4f 2026-07-14)
+# host=Linux 6.8.0-136-generic x86_64; 8 vCPU; AMD EPYC 9354P
+# source=4096 copies of crates/siloscan-core/src/lang.rs
+# layout=src/00/sample_0000.rs through src/40/sample_4095.rs; 100 files per shard except 96 in shard 40
+# source_sha256=53f38d5a9044dd55e8e0dd38bf5b9cdd3b49fcb9d46bda12d714a6cfd788c8fc
+# config_sha256=76d6af711d6be9472e3ddb35bba9eeafac4c7e47fde91fdb07fef6f2849af23e
+# rules_sha256=8868a9d80f4aadc8b0ad5e7bcbd4b5754f33e35285dfa1a731165744d7a4ee66
+# generated_manifest_sha256=32e15ce82ca06db7643fc3162454782f593bcf7c8822aa7f46b744930b3b5fb4
+# command=siloscan SCALE_ROOT --rules RULES_ROOT --no-default-rules CACHE_ARGS --format json
+# no-cache=--no-cache
+# cold=--cache-dir NEW_EMPTY_CACHE_FOR_EACH_SAMPLE
+# warm=--cache-dir PER_BINARY_CACHE_SEEDED_BY_ONE_UNTIMED_IDENTICAL_SCAN
+cache_state	sample	elapsed_seconds	peak_rss_kib
+no-cache	1	3.55	231568
+no-cache	2	3.45	231352
+no-cache	3	3.45	231472
+no-cache	4	3.30	231608
+no-cache	5	3.70	231388
+cold	1	4.18	231680
+cold	2	3.34	231396
+cold	3	3.45	231616
+cold	4	5.45	231428
+cold	5	7.15	231780
+warm	1	0.52	183120
+warm	2	0.46	183260
+warm	3	0.45	183248
+warm	4	0.44	183116
+warm	5	0.47	183356

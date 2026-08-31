@@ -1,0 +1,14 @@
+mode	step	key	screen	new	baselined	suppressed	status_or_effect
+live	initial	-	dashboard	2	0	1	stable first frame
+live	ratchet	3	ratchet	2	0	1	first new finding selected
+live	baseline	b	ratchet	1	1	1	baselined oracle.regex; baseline has one entry
+live	ignore	i	ratchet	0	1	2	ignored oracle.regex at src/markers.rs:4; line 4 gains the Rust ignore comment
+live	quit	q	-	-	-	-	terminal restored
+snapshot	initial	-	dashboard	23	0	1	loaded golden/report.json
+snapshot	triage	2	triage	23	0	1	finding list visible
+snapshot	ratchet	3	ratchet	23	0	1	first new finding selected
+snapshot	baseline-refusal	b	ratchet	23	0	1	snapshot is read-only: the baseline needs a live scan
+snapshot	ignore-refusal	i	ratchet	23	0	1	ignore failed: snapshot is read-only: inline suppression needs the scanned files
+snapshot	silo	4	silo	23	0	1	silo view visible
+snapshot	rescan-refusal	r	silo	23	0	1	snapshot is read-only: rescan needs a live scan
+snapshot	quit	q	-	-	-	-	terminal restored; fixture and report unchanged

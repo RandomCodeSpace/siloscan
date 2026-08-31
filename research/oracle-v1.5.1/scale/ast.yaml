@@ -1,0 +1,7 @@
+version: 1
+rules:
+  - id: oracle.ast-never
+    severity: info
+    message: unreachable marker
+    ast:
+      rust: '(ERROR) @report'

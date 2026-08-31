@@ -1,0 +1,621 @@
+{
+  "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
+  "version": "2.1.0",
+  "runs": [
+    {
+      "tool": {
+        "driver": {
+          "name": "siloscan",
+          "version": "1.5.1",
+          "informationUri": "https://github.com/RandomCodeSpace/siloscan",
+          "rules": [
+            {
+              "id": "metrics.duplicate-block",
+              "name": "DuplicateBlock",
+              "shortDescription": {
+                "text": "Duplicated code block detected by the metrics channel."
+              },
+              "defaultConfiguration": {
+                "level": "note"
+              }
+            },
+            {
+              "id": "oracle.ast",
+              "shortDescription": {
+                "text": "syntax identifier found"
+              },
+              "defaultConfiguration": {
+                "level": "warning"
+              }
+            },
+            {
+              "id": "oracle.boundary",
+              "shortDescription": {
+                "text": "api must not import db"
+              },
+              "defaultConfiguration": {
+                "level": "error"
+              }
+            },
+            {
+              "id": "oracle.coverage",
+              "shortDescription": {
+                "text": "coverage below 80 percent"
+              },
+              "defaultConfiguration": {
+                "level": "warning"
+              }
+            },
+            {
+              "id": "oracle.duplication",
+              "shortDescription": {
+                "text": "duplication over budget"
+              },
+              "defaultConfiguration": {
+                "level": "warning"
+              }
+            },
+            {
+              "id": "oracle.regex",
+              "shortDescription": {
+                "text": "regex marker found"
+              },
+              "defaultConfiguration": {
+                "level": "error"
+              }
+            },
+            {
+              "id": "oracle.secret",
+              "shortDescription": {
+                "text": "synthetic token found"
+              },
+              "defaultConfiguration": {
+                "level": "error"
+              }
+            }
+          ]
+        }
+      },
+      "results": [
+        {
+          "ruleId": "oracle.duplication",
+          "level": "warning",
+          "message": {
+            "text": "duplication over budget"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "."
+                },
+                "region": {
+                  "startLine": 1,
+                  "startColumn": 1
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "siloscanFingerprint/v1": "42254455d99c2197d63a5a457e61a847571fe636a5eda1a89fb4293a6840e60f"
+          }
+        },
+        {
+          "ruleId": "oracle.ast",
+          "level": "warning",
+          "message": {
+            "text": "syntax identifier found"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src/api/handler.js"
+                },
+                "region": {
+                  "startLine": 1,
+                  "startColumn": 8
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "siloscanFingerprint/v1": "ce558eb84cffb1e412df446b2a3df111a870154da593a13aacb65f86b85bdd90"
+          }
+        },
+        {
+          "ruleId": "oracle.boundary",
+          "level": "error",
+          "message": {
+            "text": "api must not import db"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src/api/handler.js"
+                },
+                "region": {
+                  "startLine": 1,
+                  "startColumn": 27
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "siloscanFingerprint/v1": "f6a0d704f3c61abddbd97c093d18ae29e6e28e427521c4242e7d6a73614d464b"
+          }
+        },
+        {
+          "ruleId": "oracle.ast",
+          "level": "warning",
+          "message": {
+            "text": "syntax identifier found"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src/api/handler.js"
+                },
+                "region": {
+                  "startLine": 2,
+                  "startColumn": 14
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "siloscanFingerprint/v1": "8768a87a8403f37eca611eae1db5b6267a12b3ea31fb1c5c3fcd426bd880bcd2"
+          }
+        },
+        {
+          "ruleId": "oracle.ast",
+          "level": "warning",
+          "message": {
+            "text": "syntax identifier found"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src/api/handler.js"
+                },
+                "region": {
+                  "startLine": 2,
+                  "startColumn": 25
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "siloscanFingerprint/v1": "59c551dbce509aaa558c8ac389d4c80885ebc5c030ab58f4b92f7a4783a94fa8"
+          }
+        },
+        {
+          "ruleId": "oracle.coverage",
+          "level": "warning",
+          "message": {
+            "text": "coverage below 80 percent"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src/coverage/low.rs"
+                },
+                "region": {
+                  "startLine": 1,
+                  "startColumn": 1
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "siloscanFingerprint/v1": "d5c59c15b314b77d883ab7bf9915d74f7748ae4ca7779cf12f263b3ac4745903"
+          }
+        },
+        {
+          "ruleId": "oracle.ast",
+          "level": "warning",
+          "message": {
+            "text": "syntax identifier found"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src/coverage/low.rs"
+                },
+                "region": {
+                  "startLine": 1,
+                  "startColumn": 4
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "siloscanFingerprint/v1": "b9a44bc15b67b2b655716222a50c48a4d5a417075ac911118ff87bc499ef37a0"
+          }
+        },
+        {
+          "ruleId": "oracle.ast",
+          "level": "warning",
+          "message": {
+            "text": "syntax identifier found"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src/coverage/low.rs"
+                },
+                "region": {
+                  "startLine": 2,
+                  "startColumn": 9
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "siloscanFingerprint/v1": "73209da0299f15c3d961bed289929ae527827a5ace488781357cbff3f5cc6062"
+          }
+        },
+        {
+          "ruleId": "oracle.ast",
+          "level": "warning",
+          "message": {
+            "text": "syntax identifier found"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src/coverage/low.rs"
+                },
+                "region": {
+                  "startLine": 3,
+                  "startColumn": 9
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "siloscanFingerprint/v1": "3abe18790660419ba21260f5176bff00ab582781690bd13efd38299aeba22dfc"
+          }
+        },
+        {
+          "ruleId": "metrics.duplicate-block",
+          "level": "note",
+          "message": {
+            "text": "duplicated block, also at src/dup/b.txt:1"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src/dup/a.txt"
+                },
+                "region": {
+                  "startLine": 1,
+                  "startColumn": 1
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "siloscanFingerprint/v1": "ee448073a1de966967ff31ae29524747c7b9f17c13b2cd8511e4a6b847e1c58e"
+          }
+        },
+        {
+          "ruleId": "metrics.duplicate-block",
+          "level": "note",
+          "message": {
+            "text": "duplicated block, also at src/dup/a.txt:1"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src/dup/b.txt"
+                },
+                "region": {
+                  "startLine": 1,
+                  "startColumn": 1
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "siloscanFingerprint/v1": "b3e0685a912632565beab4bcba28bb897f01d174876f232cb52edfba55052474"
+          }
+        },
+        {
+          "ruleId": "oracle.ast",
+          "level": "warning",
+          "message": {
+            "text": "syntax identifier found"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src/lang/Sample.cs"
+                },
+                "region": {
+                  "startLine": 1,
+                  "startColumn": 7
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "siloscanFingerprint/v1": "b5fee896302bc02258b510e97f5b34c17d32796f36789529c8486f14933f86d3"
+          }
+        },
+        {
+          "ruleId": "oracle.ast",
+          "level": "warning",
+          "message": {
+            "text": "syntax identifier found"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src/lang/Sample.java"
+                },
+                "region": {
+                  "startLine": 1,
+                  "startColumn": 7
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "siloscanFingerprint/v1": "cd4f834b51210ad627852e232f7667a87634469709a8583ab8a0508196088d8a"
+          }
+        },
+        {
+          "ruleId": "oracle.ast",
+          "level": "warning",
+          "message": {
+            "text": "syntax identifier found"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src/lang/sample.c"
+                },
+                "region": {
+                  "startLine": 1,
+                  "startColumn": 5
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "siloscanFingerprint/v1": "af33f5b38c3e0d44e9627d85a6360dae1625fd1a5213c0dda3c149b923b02018"
+          }
+        },
+        {
+          "ruleId": "oracle.ast",
+          "level": "warning",
+          "message": {
+            "text": "syntax identifier found"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src/lang/sample.cpp"
+                },
+                "region": {
+                  "startLine": 1,
+                  "startColumn": 5
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "siloscanFingerprint/v1": "b7356bd38df26fd942db8fbde0a84a972d5c4e34bb75656e642ea746fb11fa8c"
+          }
+        },
+        {
+          "ruleId": "oracle.ast",
+          "level": "warning",
+          "message": {
+            "text": "syntax identifier found"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src/lang/sample.go"
+                },
+                "region": {
+                  "startLine": 1,
+                  "startColumn": 9
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "siloscanFingerprint/v1": "fbb300fabc4d1857d9f4e8869b212ade10d59199e050569bf78425d56eca57c7"
+          }
+        },
+        {
+          "ruleId": "oracle.ast",
+          "level": "warning",
+          "message": {
+            "text": "syntax identifier found"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src/lang/sample.js"
+                },
+                "region": {
+                  "startLine": 1,
+                  "startColumn": 7
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "siloscanFingerprint/v1": "c2cbcb80fbb81cea05edd1e00576919865b427eab91fbc26f7f12e630fac0269"
+          }
+        },
+        {
+          "ruleId": "oracle.ast",
+          "level": "warning",
+          "message": {
+            "text": "syntax identifier found"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src/lang/sample.py"
+                },
+                "region": {
+                  "startLine": 1,
+                  "startColumn": 1
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "siloscanFingerprint/v1": "715c9bb09569b771e5f2e83de189d010c789eb30042c5ac35a4e841d181dd85a"
+          }
+        },
+        {
+          "ruleId": "oracle.ast",
+          "level": "warning",
+          "message": {
+            "text": "syntax identifier found"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src/lang/sample.rb"
+                },
+                "region": {
+                  "startLine": 1,
+                  "startColumn": 1
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "siloscanFingerprint/v1": "661cf03ef73060e72839009c5b1d27ee02d1eaa5bea48c3bfa4ab6ae3bea09da"
+          }
+        },
+        {
+          "ruleId": "oracle.ast",
+          "level": "warning",
+          "message": {
+            "text": "syntax identifier found"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src/lang/sample.rs"
+                },
+                "region": {
+                  "startLine": 1,
+                  "startColumn": 4
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "siloscanFingerprint/v1": "38d264a94fb804e292ffcab1eb6d33677ebe16c4f8c2e72e9b38f73075419e27"
+          }
+        },
+        {
+          "ruleId": "oracle.ast",
+          "level": "warning",
+          "message": {
+            "text": "syntax identifier found"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src/lang/sample.ts"
+                },
+                "region": {
+                  "startLine": 1,
+                  "startColumn": 7
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "siloscanFingerprint/v1": "cc01fca7d7f3b8261381d2e50bdfedb1eaa6d09635815ce279951b3be4bb4610"
+          }
+        },
+        {
+          "ruleId": "oracle.regex",
+          "level": "error",
+          "message": {
+            "text": "regex marker found"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src/markers.txt"
+                },
+                "region": {
+                  "startLine": 1,
+                  "startColumn": 1
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "siloscanFingerprint/v1": "1f79fee858447f0ca2be40d6bca802e47446aab458e5170a31d195739364eab9"
+          }
+        },
+        {
+          "ruleId": "oracle.secret",
+          "level": "error",
+          "message": {
+            "text": "synthetic token found"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src/markers.txt"
+                },
+                "region": {
+                  "startLine": 3,
+                  "startColumn": 14
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "siloscanFingerprint/v1": "ca45f4d625eec213ee9ab6e3fb5a21b05d2a66424439ab39cc1b0ecf8765de69"
+          }
+        }
+      ],
+      "properties": {
+        "siloscan/metrics": {
+          "code_lines": 17,
+          "duplicated_lines": 6,
+          "duplication_density": 18.75,
+          "lines": 32
+        },
+        "siloscan/anchor": "scan-root"
+      }
+    }
+  ]
+}

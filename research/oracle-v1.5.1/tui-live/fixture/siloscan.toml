@@ -1,0 +1,7 @@
+[duplication]
+min_lines = 100000
+report_blocks = false
+
+[silos]
+api = ["src/api/**"]
+db = ["src/db/**"]
