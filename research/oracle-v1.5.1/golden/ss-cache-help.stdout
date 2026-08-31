@@ -1,0 +1,10 @@
+Maintain the on-disk scan cache
+
+Usage: ss cache <COMMAND>
+
+Commands:
+  prune  Delete cache entries written by a different siloscan build
+  help   Print this message or the help of the given subcommand(s)
+
+Options:
+  -h, --help  Print help

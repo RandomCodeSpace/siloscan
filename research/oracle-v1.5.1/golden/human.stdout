@@ -1,0 +1,25 @@
+.:1:1 warning oracle.duplication duplication over budget
+src/api/handler.js:1:8 warning oracle.ast syntax identifier found
+src/api/handler.js:1:27 error oracle.boundary api must not import db
+src/api/handler.js:2:14 warning oracle.ast syntax identifier found
+src/api/handler.js:2:25 warning oracle.ast syntax identifier found
+src/coverage/low.rs:1:1 warning oracle.coverage coverage below 80 percent
+src/coverage/low.rs:1:4 warning oracle.ast syntax identifier found
+src/coverage/low.rs:2:9 warning oracle.ast syntax identifier found
+src/coverage/low.rs:3:9 warning oracle.ast syntax identifier found
+src/dup/a.txt:1:1 info metrics.duplicate-block duplicated block, also at src/dup/b.txt:1
+src/dup/b.txt:1:1 info metrics.duplicate-block duplicated block, also at src/dup/a.txt:1
+src/lang/Sample.cs:1:7 warning oracle.ast syntax identifier found
+src/lang/Sample.java:1:7 warning oracle.ast syntax identifier found
+src/lang/sample.c:1:5 warning oracle.ast syntax identifier found
+src/lang/sample.cpp:1:5 warning oracle.ast syntax identifier found
+src/lang/sample.go:1:9 warning oracle.ast syntax identifier found
+src/lang/sample.js:1:7 warning oracle.ast syntax identifier found
+src/lang/sample.py:1:1 warning oracle.ast syntax identifier found
+src/lang/sample.rb:1:1 warning oracle.ast syntax identifier found
+src/lang/sample.rs:1:4 warning oracle.ast syntax identifier found
+src/lang/sample.ts:1:7 warning oracle.ast syntax identifier found
+src/markers.txt:1:1 error oracle.regex regex marker found
+src/markers.txt:3:14 error oracle.secret synthetic token found
+23 findings (0 baselined, 1 suppressed)
+metrics: 32 lines, 17 code lines, 6 duplicated lines, 18.8% duplication

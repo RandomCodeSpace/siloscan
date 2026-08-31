@@ -1,0 +1,35 @@
+siloscan-tui - interactive terminal UI for siloscan
+
+Usage: siloscan-tui [PATH] [--rules DIR]... [--no-default-rules] [--config FILE]
+       siloscan-tui --report FILE [--config FILE]
+
+Arguments:
+  PATH                 Path to scan (default: .)
+
+Options:
+      --rules DIR      Rule directory, repeatable
+      --no-default-rules
+                       Do not load the built-in rule pack. A run that ends up
+                       with no rules at all checks nothing and is refused with
+                       exit 2, since an empty dashboard would read as a clean
+                       tree
+      --config FILE    Repository config (default: nearest siloscan.toml at
+                       PATH, or above it only when a .git marker exists at or
+                       above PATH; pass this explicitly for an exported tree
+                       that has none)
+      --report FILE    Open a JSON report as a read-only snapshot instead of
+                       scanning; cannot be combined with PATH
+      --no-ignore      Scan every file: ignore no .gitignore and no .ignore
+      --no-gitignore   Ignore .ignore files but not .gitignore files
+      --respect-parent-ignores
+                       Also honor ignore files above the scan root
+      --respect-git-exclude
+                       Also honor PATH/.git/info/exclude
+      --respect-global-gitignore
+                       Also honor git's global core.excludesFile
+      --follow-symlinks
+                       Follow symlinks whose target is inside the scan root.
+                       Targets outside it are never followed. A file behind a
+                       followed link is reported under both paths
+  -h, --help           Print help
+  -V, --version        Print version

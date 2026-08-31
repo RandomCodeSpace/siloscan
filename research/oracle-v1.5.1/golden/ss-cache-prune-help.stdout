@@ -1,0 +1,18 @@
+Delete cache entries written by a different siloscan build
+
+Usage: ss cache prune [OPTIONS] [PATH]
+
+Arguments:
+  [PATH]
+          Scan root whose cache entries are pruned
+
+          The path names the tree, not the cache: entries are keyed by scan root, so this says whose cache to sweep, and the cache itself is found the way a scan of that root would find it.
+
+          [default: .]
+
+Options:
+      --cache-dir <DIR>
+          Prune under DIR instead of this user's cache directory; use the same value the scans being pruned were run with
+
+  -h, --help
+          Print help (see a summary with '-h')

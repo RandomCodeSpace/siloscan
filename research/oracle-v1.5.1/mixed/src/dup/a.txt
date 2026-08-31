@@ -1,0 +1,3 @@
+same alpha
+same beta
+same gamma

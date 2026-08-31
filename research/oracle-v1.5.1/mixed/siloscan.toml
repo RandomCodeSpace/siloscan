@@ -1,0 +1,7 @@
+[duplication]
+min_lines = 3
+report_blocks = true
+
+[silos]
+api = ["src/api/**"]
+db = ["src/db/**"]
