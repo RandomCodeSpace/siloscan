@@ -35,8 +35,8 @@ Exit codes: `0` clean, `1` new findings at or above the `--fail-on` threshold
 ## Documentation
 
 See the [project README](https://github.com/RandomCodeSpace/siloscan#readme)
-for the rule schema, configuration format, suppression and baselines, and the
-JSON report contract.
+for the quick start, a custom rule example, baselines, terminal review, and CI
+usage.
 
 ## License
 

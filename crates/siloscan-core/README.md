@@ -26,7 +26,8 @@ features to trim the build.
 ## Documentation
 
 See the [project README](https://github.com/RandomCodeSpace/siloscan#readme)
-for the rule schema, configuration format, and report contract.
+for the project overview, a custom rule example, repository defaults, and the
+scanner workflow.
 
 ## License
 

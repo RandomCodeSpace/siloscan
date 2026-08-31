@@ -25,7 +25,7 @@ siloscan-tui --report report.json   # load a JSON report (read-only)
 ## Documentation
 
 See the [project README](https://github.com/RandomCodeSpace/siloscan#readme)
-for the rule schema, configuration format, and report contract.
+for installation, the first scan, custom rules, baselines, and CI reports.
 
 ## License
 
