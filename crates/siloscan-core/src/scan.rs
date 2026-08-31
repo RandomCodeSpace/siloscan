@@ -1297,7 +1297,11 @@ fn scan_one(
         FileKind::Binary => (Outcome::Binary, 0),
         FileKind::Unreadable(reason) => (Outcome::Unreadable(reason), 0),
         FileKind::Text(content) => {
-            let language = crate::lang::detect(path, &content);
+            let language = crate::lang::detect_configured(
+                path,
+                &content,
+                options.config.map(|config| &config.languages),
+            );
             // Measured here, from the file itself: a cache hit replaces the
             // engine work below, and metrics must not move with the cache.
             let metrics = crate::metrics::measure_file(&content, language);
@@ -1413,10 +1417,12 @@ fn scan_text(
     options: &ScanOptions,
     path_rel: &str,
     content: &str,
-    language: Option<&'static str>,
+    language: Option<&str>,
     parse: bool,
 ) -> Result<crate::cache::CachedFile, RegexCompileError> {
-    let hash = options.cache.map(|_| entry_hash(path_rel, content, parse));
+    let hash = options
+        .cache
+        .map(|_| entry_hash(path_rel, content, language, parse));
 
     if let (Some(cache), Some(hash)) = (options.cache, &hash)
         && let Some(entry) = cache.get(hash, content)
@@ -1467,13 +1473,16 @@ fn scan_text(
 /// repo-relative path, and its fingerprint is derived from it, so two identical
 /// files at different paths are not interchangeable.
 ///
-/// The parse decision leads the key. It selects which engines ran, and it is
-/// taken from the config rather than from the rule sources the rest of the key
-/// covers, so a config that moves `limits.max_parse_bytes` across a file's size
-/// must not be served the entry the other side of the cap wrote.
-fn entry_hash(path_rel: &str, content: &str, parse: bool) -> String {
-    let mut buf = Vec::with_capacity(path_rel.len() + content.len() + 2);
+/// The language and parse decision lead the key. Both select which engines ran,
+/// and both may now come from config rather than from the rule sources the rest
+/// of the key covers. A cache entry written under one configured extension or
+/// parse-size decision must not be served under another.
+fn entry_hash(path_rel: &str, content: &str, language: Option<&str>, parse: bool) -> String {
+    let language = language.unwrap_or("");
+    let mut buf = Vec::with_capacity(path_rel.len() + content.len() + language.len() + 3);
     buf.push(if parse { b'1' } else { b'0' });
+    buf.extend_from_slice(language.as_bytes());
+    buf.push(0);
     buf.extend_from_slice(path_rel.as_bytes());
     buf.push(0);
     buf.extend_from_slice(content.as_bytes());

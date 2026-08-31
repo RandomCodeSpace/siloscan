@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::Path;
 
 /// Detect programming language from file path or content.
@@ -8,6 +9,22 @@ pub fn detect(path: &Path, content: &str) -> Option<&'static str> {
         return detect_by_extension(path);
     }
     detect_by_shebang(content)
+}
+
+/// Apply an accepted config extension mapping before the built-in detector.
+/// The map keys omit the dot, matching [`crate::config::Config::languages`].
+pub(crate) fn detect_configured<'a>(
+    path: &Path,
+    content: &str,
+    languages: Option<&'a BTreeMap<String, String>>,
+) -> Option<&'a str> {
+    if let Some(extension) = path.extension().and_then(|extension| extension.to_str()) {
+        let extension = extension.to_ascii_lowercase();
+        if let Some(language) = languages.and_then(|languages| languages.get(&extension)) {
+            return Some(language);
+        }
+    }
+    detect(path, content)
 }
 
 fn detect_by_extension(path: &Path) -> Option<&'static str> {

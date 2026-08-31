@@ -14,6 +14,9 @@ pub mod metrics;
 pub mod output;
 pub mod output_sarif;
 pub mod parsers;
+// Package 4 consumes this private staged contract through the prepared scan.
+#[allow(dead_code)]
+pub(crate) mod project;
 pub mod rules;
 pub mod scan;
 pub mod suppress;
