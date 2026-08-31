@@ -1691,7 +1691,7 @@ fn unhex(text: &str) -> Option<[u8; SALT_LEN]> {
         return None;
     }
     let mut out = Vec::with_capacity(SALT_LEN);
-    for pair in bytes.chunks_exact(2) {
+    for pair in bytes.as_chunks::<2>().0 {
         let text = std::str::from_utf8(pair).ok()?;
         out.push(u8::from_str_radix(text, 16).ok()?);
     }
