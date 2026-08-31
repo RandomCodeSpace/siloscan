@@ -1,0 +1,1574 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Siloscan v2 zero-config policy prototype</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #0b0f0d;
+      --panel: #121815;
+      --panel-2: #171f1b;
+      --border: #29352f;
+      --text: #edf4ef;
+      --muted: #9aaba1;
+      --accent: #a8ff78;
+      --accent-2: #5ce1b9;
+      --warning: #ffc857;
+      --danger: #ff7b72;
+      --info: #84b6f4;
+      --shadow: 0 18px 50px rgba(0, 0, 0, 0.28);
+    }
+
+    * { box-sizing: border-box; }
+
+    html { scroll-behavior: smooth; }
+
+    body {
+      margin: 0;
+      background:
+        radial-gradient(circle at 12% 0%, rgba(168, 255, 120, 0.09), transparent 32rem),
+        radial-gradient(circle at 88% 18%, rgba(92, 225, 185, 0.06), transparent 28rem),
+        var(--bg);
+      color: var(--text);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      line-height: 1.55;
+    }
+
+    a { color: inherit; }
+
+    code, pre, .mono {
+      font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+    }
+
+    code {
+      color: #d9ffc4;
+      font-size: 0.94em;
+    }
+
+    .shell {
+      width: min(1180px, calc(100% - 40px));
+      margin: 0 auto;
+    }
+
+    .topbar {
+      position: sticky;
+      top: 0;
+      z-index: 20;
+      border-bottom: 1px solid rgba(168, 255, 120, 0.16);
+      background: rgba(11, 15, 13, 0.9);
+      backdrop-filter: blur(16px);
+    }
+
+    .topbar .shell {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      min-height: 56px;
+      gap: 24px;
+    }
+
+    .brand {
+      color: var(--accent);
+      font-family: "SFMono-Regular", Consolas, monospace;
+      font-size: 13px;
+      font-weight: 800;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    nav {
+      display: flex;
+      gap: 18px;
+      overflow-x: auto;
+      font-size: 13px;
+      color: var(--muted);
+    }
+
+    nav a { text-decoration: none; white-space: nowrap; }
+    nav a:hover { color: var(--text); }
+
+    header {
+      padding: 92px 0 66px;
+    }
+
+    .eyebrow {
+      margin: 0 0 14px;
+      color: var(--accent);
+      font: 800 12px/1.2 "SFMono-Regular", Consolas, monospace;
+      letter-spacing: 0.13em;
+      text-transform: uppercase;
+    }
+
+    h1, h2, h3 { margin: 0; line-height: 1.08; }
+
+    h1 {
+      max-width: 850px;
+      font-size: clamp(44px, 7vw, 82px);
+      letter-spacing: -0.055em;
+    }
+
+    h2 {
+      font-size: clamp(30px, 4.5vw, 50px);
+      letter-spacing: -0.035em;
+    }
+
+    h3 {
+      font-size: 18px;
+      letter-spacing: -0.015em;
+    }
+
+    .lead {
+      max-width: 760px;
+      margin: 24px 0 0;
+      color: #c2cec7;
+      font-size: clamp(17px, 2vw, 21px);
+    }
+
+    .question {
+      margin-top: 34px;
+      padding: 22px 24px;
+      border: 1px solid var(--border);
+      border-left: 4px solid var(--accent);
+      border-radius: 12px;
+      background: rgba(18, 24, 21, 0.78);
+      box-shadow: var(--shadow);
+    }
+
+    .question strong { color: var(--accent); }
+
+    section { padding: 68px 0; }
+
+    .section-head {
+      display: grid;
+      grid-template-columns: minmax(0, 0.72fr) minmax(300px, 0.28fr);
+      gap: 42px;
+      align-items: end;
+      margin-bottom: 30px;
+    }
+
+    .section-head p {
+      margin: 0;
+      color: var(--muted);
+    }
+
+    .card {
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      background: linear-gradient(145deg, rgba(23, 31, 27, 0.96), rgba(15, 20, 18, 0.96));
+      box-shadow: var(--shadow);
+    }
+
+    .recommendation {
+      display: grid;
+      grid-template-columns: 1.1fr 0.9fr;
+      overflow: hidden;
+    }
+
+    .recommendation > div { padding: 34px; }
+
+    .recommendation .decision {
+      border-right: 1px solid var(--border);
+    }
+
+    .decision h2 { max-width: 650px; }
+
+    .decision p {
+      max-width: 690px;
+      color: #c7d4cc;
+      font-size: 17px;
+    }
+
+    .decision-list {
+      display: grid;
+      gap: 14px;
+      margin: 0;
+      padding: 0;
+      list-style: none;
+    }
+
+    .decision-list li {
+      display: grid;
+      grid-template-columns: 30px 1fr;
+      gap: 10px;
+      align-items: start;
+      color: #c7d4cc;
+    }
+
+    .decision-list b {
+      display: grid;
+      place-items: center;
+      width: 26px;
+      height: 26px;
+      border-radius: 999px;
+      background: rgba(168, 255, 120, 0.12);
+      color: var(--accent);
+      font: 800 12px/1 "SFMono-Regular", Consolas, monospace;
+    }
+
+    .baseline-grid {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 14px;
+      margin-top: 18px;
+    }
+
+    .stat {
+      padding: 20px;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      background: rgba(18, 24, 21, 0.8);
+    }
+
+    .stat strong {
+      display: block;
+      color: var(--accent);
+      font-size: 27px;
+    }
+
+    .stat span { color: var(--muted); font-size: 13px; }
+
+    .lab {
+      display: grid;
+      grid-template-columns: 340px minmax(0, 1fr);
+      gap: 18px;
+      align-items: start;
+    }
+
+    .controls {
+      position: sticky;
+      top: 74px;
+      padding: 22px;
+    }
+
+    .control-group { margin-bottom: 18px; }
+
+    .control-label {
+      display: block;
+      margin-bottom: 7px;
+      color: #dce9e1;
+      font-size: 13px;
+      font-weight: 750;
+    }
+
+    select, button {
+      font: inherit;
+    }
+
+    select {
+      width: 100%;
+      padding: 10px 12px;
+      border: 1px solid #35463e;
+      border-radius: 9px;
+      background: #0e1411;
+      color: var(--text);
+    }
+
+    .switch-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 14px;
+      min-height: 38px;
+      border-bottom: 1px solid rgba(41, 53, 47, 0.65);
+      color: #c5d3ca;
+      font-size: 13px;
+    }
+
+    .switch-row:last-child { border-bottom: 0; }
+
+    input[type="checkbox"] {
+      width: 18px;
+      height: 18px;
+      accent-color: var(--accent);
+    }
+
+    button {
+      border: 1px solid #3a4b43;
+      border-radius: 9px;
+      background: #17201b;
+      color: var(--text);
+      cursor: pointer;
+      padding: 10px 12px;
+      transition: border-color 120ms ease, background 120ms ease;
+    }
+
+    button:hover { border-color: var(--accent); background: #1d2922; }
+    button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+    button.primary {
+      background: var(--accent);
+      border-color: var(--accent);
+      color: #0b100d;
+      font-weight: 850;
+    }
+
+    .button-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+    }
+
+    .button-grid button:first-child { grid-column: 1 / -1; }
+
+    .output {
+      display: grid;
+      gap: 18px;
+    }
+
+    .status-strip {
+      display: grid;
+      grid-template-columns: repeat(5, 1fr);
+      gap: 1px;
+      overflow: hidden;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      background: var(--border);
+    }
+
+    .status-step {
+      padding: 15px 12px;
+      background: #111713;
+      color: #718078;
+      font: 750 11px/1.3 "SFMono-Regular", Consolas, monospace;
+      text-align: center;
+      text-transform: uppercase;
+    }
+
+    .status-step.current { color: #0d120f; background: var(--accent); }
+    .status-step.done { color: var(--accent); background: #16231b; }
+
+    .two-col {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 18px;
+    }
+
+    .panel { padding: 24px; }
+    .panel h3 { margin-bottom: 18px; }
+
+    .kv {
+      display: grid;
+      grid-template-columns: minmax(110px, 0.38fr) minmax(0, 0.62fr);
+      gap: 10px 16px;
+      margin: 0;
+    }
+
+    .kv dt {
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .kv dd {
+      margin: 0;
+      overflow-wrap: anywhere;
+      color: #dce7e0;
+      font-size: 13px;
+    }
+
+    .capability-list, .profile-list {
+      display: grid;
+      gap: 8px;
+    }
+
+    .capability {
+      display: grid;
+      grid-template-columns: minmax(105px, 0.28fr) 116px minmax(0, 1fr);
+      gap: 12px;
+      align-items: start;
+      padding: 10px 0;
+      border-bottom: 1px solid rgba(41, 53, 47, 0.72);
+      font-size: 13px;
+    }
+
+    .capability:last-child { border-bottom: 0; }
+
+    .status {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 24px;
+      border-radius: 999px;
+      padding: 3px 9px;
+      font: 800 10px/1.2 "SFMono-Regular", Consolas, monospace;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }
+
+    .enabled { color: var(--accent); background: rgba(168, 255, 120, 0.1); }
+    .skipped { color: var(--warning); background: rgba(255, 200, 87, 0.11); }
+    .unavailable { color: var(--danger); background: rgba(255, 123, 114, 0.1); }
+    .not-configured { color: var(--info); background: rgba(132, 182, 244, 0.1); }
+
+    .reason { color: var(--muted); }
+
+    .terminal {
+      overflow: hidden;
+      border: 1px solid #324039;
+      border-radius: 12px;
+      background: #080b09;
+      box-shadow: var(--shadow);
+    }
+
+    .terminal-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 11px 15px;
+      border-bottom: 1px solid #27322d;
+      color: var(--muted);
+      font: 750 11px/1.2 "SFMono-Regular", Consolas, monospace;
+    }
+
+    .terminal pre {
+      min-height: 260px;
+      margin: 0;
+      padding: 20px;
+      overflow: auto;
+      color: #d7e7dc;
+      font-size: 12px;
+      line-height: 1.72;
+      white-space: pre-wrap;
+    }
+
+    .stderr { color: #ffd7a0; }
+
+    .error-box {
+      padding: 16px 18px;
+      border: 1px solid rgba(255, 123, 114, 0.48);
+      border-radius: 10px;
+      background: rgba(255, 123, 114, 0.08);
+      color: #ffd0cc;
+    }
+
+    .guide-card { overflow: hidden; }
+
+    .tabs {
+      display: flex;
+      gap: 4px;
+      overflow-x: auto;
+      padding: 12px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .tabs button {
+      flex: 0 0 auto;
+      padding: 8px 11px;
+      background: transparent;
+      border-color: transparent;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .tabs button.active {
+      color: #0b100d;
+      background: var(--accent);
+      border-color: var(--accent);
+    }
+
+    .walkthrough { padding: 22px; }
+    .walkthrough p { color: var(--muted); }
+
+    .steps {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 9px;
+      margin-top: 16px;
+    }
+
+    .steps button.completed { color: var(--accent); border-color: rgba(168, 255, 120, 0.45); }
+    .steps button.next { border-color: var(--accent); }
+
+    .table-wrap {
+      overflow-x: auto;
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      background: rgba(15, 20, 18, 0.92);
+    }
+
+    table {
+      width: 100%;
+      min-width: 930px;
+      border-collapse: collapse;
+      font-size: 13px;
+    }
+
+    th, td {
+      padding: 15px 16px;
+      border-bottom: 1px solid var(--border);
+      text-align: left;
+      vertical-align: top;
+    }
+
+    th {
+      color: var(--accent);
+      background: #121915;
+      font: 800 11px/1.3 "SFMono-Regular", Consolas, monospace;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+    }
+
+    tbody tr:last-child td { border-bottom: 0; }
+    tbody tr.active-row { background: rgba(168, 255, 120, 0.06); }
+
+    .routing-grid, .gate-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 14px;
+    }
+
+    .route, .gate { padding: 22px; }
+    .route p, .gate p { margin-bottom: 0; color: var(--muted); font-size: 14px; }
+
+    .gate-number {
+      display: block;
+      margin-bottom: 12px;
+      color: var(--accent);
+      font: 900 12px/1 "SFMono-Regular", Consolas, monospace;
+    }
+
+    .reaction {
+      padding: 34px;
+      border-color: rgba(168, 255, 120, 0.36);
+      background: linear-gradient(145deg, rgba(29, 45, 35, 0.92), rgba(15, 23, 19, 0.96));
+    }
+
+    .reaction p { max-width: 820px; color: #c8d6cd; }
+
+    .muted { color: var(--muted); }
+
+    footer {
+      padding: 34px 0 50px;
+      border-top: 1px solid var(--border);
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    @media (max-width: 920px) {
+      .section-head, .recommendation, .lab, .two-col { grid-template-columns: 1fr; }
+      .recommendation .decision { border-right: 0; border-bottom: 1px solid var(--border); }
+      .controls { position: static; }
+      .baseline-grid, .routing-grid, .gate-grid { grid-template-columns: 1fr 1fr; }
+    }
+
+    @media (max-width: 620px) {
+      .shell { width: min(100% - 24px, 1180px); }
+      header { padding-top: 64px; }
+      .topbar .shell { align-items: flex-start; flex-direction: column; padding: 12px 0; }
+      .baseline-grid, .routing-grid, .gate-grid, .status-strip { grid-template-columns: 1fr; }
+      .status-step { display: none; }
+      .status-step.current { display: block; }
+      .capability { grid-template-columns: 1fr; }
+      .button-grid { grid-template-columns: 1fr; }
+      .button-grid button:first-child { grid-column: auto; }
+    }
+  </style>
+</head>
+<body>
+  <div class="topbar">
+    <div class="shell">
+      <div class="brand">Siloscan v2 policy lab</div>
+      <nav aria-label="Prototype sections">
+        <a href="#decision">Decision</a>
+        <a href="#lab">Try it</a>
+        <a href="#matrix">Matrix</a>
+        <a href="#routing">Output</a>
+        <a href="#gate">Admission gate</a>
+      </nav>
+    </div>
+  </div>
+
+  <header>
+    <div class="shell">
+      <p class="eyebrow">Throwaway logic prototype</p>
+      <h1>Detect the project. Do not invent confidence.</h1>
+      <p class="lead">
+        This demo tests the zero-config policy behind bare <code>siloscan</code>. It makes project
+        setup visible, runs the checks Siloscan already proves, saves one report, and refuses to
+        activate ecosystem rules that have never passed a noise and performance corpus.
+      </p>
+      <div class="question">
+        <strong>Decision:</strong> a valid manifest explains the project. It does not activate new
+        finding rules by itself. Launch stays on the measured 220-rule secret pack until each
+        ecosystem add-on earns admission with reproducible evidence.
+      </div>
+    </div>
+  </header>
+
+  <main>
+    <section id="decision">
+      <div class="shell">
+        <div class="recommendation card">
+          <div class="decision">
+            <p class="eyebrow">Recommended launch contract</p>
+            <h2>Ship project detection. Ship no unmeasured ecosystem profile.</h2>
+            <p>
+              A Cargo manifest proves that a repository uses Cargo. It says nothing about the false
+              positive rate of a proposed Rust rule. Bare v2 should therefore add truthful project
+              metadata, capability reasons, durable JSON, and same-command review while keeping the
+              current finding baseline intact.
+            </p>
+          </div>
+          <div>
+            <ol class="decision-list">
+              <li><b>1</b><span>The existing default pack stays whole and keeps all 220 secret rules.</span></li>
+              <li><b>2</b><span>Line, code-line, and duplication metrics still run once over the admitted inventory.</span></li>
+              <li><b>3</b><span>Text, syntax, boundary, coverage, and duplication findings run only when effective rules and required inputs select them.</span></li>
+              <li><b>4</b><span>The existing pack is labeled <code>default-secrets@1</code>. Every ecosystem add-on reports <code>none</code> at launch because no versioned measured add-on exists.</span></li>
+              <li><b>5</b><span>Later profiles activate only on the automatic journey after their own corpus and the 5% gates pass.</span></li>
+            </ol>
+          </div>
+        </div>
+
+        <div class="baseline-grid" aria-label="Current default facts">
+          <div class="stat"><strong>220</strong><span>embedded secret rules</span></div>
+          <div class="stat"><strong>214 + 6</strong><span>translated and hand-tuned rules</span></div>
+          <div class="stat"><strong>0</strong><span>measured ecosystem profiles</span></div>
+          <div class="stat"><strong>5%</strong><span>maximum repeated time or RSS regression</span></div>
+        </div>
+      </div>
+    </section>
+
+    <section id="lab">
+      <div class="shell">
+        <div class="section-head">
+          <div>
+            <p class="eyebrow">Interactive policy</p>
+            <h2>Change the evidence. Watch what may run.</h2>
+          </div>
+          <p>
+            The controls drive a pure state reducer. The page only renders its result. Start with the
+            guided cases, then try the bad combinations.
+          </p>
+        </div>
+
+        <div class="lab">
+          <aside class="controls card" aria-label="Policy controls">
+            <div class="control-group">
+              <label class="control-label" for="scenario">Repository evidence</label>
+              <select id="scenario"></select>
+            </div>
+
+            <div class="control-group">
+              <label class="control-label" for="invocation">Invocation</label>
+              <select id="invocation">
+                <option value="bare">Bare siloscan</option>
+                <option value="no-save">Bare semantics with --no-save</option>
+                <option value="explicit-path">Explicit PATH</option>
+                <option value="legacy-option">Existing v1 scan option</option>
+                <option value="explicit-save">Explicit PATH with --save</option>
+              </select>
+            </div>
+
+            <div class="control-group">
+              <div class="switch-row">
+                <label for="defaults">Embedded default pack</label>
+                <input id="defaults" type="checkbox" checked>
+              </div>
+              <div class="switch-row">
+                <label for="project-rules">Configured six-engine policy pack</label>
+                <input id="project-rules" type="checkbox">
+              </div>
+              <div class="switch-row">
+                <label for="required-inputs">Required silos and coverage input</label>
+                <input id="required-inputs" type="checkbox">
+              </div>
+              <div class="switch-row">
+                <label for="profile-measured">Simulate admitted profile</label>
+                <input id="profile-measured" type="checkbox">
+              </div>
+              <div class="switch-row">
+                <label for="save-failure">Fail report publication</label>
+                <input id="save-failure" type="checkbox">
+              </div>
+            </div>
+
+            <div class="control-group">
+              <label class="control-label" for="result-shape">Example scan result</label>
+              <select id="result-shape">
+                <option value="clean">No findings</option>
+                <option value="findings">Two new findings</option>
+                <option value="debt">One new, three baselined, one suppressed</option>
+                <option value="visibility">Existing ignored and filtered lines</option>
+              </select>
+            </div>
+
+            <div class="button-grid" aria-label="Free-play actions">
+              <button id="advance" class="primary" type="button">Advance one phase</button>
+              <button id="back" type="button">Back one phase</button>
+              <button id="reset" type="button">Reset case</button>
+            </div>
+          </aside>
+
+          <div class="output" aria-live="polite">
+            <div class="status-strip" id="phase-strip"></div>
+
+            <div class="two-col">
+              <article class="panel card">
+                <h3>Resolved scan</h3>
+                <dl class="kv" id="resolved-state"></dl>
+              </article>
+              <article class="panel card">
+                <h3>Persistence and outcome</h3>
+                <dl class="kv" id="persistence-state"></dl>
+              </article>
+            </div>
+
+            <article class="panel card">
+              <h3>Capability states</h3>
+              <div class="capability-list" id="capabilities"></div>
+            </article>
+
+            <article class="panel card">
+              <h3>Detected profile states</h3>
+              <div class="profile-list" id="profiles"></div>
+            </article>
+
+            <div id="blocking-error" class="error-box" hidden></div>
+
+            <div class="two-col">
+              <article class="terminal">
+                <div class="terminal-head"><span>Human stdout preview</span><span>bare-only additions + preserved current output</span></div>
+                <pre id="stdout"></pre>
+              </article>
+              <article class="terminal">
+                <div class="terminal-head"><span>Stderr preview</span><span>diagnostics and machine-format notices</span></div>
+                <pre id="stderr" class="stderr"></pre>
+              </article>
+            </div>
+
+            <article class="guide-card card">
+              <div class="tabs" id="guide-tabs" role="tablist"></div>
+              <div class="walkthrough">
+                <h3 id="guide-title"></h3>
+                <p id="guide-description"></p>
+                <div class="steps" id="guide-steps"></div>
+              </div>
+            </article>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="matrix">
+      <div class="shell">
+        <div class="section-head">
+          <div>
+            <p class="eyebrow">Launch activation matrix</p>
+            <h2>Evidence can qualify a profile. It cannot certify one.</h2>
+          </div>
+          <p>
+            Every launch row keeps the generic fallback. The final column is the proof a later
+            profile must use as its activation trigger after measurement.
+          </p>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Ecosystem</th>
+                <th>Launch evidence</th>
+                <th>Ecosystem add-on at launch</th>
+                <th>Generic checks</th>
+                <th>Future activation proof</th>
+              </tr>
+            </thead>
+            <tbody id="matrix-body"></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <section id="routing">
+      <div class="shell">
+        <div class="section-head">
+          <div>
+            <p class="eyebrow">Exact output contract</p>
+            <h2>Human guidance never contaminates machine output.</h2>
+          </div>
+          <p>
+            Existing explicit human output stays byte-compatible. The new explanation belongs to the
+            automatic journey and to additive v2 JSON setup fields.
+          </p>
+        </div>
+
+        <div class="routing-grid">
+          <article class="route card">
+            <h3>Bare human scan</h3>
+            <p>Print Project, Scope, Setup, Languages, Checks, Profiles, and Findings. Keep current finding, ignored, filtered, and metrics lines. After a successful save, print <code>Report: &lt;path&gt;</code> then <code>Review: siloscan review</code>.</p>
+          </article>
+          <article class="route card">
+            <h3>JSON or SARIF stdout</h3>
+            <p>Write one parseable document and nothing else. JSON carries additive setup metadata. SARIF stays unchanged. After successful publication, stderr receives <code>Report: &lt;path&gt;</code> then <code>Review: siloscan review</code>.</p>
+          </article>
+          <article class="route card">
+            <h3>Explicit compatibility</h3>
+            <p>Detection metadata may be recorded, but no detected profile changes findings. Existing output stays exact. A requested save adds only the settled report and review notices.</p>
+          </article>
+          <article class="route card">
+            <h3>Publication failure</h3>
+            <p>Emit the completed scan result, print one save error to stderr, omit Report and Review success lines, and exit 2. A preflight failure emits no scan output.</p>
+          </article>
+          <article class="route card">
+            <h3>No saved report</h3>
+            <p><code>--no-save</code> and stateless explicit scans print no Report or Review lines. Review never guesses a temporary or another scope.</p>
+          </article>
+          <article class="route card">
+            <h3>No runnable rules</h3>
+            <p>If embedded defaults are disabled and no other rule source remains, preserve the current no-rules refusal. Do not scan, save, or print a clean result.</p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section id="gate">
+      <div class="shell">
+        <div class="section-head">
+          <div>
+            <p class="eyebrow">Profile admission gate</p>
+            <h2>A profile ships after evidence, not enthusiasm.</h2>
+          </div>
+          <p>
+            These conditions apply to each fixed embedded profile. Passing one ecosystem does not
+            authorize another.
+          </p>
+        </div>
+
+        <div class="gate-grid">
+          <article class="gate card"><span class="gate-number">01</span><h3>Version it</h3><p>Use globally unique rule IDs and a fixed embedded profile version. No downloaded rules, plugin registry, or mutable remote source.</p></article>
+          <article class="gate card"><span class="gate-number">02</span><h3>Name the trigger</h3><p>Activate from accepted evidence facts and admitted language files. A manifest name alone is not enough when its contents are invalid or executable.</p></article>
+          <article class="gate card"><span class="gate-number">03</span><h3>Measure noise</h3><p>Commit positive fixtures and a pinned negative corpus. Every expected finding must appear, every classified negative must stay quiet, and measured recall must be recorded as a floor.</p></article>
+          <article class="gate card"><span class="gate-number">04</span><h3>Keep compatibility</h3><p>Explicit PATH and existing v1 option journeys retain admitted files, findings, fingerprints, baselines, metrics, machine output, and status.</p></article>
+          <article class="gate card"><span class="gate-number">05</span><h3>Pass performance</h3><p>Compare explicit v1.5.1 and v2 scans in <code>--no-cache</code>, cold, and warm states; bare v1.5.1 and v2 <code>--no-save</code> in cold and warm states; and bare v1.5.1 and v2 automatic save in cold-first-publication and warm-replacement states. Measure wall time and OS peak RSS independently for every path and state with nine paired ABBA samples on one GitHub Actions runner. A ratio above 1.05 is suspected; repeat the complete pair on a fresh runner and block the same path, state, and metric when it exceeds 1.05 twice. Invalidate a reference series above 20% median absolute deviation and retain raw samples.</p></article>
+          <article class="gate card"><span class="gate-number">06</span><h3>Stay additive</h3><p>A profile may add findings. It cannot disable the default pack, lower severity, filter scan scope, invent architecture, or require a project tool or network. Its rules load once and must self-scope by language or exact path.</p></article>
+        </div>
+
+        <div class="reaction card" style="margin-top: 28px">
+          <p class="eyebrow">Recommended approval</p>
+          <h2>Approve the measured-default policy.</h2>
+          <p>
+            Ship detection, explanation, persistence, and review with <code>default-secrets@1</code>.
+            Keep every ecosystem add-on out of the launch set until its own evidence, noise, compatibility,
+            and paired performance gates pass.
+          </p>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <div class="shell">
+      Prototype only. It changes no production behavior. Rust remains the implementation language.
+      Security hardening and new scanning engines are outside this Wayfinder map.
+    </div>
+  </footer>
+
+  <script type="module">
+    const ScanPolicy = (() => {
+      const DEFAULT_RULES = 220;
+      const phases = ["request", "detected", "resolved", "scanned", "published"];
+
+      const scenarios = {
+        rust: {
+          label: "Rust workspace",
+          project: "Rust workspace, 3 units",
+          setup: "Cargo.toml complete",
+          files: 148,
+          languages: ["Rust"],
+          evidenceStatus: "complete",
+          candidates: ["Rust"],
+          futureProof: "Complete Cargo package or workspace evidence plus admitted Rust source"
+        },
+        go: {
+          label: "Go workspace",
+          project: "Go workspace, 2 modules",
+          setup: "go.work and 2 go.mod files complete",
+          files: 92,
+          languages: ["Go"],
+          evidenceStatus: "complete",
+          candidates: ["Go"],
+          futureProof: "Complete in-root go.mod module plus admitted Go source"
+        },
+        javascript: {
+          label: "JavaScript and TypeScript package",
+          project: "JavaScript and TypeScript workspace, 2 units",
+          setup: "package.json complete; tsconfig.json partial",
+          files: 206,
+          languages: ["JavaScript", "TypeScript"],
+          evidenceStatus: "complete",
+          candidates: ["JavaScript/TypeScript"],
+          futureProof: "Valid package.json object plus admitted JavaScript or TypeScript source; tsconfig alone is insufficient"
+        },
+        python: {
+          label: "Python project",
+          project: "Python project, 1 unit",
+          setup: "pyproject.toml complete",
+          files: 73,
+          languages: ["Python"],
+          evidenceStatus: "complete",
+          candidates: ["Python"],
+          futureProof: "pyproject.toml with project or build-system evidence plus admitted Python source"
+        },
+        java: {
+          label: "Java project",
+          project: "Maven project, 4 units",
+          setup: "pom.xml complete; profile-controlled module unresolved",
+          files: 312,
+          languages: ["Java"],
+          evidenceStatus: "partial",
+          candidates: ["Java"],
+          futureProof: "Well-formed Maven model and Java source; Gradle script presence alone remains partial"
+        },
+        c_cpp: {
+          label: "C and C++ source tree",
+          project: "C and C++ source tree; CMake setup partial",
+          setup: "CMakeLists.txt partial because scripts are not evaluated",
+          files: 167,
+          languages: ["C", "C++"],
+          evidenceStatus: "partial",
+          candidates: ["C/C++"],
+          futureProof: "Admitted C or C++ source is exact language evidence; CMake text cannot prove targets"
+        },
+        csharp: {
+          label: "C# solution",
+          project: "C# solution, 3 projects",
+          setup: ".sln and 3 .csproj files complete; MSBuild imports unresolved",
+          files: 211,
+          languages: ["C#"],
+          evidenceStatus: "partial",
+          candidates: ["C#"],
+          futureProof: "Well-formed in-root project evidence plus admitted C# source"
+        },
+        ruby: {
+          label: "Ruby application",
+          project: "Ruby application, 2 partial gem units",
+          setup: "Gemfile and gemspecs partial because Ruby is not evaluated",
+          files: 84,
+          languages: ["Ruby"],
+          evidenceStatus: "partial",
+          candidates: ["Ruby"],
+          futureProof: "Admitted Ruby source plus readable in-root Ruby setup evidence; no computed workspace claim"
+        },
+        mixed: {
+          label: "Mixed repository with invalid evidence",
+          project: "Rust workspace and Python project; JavaScript setup invalid",
+          setup: "Cargo.toml complete; pyproject.toml complete; web/package.json invalid",
+          files: 640,
+          languages: ["Rust", "JavaScript", "Python"],
+          evidenceStatus: "invalid",
+          candidates: ["Rust", "Python", "JavaScript/TypeScript"],
+          invalidCandidates: ["JavaScript/TypeScript"],
+          futureProof: "Evaluate each ecosystem independently; never elect a primary ecosystem"
+        },
+        generic: {
+          label: "Generic source tree",
+          project: "Generic source tree; no proven project unit",
+          setup: "No supported primary manifest",
+          files: 29,
+          languages: ["C", "Python"],
+          evidenceStatus: "absent",
+          candidates: [],
+          futureProof: "No ecosystem profile; the generic fallback is the complete intended behavior"
+        }
+      };
+
+      const matrix = [
+        ["rust", "Rust", "Cargo.toml with package or workspace facts", "Complete Cargo evidence plus admitted Rust source"],
+        ["go", "Go", "Strict go.mod; direct go.work use facts", "Complete module evidence plus admitted Go source"],
+        ["javascript", "JavaScript/TypeScript", "Valid package.json; tsconfig stays partial", "Valid package plus admitted JS or TS source"],
+        ["python", "Python", "pyproject project or build-system facts", "Complete package evidence plus admitted Python source"],
+        ["java", "Java", "Well-formed Maven facts; Gradle stays partial", "Proven Maven unit plus Java source; no script evaluation"],
+        ["c_cpp", "C/C++", "Language files; CMake stays partial", "Admitted C or C++ source; never infer targets from scripts"],
+        ["csharp", "C#", "Well-formed project and solution XML/text", "Proven project evidence plus admitted C# source"],
+        ["ruby", "Ruby", "Gemfile and gemspec presence is partial", "Ruby source plus bounded setup evidence; never execute Ruby"],
+        ["mixed", "Mixed", "Union of independent ecosystem evidence", "Activate each admitted profile independently; no primary winner"],
+        ["generic", "Generic", "No supported primary evidence", "No ecosystem profile applies; generic fallback is final"]
+      ];
+
+      function initial(overrides = {}) {
+        return {
+          scenario: "rust",
+          invocation: "bare",
+          defaults: true,
+          projectRules: false,
+          requiredInputs: false,
+          measured: false,
+          saveFailure: false,
+          resultShape: "clean",
+          phase: 0,
+          ...overrides
+        };
+      }
+
+      function reduce(state, action) {
+        switch (action.type) {
+          case "reset":
+            return initial(action.value || {});
+          case "set":
+            return { ...state, [action.field]: action.value };
+          case "advance":
+            return { ...state, phase: Math.min(phases.length - 1, state.phase + 1) };
+          case "back":
+            return { ...state, phase: Math.max(0, state.phase - 1) };
+          default:
+            return state;
+        }
+      }
+
+      function invocation(state) {
+        const table = {
+          bare: {
+            label: "PATH omitted; no legacy scan option",
+            root: ".",
+            automatic: true,
+            save: true,
+            review: "siloscan review"
+          },
+          "no-save": {
+            label: "PATH omitted; new --no-save control",
+            root: ".",
+            automatic: true,
+            save: false,
+            review: null
+          },
+          "explicit-path": {
+            label: "Explicit PATH compatibility journey",
+            root: "services/api",
+            automatic: false,
+            save: false,
+            review: null
+          },
+          "legacy-option": {
+            label: "Existing v1 scan option; compatibility journey",
+            root: ".",
+            automatic: false,
+            save: false,
+            review: null
+          },
+          "explicit-save": {
+            label: "Explicit PATH with new --save control",
+            root: "services/api",
+            automatic: false,
+            save: true,
+            review: "siloscan review services/api"
+          }
+        };
+        return table[state.invocation];
+      }
+
+      function profileStates(state, scenario, call) {
+        if (scenario.candidates.length === 0) {
+          return [{
+            name: "Ecosystem add-on",
+            status: "not-configured",
+            reason: "No proven ecosystem profile applies; generic fallback is the intended scan"
+          }];
+        }
+
+        return scenario.candidates.map((candidate) => {
+          if (!state.defaults) {
+            return {
+              name: candidate + " add-on",
+              status: "skipped",
+              reason: "Caller disabled embedded defaults; that also disables detected profiles"
+            };
+          }
+          if (!call.automatic) {
+            return {
+              name: candidate + " add-on",
+              status: "skipped",
+              reason: "Compatibility journey records detection metadata but cannot change v1.5.1 findings"
+            };
+          }
+          if ((scenario.invalidCandidates || []).includes(candidate)) {
+            return {
+              name: candidate + " add-on",
+              status: "skipped",
+              reason: "Primary evidence is invalid; accepted facts remain visible but cannot activate this profile"
+            };
+          }
+          if (!state.measured) {
+            return {
+              name: candidate + " add-on",
+              status: "not-configured",
+              reason: "No versioned measured add-on for this ecosystem ships in the v2 launch set"
+            };
+          }
+          return {
+            name: candidate + " add-on",
+            status: "enabled",
+            reason: "Simulation only: a versioned profile passed its evidence, noise, compatibility, and 5% gates"
+          };
+        });
+      }
+
+      function blockingError(state, profileList) {
+        const anyProfile = profileList.some((item) => item.status === "enabled");
+        if (!state.defaults && !state.projectRules && !anyProfile) {
+          return "error: no rules loaded, so nothing would be checked; the current refusal is preserved";
+        }
+        if (state.projectRules && !state.requiredInputs) {
+          return "error: configured boundary or coverage rules need their required silos and coverage input; they are not silently skipped";
+        }
+        return null;
+      }
+
+      function capabilityStates(state) {
+        return [
+          {
+            name: "Project detection",
+            status: "enabled",
+            reason: "Reads facts from the same admitted inventory; no second traversal or project tool"
+          },
+          {
+            name: "Secrets",
+            status: state.defaults ? "enabled" : "skipped",
+            reason: state.defaults
+              ? DEFAULT_RULES + " existing embedded rules run unchanged"
+              : "Caller disabled embedded rules with --no-default-rules"
+          },
+          {
+            name: "Text patterns",
+            status: state.projectRules ? "enabled" : "not-configured",
+            reason: state.projectRules ? "Configured project rules select the regex engine" : "The embedded default pack has no regex rules"
+          },
+          {
+            name: "Syntax patterns",
+            status: state.projectRules ? "enabled" : "not-configured",
+            reason: state.projectRules ? "Configured project rules select supported parsers" : "No AST rule requests a parser"
+          },
+          {
+            name: "Boundaries",
+            status: state.projectRules && state.requiredInputs ? "enabled" : "not-configured",
+            reason: state.projectRules && state.requiredInputs
+              ? "Configured rule and silos are both present"
+              : state.projectRules
+                ? "A boundary rule is configured, but required silos are not; setup fails with status 2 before the scan"
+                : "No boundary rule or silo configuration is supplied"
+          },
+          {
+            name: "Coverage",
+            status: state.projectRules && state.requiredInputs ? "enabled" : "not-configured",
+            reason: state.projectRules && state.requiredInputs
+              ? "Configured coverage rule and explicit report are both present"
+              : state.projectRules
+                ? "A coverage rule is configured, but its explicit report is not; setup fails with status 2 before the scan"
+                : "Detection never invents a coverage rule, threshold, or report"
+          },
+          {
+            name: "Duplication metrics",
+            status: "enabled",
+            reason: "Line and duplication metrics run once over every scanned text file"
+          },
+          {
+            name: "Duplication findings and gates",
+            status: state.projectRules ? "enabled" : "not-configured",
+            reason: state.projectRules ? "Configured project rules select findings or gates" : "Measurement runs, but no default finding or gate is configured"
+          }
+        ];
+      }
+
+      function result(state) {
+        const table = {
+          clean: { findings: 0, baselined: 0, suppressed: 0, failed: false },
+          findings: { findings: 2, baselined: 0, suppressed: 0, failed: true },
+          debt: { findings: 1, baselined: 3, suppressed: 1, failed: false },
+          visibility: {
+            findings: 0,
+            baselined: 0,
+            suppressed: 0,
+            failed: false,
+            ignored: "2 files and 1 directory ignored by .gitignore/.ignore; directory contents were not walked and are not counted",
+            filtered: "1 finding hidden by --min-severity error"
+          }
+        };
+        return table[state.resultShape];
+      }
+
+      function reportPath(call) {
+        return call.root === "."
+          ? "/home/alice/.local/state/siloscan/reports/7c4e...91ab/latest.json"
+          : "/home/alice/.local/state/siloscan/reports/219d...02ef/latest.json";
+      }
+
+      function humanLines(state, derived) {
+        if (state.phase < 3 || derived.error) return [];
+
+        const notConfigured = derived.capabilities.filter((item) => item.status === "not-configured").map((item) => item.name.toLowerCase());
+        const profileText = derived.profiles.map((item) => item.name + " " + item.status + " (" + item.reason + ")").join("; ");
+        const lines = [];
+
+        if (derived.call.automatic) {
+          lines.push("Project: " + derived.scenario.project);
+          lines.push("Scope: " + derived.call.root + " (" + derived.scenario.files + " files selected; exact requested " + (derived.call.root === "." ? "directory" : "path") + ")");
+          lines.push("Setup: " + derived.scenario.setup);
+          lines.push("Languages: " + derived.scenario.languages.join(", "));
+          const checks = ["lines, code lines, duplication metrics"];
+          if (state.defaults) checks.unshift("secrets (default-secrets@1, " + DEFAULT_RULES + " rules)");
+          if (state.projectRules && state.requiredInputs) checks.push("configured text, syntax, boundary, coverage, and duplication rules");
+          if (derived.profiles.some((item) => item.status === "enabled")) checks.push("admitted ecosystem add-on rules");
+          lines.push("Checks: " + checks.join("; "));
+          lines.push("Profiles: default-secrets@1 " + (state.defaults ? "enabled" : "skipped") + "; " + profileText);
+          lines.push("Not configured: " + (notConfigured.length ? notConfigured.join(", ") : "none"));
+
+          if (derived.scenario.evidenceStatus !== "complete") {
+            lines.push("Fallback: generic scan applied; partial, invalid, or absent evidence removed no files or checks");
+          }
+        }
+
+        if (derived.result.findings > 0) {
+          lines.push("src/settings.rs:18:7 warning secrets.generic-secret-assignment Detected a high-entropy value assigned to a secret-like identifier");
+        }
+        if (derived.result.findings > 1) {
+          lines.push("config/dev.env:4:1 error secrets.generic-credentialed-url Detected credentials embedded in a URL");
+        }
+
+        if (derived.call.automatic) {
+          lines.push("Findings: " + derived.result.findings + " new, " + derived.result.baselined + " baselined, " + derived.result.suppressed + " suppressed");
+        } else if (derived.result.baselined + derived.result.suppressed > 0) {
+          const noun = derived.result.findings === 1 ? "finding" : "findings";
+          lines.push(derived.result.findings + " " + noun + " (" + derived.result.baselined + " baselined, " + derived.result.suppressed + " suppressed)");
+        }
+
+        if (derived.result.ignored) lines.push(derived.result.ignored);
+        if (derived.result.filtered) lines.push(derived.result.filtered);
+        lines.push("metrics: 18,420 lines, 13,008 code lines, 96 duplicated lines, 0.7% duplication");
+
+        if (state.phase >= 4 && derived.call.save && !state.saveFailure) {
+          lines.push("Report: " + reportPath(derived.call));
+          lines.push("Review: " + derived.call.review);
+        }
+        return lines;
+      }
+
+      function stderrLines(state, derived) {
+        if (derived.error && state.phase >= 2) {
+          return [derived.error];
+        }
+        if (state.phase >= 4 && derived.call.save && state.saveFailure) {
+          return ["error: report publication failed; the prior latest report remains authoritative"];
+        }
+        return [];
+      }
+
+      function derive(state) {
+        const scenario = scenarios[state.scenario];
+        const call = invocation(state);
+        const profiles = profileStates(state, scenario, call);
+        const capabilities = capabilityStates(state);
+        const error = blockingError(state, profiles);
+        const outcome = result(state);
+        const values = {
+          scenario,
+          call,
+          profiles,
+          capabilities,
+          error,
+          result: outcome,
+          phase: phases[state.phase],
+          exit: error && state.phase >= 2
+            ? 2
+            : state.phase >= 4 && call.save && state.saveFailure
+              ? 2
+              : state.phase < 3
+                ? null
+                : outcome.failed
+                  ? 1
+                  : 0
+        };
+        values.stdout = humanLines(state, values);
+        values.stderr = stderrLines(state, values);
+        return values;
+      }
+
+      return Object.freeze({ DEFAULT_RULES, phases, scenarios, matrix, initial, reduce, derive });
+    })();
+
+    const guides = {
+      bare: {
+        label: "Bare Rust",
+        title: "The one-and-done happy path",
+        description: "A complete Cargo workspace is explained. The unchanged generic checks run. No Rust finding profile appears without measurement. Publication makes review available.",
+        start: { scenario: "rust", invocation: "bare", resultShape: "clean" },
+        steps: [
+          ["Detect project", { type: "advance" }],
+          ["Resolve checks", { type: "advance" }],
+          ["Complete scan", { type: "advance" }],
+          ["Publish latest", { type: "advance" }]
+        ]
+      },
+      malformed: {
+        label: "Bad mixed setup",
+        title: "One invalid manifest cannot erase good evidence",
+        description: "Cargo and Python facts survive an invalid package.json. JavaScript profile activation is skipped. Generic checks still scan every admitted file once.",
+        start: { scenario: "mixed", invocation: "bare", resultShape: "findings" },
+        steps: [
+          ["Detect all evidence", { type: "advance" }],
+          ["Resolve independent facts", { type: "advance" }],
+          ["Run generic fallback", { type: "advance" }],
+          ["Publish full report", { type: "advance" }]
+        ]
+      },
+      explicit: {
+        label: "Explicit parity",
+        title: "Even an admitted future profile cannot change explicit findings",
+        description: "This case simulates a measured Rust profile, then uses an explicit PATH. Detection remains report metadata and the profile is skipped for compatibility.",
+        start: { scenario: "rust", invocation: "explicit-path", measured: true, resultShape: "clean" },
+        steps: [
+          ["Detect metadata", { type: "advance" }],
+          ["Apply compatibility rule", { type: "advance" }],
+          ["Run v1-equivalent scan", { type: "advance" }],
+          ["Finish stateless", { type: "advance" }]
+        ]
+      },
+      measured: {
+        label: "Future admission",
+        title: "What changes after a profile earns admission",
+        description: "This simulation is not the launch recommendation. It shows the later state only after a fixed profile passes evidence, noise, compatibility, and performance gates.",
+        start: { scenario: "go", invocation: "bare", measured: true, resultShape: "clean" },
+        steps: [
+          ["Detect complete module", { type: "advance" }],
+          ["Activate admitted profile", { type: "advance" }],
+          ["Run once", { type: "advance" }],
+          ["Publish report", { type: "advance" }]
+        ]
+      },
+      noRules: {
+        label: "No rules",
+        title: "Do not turn an empty rule set into a clean report",
+        description: "Disabling the embedded pack with no configured rules keeps the current exit-2 refusal. There is no scan, save, or review hint.",
+        start: { scenario: "generic", invocation: "bare", defaults: false, resultShape: "clean" },
+        steps: [
+          ["Inspect evidence", { type: "advance" }],
+          ["Resolve empty rule set", { type: "advance" }]
+        ]
+      },
+      saveFailure: {
+        label: "Save failure",
+        title: "A failed publication never prints success",
+        description: "The scan result still prints. Publication failure moves the command to status 2, leaves the prior latest report authoritative, and omits Report and Review lines.",
+        start: { scenario: "python", invocation: "bare", saveFailure: true, resultShape: "debt" },
+        steps: [
+          ["Detect project", { type: "advance" }],
+          ["Resolve checks", { type: "advance" }],
+          ["Complete scan", { type: "advance" }],
+          ["Fail publication", { type: "advance" }]
+        ]
+      }
+    };
+
+    const el = {
+      scenario: document.querySelector("#scenario"),
+      invocation: document.querySelector("#invocation"),
+      defaults: document.querySelector("#defaults"),
+      projectRules: document.querySelector("#project-rules"),
+      requiredInputs: document.querySelector("#required-inputs"),
+      measured: document.querySelector("#profile-measured"),
+      saveFailure: document.querySelector("#save-failure"),
+      resultShape: document.querySelector("#result-shape"),
+      advance: document.querySelector("#advance"),
+      back: document.querySelector("#back"),
+      reset: document.querySelector("#reset"),
+      phaseStrip: document.querySelector("#phase-strip"),
+      resolved: document.querySelector("#resolved-state"),
+      persistence: document.querySelector("#persistence-state"),
+      capabilities: document.querySelector("#capabilities"),
+      profiles: document.querySelector("#profiles"),
+      error: document.querySelector("#blocking-error"),
+      stdout: document.querySelector("#stdout"),
+      stderr: document.querySelector("#stderr"),
+      guideTabs: document.querySelector("#guide-tabs"),
+      guideTitle: document.querySelector("#guide-title"),
+      guideDescription: document.querySelector("#guide-description"),
+      guideSteps: document.querySelector("#guide-steps"),
+      matrix: document.querySelector("#matrix-body")
+    };
+
+    let state = ScanPolicy.initial();
+    let activeGuide = "bare";
+    let guideStep = 0;
+
+    function escapeHtml(value) {
+      return String(value)
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;")
+        .replaceAll("'", "&#039;");
+    }
+
+    function rows(items) {
+      return items.map(([key, value]) => "<dt>" + escapeHtml(key) + "</dt><dd>" + escapeHtml(value) + "</dd>").join("");
+    }
+
+    function capabilityRows(items) {
+      return items.map((item) => [
+        "<div class='capability'>",
+        "<strong>", escapeHtml(item.name), "</strong>",
+        "<span class='status ", escapeHtml(item.status), "'>", escapeHtml(item.status), "</span>",
+        "<span class='reason'>", escapeHtml(item.reason), "</span>",
+        "</div>"
+      ].join("")).join("");
+    }
+
+    function syncControls() {
+      el.scenario.value = state.scenario;
+      el.invocation.value = state.invocation;
+      el.defaults.checked = state.defaults;
+      el.projectRules.checked = state.projectRules;
+      el.requiredInputs.checked = state.requiredInputs;
+      el.measured.checked = state.measured;
+      el.saveFailure.checked = state.saveFailure;
+      el.resultShape.value = state.resultShape;
+    }
+
+    function renderPhase() {
+      el.phaseStrip.innerHTML = ScanPolicy.phases.map((phase, index) => {
+        const kind = index < state.phase ? "done" : index === state.phase ? "current" : "";
+        return "<div class='status-step " + kind + "'>" + (index + 1) + " · " + escapeHtml(phase) + "</div>";
+      }).join("");
+    }
+
+    function renderMatrix() {
+      el.matrix.innerHTML = ScanPolicy.matrix.map(([key, name, evidence, proof]) => {
+        const active = key === state.scenario ? "active-row" : "";
+        const launch = key === "generic"
+          ? "none: no ecosystem add-on applies"
+          : "none: no versioned measured add-on ships at launch";
+        return [
+          "<tr class='", active, "'>",
+          "<td><strong>", escapeHtml(name), "</strong></td>",
+          "<td>", escapeHtml(evidence), "</td>",
+          "<td><span class='status not-configured'>", escapeHtml(launch), "</span></td>",
+          "<td>220 secret rules plus metrics and duplication measurement</td>",
+          "<td>", escapeHtml(proof), "</td>",
+          "</tr>"
+        ].join("");
+      }).join("");
+    }
+
+    function renderGuide() {
+      el.guideTabs.innerHTML = Object.entries(guides).map(([key, guide]) => {
+        const active = key === activeGuide ? "active" : "";
+        return "<button type='button' class='" + active + "' data-guide='" + key + "' role='tab'>" + escapeHtml(guide.label) + "</button>";
+      }).join("");
+
+      const guide = guides[activeGuide];
+      el.guideTitle.textContent = guide.title;
+      el.guideDescription.textContent = guide.description;
+      el.guideSteps.innerHTML = guide.steps.map(([label], index) => {
+        const kind = index < guideStep ? "completed" : index === guideStep ? "next" : "";
+        return "<button type='button' class='" + kind + "' data-step='" + index + "'>" + (index + 1) + ". " + escapeHtml(label) + "</button>";
+      }).join("");
+
+      el.guideTabs.querySelectorAll("[data-guide]").forEach((button) => {
+        button.addEventListener("click", () => startGuide(button.dataset.guide));
+      });
+      el.guideSteps.querySelectorAll("[data-step]").forEach((button) => {
+        button.addEventListener("click", () => runGuideStep(Number(button.dataset.step)));
+      });
+    }
+
+    function render() {
+      const derived = ScanPolicy.derive(state);
+      syncControls();
+      renderPhase();
+      renderMatrix();
+
+      el.resolved.innerHTML = rows([
+        ["Phase", derived.phase],
+        ["Invocation", derived.call.label],
+        ["Scope", derived.call.root + " (never promoted)"],
+        ["Project", derived.scenario.project],
+        ["Setup", derived.scenario.setup],
+        ["Languages", derived.scenario.languages.join(", ")],
+        ["Fallback", "Current default pack remains additive and unconditional"],
+        ["Inventory", "One sorted admitted inventory; detection and scan share it"]
+      ]);
+
+      const setupFailed = Boolean(derived.error && state.phase >= 2);
+      const persistence = setupFailed
+        ? "not attempted; setup failed"
+        : !derived.call.save
+          ? "stateless"
+          : state.phase < 4
+            ? "automatic latest selected"
+            : state.saveFailure
+              ? "publication failed; prior latest retained"
+              : "one latest report published";
+      const review = setupFailed
+        ? "none; scan did not publish"
+        : !derived.call.save
+          ? "no review hint without a saved report"
+          : state.phase < 4
+            ? "available after successful publication"
+            : state.saveFailure
+              ? "none; publication did not succeed"
+              : derived.call.review;
+      el.persistence.innerHTML = rows([
+        ["Save mode", persistence],
+        ["Report slot", setupFailed ? "none published" : derived.call.save ? "exact canonical requested scope" : "none"],
+        ["Review", review],
+        ["Findings", derived.result.findings + " new; " + derived.result.baselined + " baselined; " + derived.result.suppressed + " suppressed"],
+        ["Exit status", derived.exit === null ? "pending" : String(derived.exit)],
+        ["Output order", "failure decision before filtering; publication after scan"]
+      ]);
+
+      el.capabilities.innerHTML = capabilityRows(derived.capabilities);
+      el.profiles.innerHTML = capabilityRows(derived.profiles);
+      el.error.hidden = !(derived.error && state.phase >= 2);
+      el.error.textContent = derived.error || "";
+      el.stdout.textContent = derived.stdout.join("\n");
+      el.stderr.textContent = derived.stderr.join("\n");
+      el.advance.disabled = state.phase >= ScanPolicy.phases.length - 1;
+      el.back.disabled = state.phase <= 0;
+      renderGuide();
+    }
+
+    function dispatch(action, manual = true) {
+      state = ScanPolicy.reduce(state, action);
+      if (manual) {
+        guideStep = 0;
+      }
+      render();
+    }
+
+    function startGuide(name) {
+      activeGuide = name;
+      guideStep = 0;
+      state = ScanPolicy.initial(guides[name].start);
+      render();
+    }
+
+    function runGuideStep(index) {
+      if (index !== guideStep) return;
+      state = ScanPolicy.reduce(state, guides[activeGuide].steps[index][1]);
+      guideStep += 1;
+      render();
+    }
+
+    Object.entries(ScanPolicy.scenarios).forEach(([key, scenario]) => {
+      const option = document.createElement("option");
+      option.value = key;
+      option.textContent = scenario.label;
+      el.scenario.append(option);
+    });
+
+    el.scenario.addEventListener("change", () => dispatch({ type: "set", field: "scenario", value: el.scenario.value }));
+    el.invocation.addEventListener("change", () => dispatch({ type: "set", field: "invocation", value: el.invocation.value }));
+    el.defaults.addEventListener("change", () => dispatch({ type: "set", field: "defaults", value: el.defaults.checked }));
+    el.projectRules.addEventListener("change", () => dispatch({ type: "set", field: "projectRules", value: el.projectRules.checked }));
+    el.requiredInputs.addEventListener("change", () => dispatch({ type: "set", field: "requiredInputs", value: el.requiredInputs.checked }));
+    el.measured.addEventListener("change", () => dispatch({ type: "set", field: "measured", value: el.measured.checked }));
+    el.saveFailure.addEventListener("change", () => dispatch({ type: "set", field: "saveFailure", value: el.saveFailure.checked }));
+    el.resultShape.addEventListener("change", () => dispatch({ type: "set", field: "resultShape", value: el.resultShape.value }));
+    el.advance.addEventListener("click", () => dispatch({ type: "advance" }));
+    el.back.addEventListener("click", () => dispatch({ type: "back" }));
+    el.reset.addEventListener("click", () => dispatch({ type: "reset" }));
+
+    startGuide("bare");
+  </script>
+</body>
+</html>
