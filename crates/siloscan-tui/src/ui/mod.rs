@@ -1216,8 +1216,8 @@ rules:
     #[test]
     fn booting_from_a_report_file_renders_the_dashboard_with_its_numbers() {
         let dir = tempfile::tempdir().unwrap();
-        let (state, config) =
-            crate::load_snapshot(&fixture(&dir), None).expect("the fixture boots");
+        let (state, config) = crate::load_snapshot(&fixture(&dir), std::path::Path::new("."), None)
+            .expect("the fixture boots");
 
         assert_eq!(state.snapshot.as_deref(), Some("report.json"));
         assert!(state.is_snapshot());
