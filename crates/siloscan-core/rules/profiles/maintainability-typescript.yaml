@@ -5,15 +5,19 @@
 #
 # Every rule is a concept-only citation. No pattern text, query text or
 # message text is taken from any upstream project.
+#
+# There is no function-length rule here. It was measured at 150 lines
+# with the same test-tree exclusion the javascript document carries
+# (`**/test/**`, `**/tests/**`, `**/__tests__/**`, `**/*.test.*`,
+# `**/*.spec.*`, `**/*_test.*`) and still reported 152 findings over
+# rxjs's 73201 code lines, 2.0765 per kLOC. 150 of them sit under
+# `spec/` and `spec-dtslint/`, 148 named `*-spec.ts`, which none of
+# those globs reach; only 2 are in `src/`. Widening the exclusion until
+# one repository's naming convention fits is tuning a rule to its
+# corpus, so the rule is out. javascript keeps its own, which the same
+# exclusion brings to 0.3399 per kLOC.
 version: 1
 rules:
-  - id: maintainability.typescript.function-length
-    severity: info
-    message: "this function is longer than the profile allows"
-    languages: [typescript]
-    metric:
-      measure: function-length
-      max: 400
   - id: maintainability.typescript.parameter-count
     severity: info
     message: "this function takes more parameters than the profile allows"

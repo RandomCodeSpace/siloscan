@@ -102,23 +102,26 @@ maintainability.python.parameter-count	0	0.5545	2026-09-03	#78 P4a
 maintainability.python.nesting-depth	0	0.0584	2026-09-03	#78 P4a
 maintainability.python.cyclomatic-complexity	0	0.1251	2026-09-03	#78 P4a
 # javascript, measured against express 4.22.2, lodash 4.18.1 and axios 1.20.0,
-# with maintainability.javascript.function-length raised once from 120 to 400.
+# with maintainability.javascript.function-length at 150 and excluding test
+# trees by path. Without the exclusion it measured 3.7930 per kLOC on express;
+# with it, 0.0612.
 reliability.javascript.self-assignment	0	0.0000	2026-09-03	#78 P4a
 reliability.javascript.identical-if-branches	0	0.0000	2026-09-03	#78 P4a
 reliability.javascript.debugger-statement	0	0.0000	2026-09-03	#78 P4a
 reliability.javascript.constant-condition	0	0.0000	2026-09-03	#78 P4a
-maintainability.javascript.function-length	0	0.7342	2026-09-03	#78 P4a
+maintainability.javascript.function-length	0	0.3400	2026-09-03	#78 P4a
 maintainability.javascript.parameter-count	0	0.3674	2026-09-03	#78 P4a
 maintainability.javascript.nesting-depth	0	0.1700	2026-09-03	#78 P4a
 maintainability.javascript.cyclomatic-complexity	0	0.1020	2026-09-03	#78 P4a
-# typescript, measured against zod 3.23.8, rxjs 7.8.1 and nest 12.0.1, with
-# maintainability.typescript.function-length raised once from 120 to 400.
+# typescript, measured against zod 3.23.8, rxjs 7.8.1 and nest 12.0.1. There is
+# no maintainability.typescript.function-length row because there is no such
+# rule: at 150 with the same exclusion it still measured 2.0765 per kLOC on
+# rxjs, whose test tree is `spec/` and `*-spec.ts` and so escapes the globs.
 reliability.typescript.self-comparison	0	0.0000	2026-09-03	#78 P4a
 reliability.typescript.self-assignment	0	0.0000	2026-09-03	#78 P4a
 reliability.typescript.identical-if-branches	0	0.0000	2026-09-03	#78 P4a
 reliability.typescript.debugger-statement	0	0.0000	2026-09-03	#78 P4a
 reliability.typescript.constant-condition	0	0.0000	2026-09-03	#78 P4a
-maintainability.typescript.function-length	0	0.7514	2026-09-03	#78 P4a
 maintainability.typescript.parameter-count	0	0.0661	2026-09-03	#78 P4a
 maintainability.typescript.nesting-depth	0	0.4082	2026-09-03	#78 P4a
 maintainability.typescript.cyclomatic-complexity	0	0.2450	2026-09-03	#78 P4a

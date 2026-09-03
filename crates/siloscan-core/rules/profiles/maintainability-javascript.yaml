@@ -5,15 +5,31 @@
 #
 # Every rule is a concept-only citation. No pattern text, query text or
 # message text is taken from any upstream project.
+#
+# maintainability.<lang>.function-length excludes test trees by path.
+# Measured at 120 lines with no exclusion it reported 3.7930 per kLOC on
+# express and 3.0327 on rxjs, and the findings were almost entirely mocha
+# and jasmine `describe(...)` suite bodies: functions to the grammar, and
+# nothing a rule about function size has an opinion about. Excluding them
+# is what keeps the threshold at 150, the value go and c landed on,
+# instead of a number large enough to swallow a test suite whole.
 version: 1
 rules:
   - id: maintainability.javascript.function-length
     severity: info
     message: "this function is longer than the profile allows"
     languages: [javascript]
+    paths:
+      exclude:
+        - "**/test/**"
+        - "**/tests/**"
+        - "**/__tests__/**"
+        - "**/*.test.*"
+        - "**/*.spec.*"
+        - "**/*_test.*"
     metric:
       measure: function-length
-      max: 400
+      max: 150
   - id: maintainability.javascript.parameter-count
     severity: info
     message: "this function takes more parameters than the profile allows"

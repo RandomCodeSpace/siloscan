@@ -153,8 +153,8 @@ python/bare-except-negative.py	4	NONE	the except clause names an exception type
 python/identical-if-branches-positive.py	2	reliability.python.identical-if-branches	both arms are byte-identical, which is the copy-paste shape the rule owns
 python/identical-if-branches-negative.py	2	NONE	the two arms differ, so the condition decides the value
 # javascript
-javascript/function-length-over.js	1	maintainability.javascript.function-length	the function is 401 lines, one over the profile's 400
-javascript/function-length-under.js	1	NONE	the function is 400 lines, which the profile allows
+javascript/function-length-over.js	1	maintainability.javascript.function-length	the function is 151 lines, one over the profile's 150
+javascript/function-length-under.js	1	NONE	the function is 150 lines, which the profile allows
 javascript/parameter-count-over.js	1	maintainability.javascript.parameter-count	the function takes 8 parameters, one over the profile's 7
 javascript/parameter-count-under.js	1	NONE	the function takes 7 parameters, which the profile allows
 javascript/nesting-depth-over.js	1	maintainability.javascript.nesting-depth	the loops nest 6 deep, one over the profile's 5
@@ -170,8 +170,6 @@ javascript/debugger-statement-negative.js	2	NONE	the function carries no debugge
 javascript/constant-condition-positive.js	2	reliability.javascript.constant-condition	the condition is a boolean literal, so the branch is decided at author time
 javascript/constant-condition-negative.js	2	NONE	the condition is a parameter, so the branch is decided at run time
 # typescript
-typescript/function-length-over.ts	1	maintainability.typescript.function-length	the function is 401 lines, one over the profile's 400
-typescript/function-length-under.ts	1	NONE	the function is 400 lines, which the profile allows
 typescript/parameter-count-over.ts	1	maintainability.typescript.parameter-count	the function takes 8 parameters, one over the profile's 7
 typescript/parameter-count-under.ts	1	NONE	the function takes 7 parameters, which the profile allows
 typescript/nesting-depth-over.ts	1	maintainability.typescript.nesting-depth	the loops nest 6 deep, one over the profile's 5
