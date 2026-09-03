@@ -1,4 +1,7 @@
+mod saved_report;
+
 use std::collections::HashMap;
+use std::ffi::OsString;
 use std::fs;
 use std::io;
 use std::io::Write;
@@ -6,8 +9,10 @@ use std::path::{Path, PathBuf};
 use std::process;
 
 use clap::error::ErrorKind;
-use clap::{Args, Parser, Subcommand};
-use siloscan_core::baseline::{self, Baseline};
+use clap::parser::ValueSource;
+use clap::{ArgMatches, Args, CommandFactory, FromArgMatches, Parser, Subcommand};
+use saved_report::CanonicalScope;
+use siloscan_core::baseline;
 use siloscan_core::cache::{Cache, PathScope};
 use siloscan_core::config::{self, Anchor, Config};
 use siloscan_core::coverage::{self, CoverageReport};
@@ -16,10 +21,15 @@ use siloscan_core::coverage::{self, CoverageReport};
 // drift apart; see the core definition for what is escaped and why.
 use siloscan_core::findings::sanitize_for_terminal as safe;
 use siloscan_core::harness;
+use siloscan_core::plan::{
+    CapabilityStatus, OutcomeMetadata, ResolvedScanPlan, ScanRequest, ScanSetupReport,
+    ScopeMetadata, write_resolved_json,
+};
 use siloscan_core::rules::{self, CompiledPayload, CompiledRule, RuleSet, Severity};
-use siloscan_core::scan;
+use siloscan_core::scan::{self, Anchoring};
 use siloscan_core::walk;
 use siloscan_core::{cache, default_pack, output, output_sarif};
+use siloscan_tui::ReviewSession;
 
 // `args_conflicts_with_subcommands` is what keeps `siloscan services/api
 // baseline` from baselining the current directory. The top-level positional and
@@ -67,12 +77,33 @@ struct Cli {
 
     #[command(flatten)]
     scan: ScanArgs,
+
+    #[command(flatten)]
+    save: SaveArgs,
+}
+
+/// A scan with no subcommand, for the one case where `review` is a path rather
+/// than a command.
+///
+/// It flattens the same two argument types the top-level parser does, so the
+/// collision path accepts exactly the invocations a scan accepts and there is no
+/// second list of scan flags to keep in step.
+#[derive(Parser)]
+struct ScanOnly {
+    #[command(flatten)]
+    scan: ScanArgs,
+
+    #[command(flatten)]
+    save: SaveArgs,
 }
 
 #[derive(Subcommand)]
 enum Command {
     /// Record every current finding as accepted, so later scans report only new ones
     Baseline(BaselineArgs),
+
+    /// Open a saved report, or a live scan session, in the terminal UI
+    Review(ReviewArgs),
 
     /// Check a fixture tree against its inline `siloscan-expect:` markers
     Test(TestArgs),
@@ -246,6 +277,62 @@ struct ScanArgs {
     ignore: IgnoreArgs,
 }
 
+/// Where this scan's report is written, if anywhere.
+///
+/// Kept out of [`ScanArgs`] on purpose. That type is exactly the v1 scan
+/// grammar, and "did the user supply a v1 scan option" is the question that
+/// decides whether an invocation is automatic; a persistence flag must not
+/// answer it, or `siloscan --no-save` would stop being the bare command.
+///
+/// The three are pairwise exclusive, so one scan writes at most one report and
+/// the conflict is a parse failure rather than a precedence rule nobody can
+/// remember.
+#[derive(Args, Default)]
+struct SaveArgs {
+    /// Save this scan's report to the requested scope's saved-report slot
+    ///
+    /// This is what a bare `siloscan` does by default; naming it opts an
+    /// explicit scan in as well. The saved document is always canonical
+    /// siloscan JSON, whatever `--format` prints.
+    #[arg(long, conflicts_with_all = ["no_save", "output"])]
+    save: bool,
+
+    /// Save no report, including the one a bare invocation would save
+    #[arg(long, conflicts_with_all = ["save", "output"])]
+    no_save: bool,
+
+    /// Write this scan's canonical JSON report to FILE instead of the saved
+    /// slot, leaving the saved report as it was
+    ///
+    /// The parent directory must already exist. `-` is not accepted: machine
+    /// stdout is what `--format json` and `--format sarif` are for.
+    #[arg(long, value_name = "FILE", conflicts_with_all = ["save", "no_save"])]
+    output: Option<PathBuf>,
+}
+
+/// What `review` opens.
+#[derive(Args)]
+struct ReviewArgs {
+    /// Scan scope whose saved report is opened
+    #[arg(default_value = ".")]
+    path: PathBuf,
+
+    /// Open this report file instead of the scope's saved report
+    ///
+    /// The file is opened exactly as given, with no scope lookup, so a report
+    /// copied off the machine that produced it stays reviewable.
+    #[arg(long, value_name = "FILE", conflicts_with = "live")]
+    report: Option<PathBuf>,
+
+    /// Scan PATH now and review the result, instead of opening a saved report
+    #[arg(long)]
+    live: bool,
+
+    /// Repository config (defaults to the nearest `siloscan.toml`)
+    #[arg(long, value_name = "FILE")]
+    config: Option<PathBuf>,
+}
+
 #[derive(Args)]
 struct BaselineArgs {
     /// Path to scan
@@ -339,14 +426,65 @@ impl SeverityArg {
 }
 
 fn main() {
-    let cli = parse_cli();
+    let (cli, matches) = parse_cli();
 
     match cli.command {
-        None => run_scan(cli.scan),
+        None => run_scan(cli.scan, cli.save, Provenance::of(&matches)),
         Some(Command::Baseline(args)) => run_baseline(args),
+        Some(Command::Review(args)) => run_review(args),
         Some(Command::Test(args)) => run_test(args),
         Some(Command::Cache(CacheCommand::Prune(args))) => run_cache_prune(args),
     }
+}
+
+/// Which scan arguments this invocation actually supplied.
+///
+/// The distinction the whole automatic mode rests on: an omitted `PATH` and an
+/// explicit `.` name the same directory and are different invocations, and so
+/// are an omitted `--cache-dir` and one pointing at the default location. Only
+/// clap knows which is which, so the answer comes from
+/// [`ValueSource::CommandLine`] rather than from comparing values to defaults.
+struct Provenance {
+    supplied: Vec<clap::Id>,
+}
+
+impl Provenance {
+    fn of(matches: &ArgMatches) -> Self {
+        let supplied = arg_ids::<ScanArgs>()
+            .into_iter()
+            .filter(|id| matches.value_source(id.as_str()) == Some(ValueSource::CommandLine))
+            .collect();
+        Self { supplied }
+    }
+
+    fn has(&self, id: &str) -> bool {
+        self.supplied.iter().any(|supplied| supplied == id)
+    }
+
+    /// True when any argument of `A` was supplied. `A` is always a subset of
+    /// [`ScanArgs`], which is what makes this a question about the derived
+    /// argument type rather than about a list kept here by hand.
+    fn any<A: Args>(&self) -> bool {
+        arg_ids::<A>().iter().any(|id| self.has(id.as_str()))
+    }
+
+    /// Automatic mode: no `PATH` and no v1 scan option. The persistence flags
+    /// live outside [`ScanArgs`], so adding one does not leave automatic mode.
+    fn is_automatic(&self) -> bool {
+        self.supplied.is_empty()
+    }
+}
+
+/// Every argument id a derived argument type declares.
+///
+/// Taken from the type itself, so an option added to [`ScanArgs`] counts as a
+/// v1 scan option without anyone remembering to record it somewhere else.
+fn arg_ids<A: Args>() -> Vec<clap::Id> {
+    A::augment_args(clap::Command::new("probe"))
+        .get_arguments()
+        .map(|arg| arg.get_id().clone())
+        .filter(|id| id != "help" && id != "version")
+        .collect()
 }
 
 /// Drop cache entries left behind by other siloscan builds.
@@ -389,10 +527,18 @@ fn run_cache_prune(args: CacheArgs) {
 /// the subcommand: forwarding would have to decide which of two positionals the
 /// user meant when both are given, and guessing that is exactly what wrote a
 /// baseline over the wrong tree. Refusing cannot pick the wrong one.
-fn parse_cli() -> Cli {
-    match Cli::try_parse() {
-        Ok(cli) => cli,
-        Err(e) if e.kind() == ErrorKind::ArgumentConflict => {
+fn parse_cli() -> (Cli, ArgMatches) {
+    let argv: Vec<OsString> = std::env::args_os().collect();
+    if let Some(scan) = review_is_a_path(&argv) {
+        return scan;
+    }
+
+    match Cli::command().try_get_matches_from(argv.clone()) {
+        Ok(matches) => {
+            let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
+            (cli, matches)
+        }
+        Err(e) if e.kind() == ErrorKind::ArgumentConflict && names_subcommand(&argv) => {
             let _ = e.print();
             // The binary name rather than a literal, because this file is
             // also compiled as the `ss` alias.
@@ -413,62 +559,104 @@ fn parse_cli() -> Cli {
             ));
             process::exit(2);
         }
-        // Help, version and every other parse failure keep clap's own reporting
-        // and its exit codes.
+        // Help, version, the persistence conflicts and every other parse
+        // failure keep clap's own reporting and its exit codes.
         Err(e) => e.exit(),
     }
 }
 
-fn run_scan(args: ScanArgs) {
-    require_root(&args.path);
-    let (config, config_rule_dirs) = load_config(&args.path, args.config.as_deref())
-        .unwrap_or_else(|e| fail(&format!("error: {e}")));
-    let rules = load_rules(
-        &args.path,
-        &rule_dirs(&args.rules, config_rule_dirs),
-        args.no_default_rules,
-    );
-    if let Err(e) = require_silos(&rules, config.as_ref()) {
-        fail(&format!("error: {e}"));
+/// True when one of this binary's subcommand names appears in `argv`.
+///
+/// The advice above is about a subcommand that came after a scan option, so it
+/// only belongs on a conflict that involves one. `--save --no-save` is also an
+/// argument conflict and has nothing to do with subcommands; clap's own message
+/// already says everything there is to say about it.
+fn names_subcommand(argv: &[OsString]) -> bool {
+    let names: Vec<String> = Cli::command()
+        .get_subcommands()
+        .map(|command| command.get_name().to_string())
+        .collect();
+    argv.iter()
+        .skip(1)
+        .any(|arg| names.iter().any(|name| arg == name.as_str()))
+}
+
+/// The `./review` collision: a repository that really has a `review` directory.
+///
+/// `review` was a path long before it was a subcommand, so a scan of one keeps
+/// working. The test is deliberately narrow - the first argument is literally
+/// `review`, a file or directory by that name exists, and the whole command line
+/// parses as a scan - because anything looser would swallow `review --report x`,
+/// where the user plainly meant the subcommand.
+///
+/// The scan grammar is [`ScanOnly`], the same flattened argument types the
+/// top-level parser uses, so this cannot drift out of step with what a scan
+/// accepts.
+fn review_is_a_path(argv: &[OsString]) -> Option<(Cli, ArgMatches)> {
+    if argv.get(1)? != "review" {
+        return None;
     }
-    let coverage = load_coverage(args.coverage_report.as_deref())
+    if !Path::new("review").exists() {
+        return None;
+    }
+
+    let matches = ScanOnly::command().try_get_matches_from(argv).ok()?;
+    let scan = ScanOnly::from_arg_matches(&matches).ok()?;
+    Some((
+        Cli {
+            command: None,
+            scan: scan.scan,
+            save: scan.save,
+        },
+        matches,
+    ))
+}
+
+/// Where this scan's report goes, decided before the scan runs.
+enum Destination {
+    /// Nothing is written. Every explicit v1 invocation lands here, and so does
+    /// a bare one with `--no-save`.
+    None,
+    /// The requested scope's saved-report slot, already created.
+    Saved(PathBuf),
+    /// The file `--output` named.
+    Named(PathBuf),
+}
+
+impl Destination {
+    fn path(&self) -> Option<&Path> {
+        match self {
+            Destination::None => None,
+            Destination::Saved(path) | Destination::Named(path) => Some(path),
+        }
+    }
+
+    /// Automatic state is siloscan's own file and is written through a private
+    /// temporary; a file the user named takes their umask like anything else
+    /// they asked a tool to write.
+    fn temp_mode(&self) -> saved_report::TempMode {
+        match self {
+            Destination::Named(_) => saved_report::TempMode::Umask,
+            _ => saved_report::TempMode::Private,
+        }
+    }
+}
+
+fn run_scan(args: ScanArgs, save: SaveArgs, provenance: Provenance) {
+    let automatic = provenance.is_automatic();
+
+    // Everything cheap and deterministic happens before the expensive part: a
+    // state root that does not exist, a scope that cannot be canonicalised or an
+    // `--output` parent that is missing costs the user a scan otherwise, and the
+    // answer would have been the same either way.
+    let (destination, scope) = preflight_destination(&args, &save, automatic);
+
+    let request = scan_request(&args, automatic, &provenance);
+    let plan = ResolvedScanPlan::resolve(&request).unwrap_or_else(|e| fail(&format!("error: {e}")));
+    let resolved = plan
+        .execute(&mut |_| {})
         .unwrap_or_else(|e| fail(&format!("error: {e}")));
-
-    // Resolved before the baseline is read and before the cache is opened: both
-    // are bound to a path convention, and a config asking for an anchor that
-    // cannot be honoured is a setup error rather than a scan that quietly
-    // reports the wrong paths.
-    let anchoring = scan::Anchoring::resolve(&args.path, config.as_ref())
-        .unwrap_or_else(|e| fail(&format!("error: {e}")));
-
-    let baseline = match load_baseline(
-        &baseline_root(&args.path, config.as_ref()),
-        args.baseline.as_deref(),
-    ) {
-        Ok(baseline) => baseline,
-        Err(e) => fail(&e),
-    };
-
-    let cache = open_cache(
-        &args.path,
-        &rules,
-        args.no_cache,
-        args.cache_dir.as_deref(),
-        &anchoring,
-    );
-    // `ScanOptions` is `#[non_exhaustive]`, so it is built from its default and
-    // assigned into rather than written as a literal.
-    let mut options = scan::ScanOptions::default();
-    options.baseline = baseline.as_ref();
-    options.cache = cache.as_ref();
-    options.config = config.as_ref();
-    options.coverage = coverage.as_ref();
-    options.ignore = args.ignore.to_options();
-    options.follow_symlinks = args.follow_symlinks;
-    let mut report = match scan::scan_opts(&args.path, &rules, &options, &mut |_| {}) {
-        Ok(report) => report,
-        Err(e) => fail(&format!("error: {e}")),
-    };
+    let (mut report, setup, context) = resolved.into_parts();
 
     warn_skipped(&report.skipped);
     warn_scan(&report.warnings);
@@ -497,10 +685,29 @@ fn run_scan(args: ScanArgs) {
         - (report.findings.len() + report.baselined.len() + report.suppressed.len());
 
     let filtered_at = filtered_at(min_severity);
+    let anchoring = context.anchoring();
+    // Recorded before the output filter, so a review can tell a clean scan from
+    // a failing one whose findings the threshold hid.
+    let outcome = OutcomeMetadata::new(failing, failed);
+    let scope_metadata = scope.as_ref().map(|scope| {
+        ScopeMetadata::new(scope.identity(), scope.kind(), ancestor_levels(anchoring))
+    });
 
     let mut out = io::stdout().lock();
+    // JSON stdout and the saved file are one document, so it is serialized once
+    // and the bytes are handed to both. Human and SARIF stdout are a different
+    // document, and their saved report is streamed straight into the temporary
+    // file below rather than built here.
+    let mut serialized: Option<Vec<u8>> = None;
     match args.format {
         Format::Human => {
+            // Only a bare invocation may add lines. An explicit scan's human
+            // output is byte for byte what v1.5.1 printed.
+            if automatic {
+                for line in setup_lines(&setup) {
+                    emit(&mut out, format_args!("{}", safe(&line)));
+                }
+            }
             for finding in &report.findings {
                 // Path, rule id and message are all scanned-repository text;
                 // line, column and severity are not.
@@ -552,25 +759,373 @@ fn run_scan(args: ScanArgs) {
                 format_args!("{}", output::human_metrics_summary(&report.metrics)),
             );
         }
-        Format::Json => emit(
-            &mut out,
-            format_args!(
-                "{}",
-                output::to_json(&report, &rules, anchoring.anchor(), filtered_at)
-            ),
-        ),
+        Format::Json => {
+            let scope = scope_metadata
+                .as_ref()
+                .expect("a JSON report always resolves its scope");
+            let mut buffer: Vec<u8> = Vec::new();
+            if let Err(e) = write_resolved_json(
+                &mut buffer,
+                &report,
+                &setup,
+                &context,
+                scope,
+                &outcome,
+                filtered_at,
+            ) {
+                fail(&format!("error: {e}"));
+            }
+            let _ = out.write_all(&buffer);
+            let _ = out.write_all(b"\n");
+            serialized = Some(buffer);
+        }
         Format::Sarif => emit(
             &mut out,
             format_args!(
                 "{}",
-                output_sarif::to_sarif(&report, &rules, anchoring.anchor(), filtered_at)
+                output_sarif::to_sarif(&report, context.rules(), anchoring.anchor(), filtered_at)
             ),
         ),
     }
     let _ = out.flush();
 
+    // The scan result is already on stdout, so a publication failure below costs
+    // the user an exit code and not their report.
+    if let Some(path) = destination.path() {
+        let scope = scope_metadata
+            .as_ref()
+            .expect("a saved report always resolves its scope");
+        let mode = destination.temp_mode();
+        let published = match &serialized {
+            Some(bytes) => {
+                saved_report::write_report_atomic(path, mode, |writer| writer.write_all(bytes))
+            }
+            None => saved_report::write_report_atomic(path, mode, |writer| {
+                write_resolved_json(
+                    writer,
+                    &report,
+                    &setup,
+                    &context,
+                    scope,
+                    &outcome,
+                    filtered_at,
+                )
+                .map_err(io::Error::other)
+            }),
+        };
+
+        match published {
+            // Printed only now: a path announced before publication succeeded
+            // would be a report that is not there.
+            Ok(()) => announce_saved(&args, &destination, path),
+            Err(e) => {
+                emit_err(format_args!("{}", safe(&format!("error: {e}"))));
+                // Ahead of a finding status, because the command did not finish
+                // what it was asked to do.
+                process::exit(2);
+            }
+        }
+    }
+
     if failed {
         process::exit(1);
+    }
+}
+
+/// Resolve and prepare this scan's destination, and the scope identity a saved
+/// or JSON report records.
+///
+/// Bare invocations save unless told not to; explicit ones save only when asked.
+/// A human or SARIF scan that saves nothing never resolves an identity at all,
+/// which is what keeps the unchanged v1 path free of persistence work.
+fn preflight_destination(
+    args: &ScanArgs,
+    save: &SaveArgs,
+    automatic: bool,
+) -> (Destination, Option<CanonicalScope>) {
+    let wants_save = match automatic {
+        true => !save.no_save,
+        false => save.save || save.output.is_some(),
+    };
+    let needs_scope = wants_save || matches!(args.format, Format::Json);
+
+    let scope = match needs_scope {
+        false => None,
+        true => Some(
+            saved_report::canonical_scope(&args.path)
+                .unwrap_or_else(|e| fail(&format!("error: {e}"))),
+        ),
+    };
+
+    if !wants_save {
+        return (Destination::None, scope);
+    }
+
+    if let Some(output) = &save.output {
+        return (Destination::Named(named_destination(output)), scope);
+    }
+
+    let root = saved_report::state_root().unwrap_or_else(|e| fail(&format!("error: {e}")));
+    let scope_ref = scope.as_ref().expect("a saved report resolves its scope");
+    let path = saved_report::automatic_report_path(&root, scope_ref)
+        .unwrap_or_else(|e| fail(&format!("error: {e}")));
+    (Destination::Saved(path), scope)
+}
+
+/// The file `--output` named, checked but not created.
+///
+/// The parent has to exist already: the user chose this location, so siloscan
+/// does not build directory trees on their behalf, and the temporary file has to
+/// sit in that same directory for the replacement to stay on one file system.
+fn named_destination(output: &Path) -> PathBuf {
+    if output == Path::new("-") {
+        fail(
+            "error: --output does not accept -; use --format json or --format sarif for machine \
+             stdout",
+        );
+    }
+    let parent = match output.parent().filter(|p| !p.as_os_str().is_empty()) {
+        Some(parent) => parent.to_path_buf(),
+        None => PathBuf::from("."),
+    };
+    if !parent.is_dir() {
+        fail(&format!(
+            "error: {}: the directory for --output does not exist",
+            parent.display()
+        ));
+    }
+    output.to_path_buf()
+}
+
+/// How many directories above the scope's own the report's paths are measured
+/// from.
+///
+/// The anchoring prefix is the descent from the anchor directory down to the
+/// measured one, so its component count is exactly the climb a review has to
+/// make back up. Zero for every scan-root-anchored run, which is most of them.
+fn ancestor_levels(anchoring: &Anchoring) -> u32 {
+    anchoring
+        .prefix()
+        .split('/')
+        .filter(|component| !component.is_empty())
+        .count() as u32
+}
+
+/// Say where the report went, and how to open it.
+///
+/// Human output puts both lines on stdout, where the rest of the report is.
+/// JSON and SARIF put them on stderr, because their stdout is one document a
+/// consumer parses and a trailing English line would break it.
+fn announce_saved(args: &ScanArgs, destination: &Destination, path: &Path) {
+    let bin = env!("CARGO_BIN_NAME");
+    let report = format!("Report: {}", path.display());
+    let review = match destination {
+        // `--output` did not touch the saved slot, so pointing at it would open
+        // a different report than the one just written.
+        Destination::Named(path) => {
+            format!("Review: {bin} review --report {}", path.display())
+        }
+        _ => match args.path == Path::new(".") {
+            true => format!("Review: {bin} review"),
+            false => format!("Review: {bin} review {}", args.path.display()),
+        },
+    };
+
+    match args.format {
+        Format::Human => {
+            let mut out = io::stdout().lock();
+            emit(&mut out, format_args!("{}", safe(&report)));
+            emit(&mut out, format_args!("{}", safe(&review)));
+            let _ = out.flush();
+        }
+        Format::Json | Format::Sarif => {
+            emit_err(format_args!("{}", safe(&report)));
+            emit_err(format_args!("{}", safe(&review)));
+        }
+    }
+}
+
+/// What a bare invocation says about the setup it resolved, before the findings.
+///
+/// Two lines, both derived from the setup report and both deterministic for a
+/// given tree: what was detected, and which optional parts of the scan actually
+/// ran. The second matters more than it looks - a coverage gate that never ran
+/// and one that passed print the same findings.
+fn setup_lines(setup: &ScanSetupReport) -> Vec<String> {
+    let units = match setup.units.len() {
+        0 => "no project units".to_string(),
+        count => quantity(count, "project unit", "project units"),
+    };
+    let languages = match setup.languages.is_empty() {
+        true => "none".to_string(),
+        false => setup.languages.join(", "),
+    };
+    let rules = match setup.rule_sources.is_empty() {
+        true => "none".to_string(),
+        false => setup
+            .rule_sources
+            .iter()
+            .map(|source| source.id.clone())
+            .collect::<Vec<String>>()
+            .join(", "),
+    };
+    let capabilities = setup
+        .capabilities
+        .iter()
+        .map(|capability| {
+            format!(
+                "{} {}",
+                capability.id(),
+                capability_status(capability.status())
+            )
+        })
+        .collect::<Vec<String>>()
+        .join("; ");
+
+    vec![
+        format!("setup: {units}; languages: {languages}; rules: {rules}"),
+        format!("capabilities: {capabilities}"),
+    ]
+}
+
+/// One word per capability state. `CapabilityStatus` is `#[non_exhaustive]`, so
+/// a state added later prints as unknown rather than failing to compile a
+/// binary that has nothing to say about it yet.
+fn capability_status(status: &CapabilityStatus) -> &'static str {
+    match status {
+        CapabilityStatus::Enabled => "enabled",
+        CapabilityStatus::Skipped => "skipped",
+        CapabilityStatus::Unavailable => "unavailable",
+        CapabilityStatus::NotConfigured => "not configured",
+        _ => "unknown",
+    }
+}
+
+/// The command line as a core scan request, with its provenance intact.
+///
+/// Each option is passed on only when it was actually supplied, so the setup
+/// report can say "the default applied" rather than "the default was asked
+/// for" - a `--cache-dir` pointing at the default location is still a supplied
+/// option, and a stage that treated it as absent would be describing a
+/// different invocation.
+fn scan_request(args: &ScanArgs, automatic: bool, provenance: &Provenance) -> ScanRequest {
+    let mut request = match automatic {
+        true => ScanRequest::automatic(),
+        false => ScanRequest::explicit(args.path.clone()),
+    };
+    if let Some(config) = &args.config {
+        request = request.with_config(config.clone());
+    }
+    if provenance.has("rules") {
+        request = request.with_rule_dirs(args.rules.clone());
+    }
+    if args.no_default_rules {
+        request = request.without_embedded_rules();
+    }
+    if let Some(baseline) = &args.baseline {
+        request = request.with_baseline(baseline.clone());
+    }
+    if let Some(coverage) = &args.coverage_report {
+        request = request.with_coverage(coverage.clone());
+    }
+    if args.no_cache {
+        request = request.without_cache();
+    }
+    if let Some(dir) = &args.cache_dir {
+        request = request.with_cache_dir(dir.clone());
+    }
+    if provenance.any::<IgnoreArgs>() {
+        request = request.with_ignore_options(args.ignore.to_options());
+    }
+    if args.follow_symlinks {
+        request = request.following_symlinks();
+    }
+    request
+}
+
+/// Open a report, or a live scan, in the terminal UI.
+///
+/// Three forms, three different amounts of trust. A live session hands over the
+/// same request a scan would resolve, and the UI resolves it. An explicitly
+/// named report is opened whatever scope it came from, which is what makes a
+/// report copied off its machine reviewable. Implicit latest is the strict one:
+/// the scope it was asked for is the scope the report has to describe.
+fn run_review(args: ReviewArgs) {
+    if args.live {
+        require_root(&args.path);
+        let mut request = ScanRequest::explicit(args.path.clone());
+        if let Some(config) = &args.config {
+            request = request.with_config(config.clone());
+        }
+        open_review(ReviewSession::Live { request });
+    }
+
+    if let Some(report) = args.report {
+        let source_base = match &args.config {
+            Some(config) => config
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+                .unwrap_or(Path::new("."))
+                .to_path_buf(),
+            None => PathBuf::from("."),
+        };
+        open_review(ReviewSession::SavedReport {
+            report,
+            source_base,
+            config: args.config,
+            // No expectation: this file was named, not looked up.
+            expect: None,
+        });
+    }
+
+    let scope =
+        saved_report::canonical_scope(&args.path).unwrap_or_else(|e| fail(&format!("error: {e}")));
+    let report = saved_report::latest_report_path(&args.path)
+        .unwrap_or_else(|e| fail(&format!("error: {e}")));
+    if !report.is_file() {
+        let bin = env!("CARGO_BIN_NAME");
+        fail(&format!(
+            "error: {}: no saved report for this scope; run `{bin}` in it, or `{bin} {} --save`, \
+             or open a report with `{bin} review --report FILE`",
+            args.path.display(),
+            args.path.display()
+        ));
+    }
+    // The scope's own directory, deliberately: only the report knows how far
+    // above it the paths are measured from, and the session climbs that many
+    // parents once it has read the document. Working the number out here would
+    // mean parsing the report before the loader does.
+    let source_base =
+        saved_report::source_base(&scope, 0).unwrap_or_else(|e| fail(&format!("error: {e}")));
+
+    open_review(ReviewSession::SavedReport {
+        report,
+        source_base,
+        config: args.config,
+        expect: Some(siloscan_tui::ExpectedScope {
+            identity: scope.identity(),
+            kind: scope.kind(),
+        }),
+    });
+}
+
+/// The one place this binary enters the terminal UI.
+///
+/// Every review form funnels through here, so the session shape the UI accepts
+/// is reached from exactly one call site and a change to it is a change to one
+/// function.
+///
+/// `source_base` is the level-0 base - the requested directory, or the parent
+/// of a single-file scope - and not the directory the report's paths are
+/// relative to. A config-anchored report measures from the config root and
+/// records how far above the scope that is; the session climbs those parents
+/// after it loads the document, and refuses if it runs out of them. That number
+/// lives only in the report, so computing the base here would cost a parse of a
+/// file the loader is about to read anyway.
+fn open_review(session: ReviewSession) -> ! {
+    match siloscan_tui::run(session) {
+        Ok(()) => process::exit(0),
+        Err(e) => fail(&format!("error: {e}")),
     }
 }
 
@@ -955,26 +1510,6 @@ fn no_rules_message(dirs: &[PathBuf], no_default_rules: bool) -> String {
         "the built-in pack loaded no rules"
     };
     format!("error: no rules loaded, so nothing would be checked: {pack}; {searched}")
-}
-
-/// An explicit `--baseline` file must exist; the default location is optional.
-fn load_baseline(root: &Path, explicit: Option<&Path>) -> Result<Option<Baseline>, String> {
-    let Some(path) = explicit else {
-        return baseline::load(root).map_err(|e| format!("error: {e}"));
-    };
-
-    let text = fs::read_to_string(path)
-        .map_err(|e| format!("error: {}: io error: {e}", path.display()))?;
-    let baseline: Baseline = siloscan_core::serde_json::from_str(&text)
-        .map_err(|e| format!("error: {}: invalid baseline: {e}", path.display()))?;
-    if baseline.version != 1 {
-        return Err(format!(
-            "error: {}: unsupported baseline version {}",
-            path.display(),
-            baseline.version
-        ));
-    }
-    Ok(Some(baseline))
 }
 
 fn require_root(path: &Path) {

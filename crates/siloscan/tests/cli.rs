@@ -228,18 +228,37 @@ fn cache_home() -> TempDir {
     tempfile::tempdir().expect("temp dir should be creatable")
 }
 
-/// The binary, with its cache pointed at `cache` rather than at the user's.
+/// The binary, with its cache and its saved-report state pointed at `cache`
+/// rather than at the user's.
 ///
 /// The environment and not `--cache-dir`, so that it applies to every
 /// invocation uniformly - subcommands, `--help`, and the runs that exist to
 /// check how a bad command line is rejected, none of which should have to grow
 /// an argument to be isolated. `--cache-dir` has its own tests.
+///
+/// The state root is redirected for a stronger reason than tidiness: a bare
+/// invocation saves a report, and a test that reached the developer's own state
+/// directory would overwrite a real one. Every case here supplies a scan option
+/// and so saves nothing, and this is the second line of defence.
+///
+/// That defence is complete on Linux and partial elsewhere. The cache reads its
+/// environment on every platform, and so does the saved-report state root on
+/// Linux; on macOS the root comes from Foundation, which `CFFIXED_USER_HOME`
+/// redirects, and on Windows it comes from the shell, which reads no
+/// environment variable at all. A Windows run that saved would write to the real
+/// local application data folder. None does, and `v2_persistence` is where that
+/// is asserted rather than assumed.
 fn bin(cache: &Path) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_siloscan"));
-    // One per platform, per `cache::default_cache_base`. Setting both keeps
-    // this helper correct on either without a `cfg`.
+    // One per platform, per `cache::default_cache_base` and the saved-report
+    // state root. Setting all of them keeps this helper correct on any of the
+    // three without a `cfg`.
     command
         .env("XDG_CACHE_HOME", cache)
+        .env("XDG_STATE_HOME", cache)
+        .env("HOME", cache)
+        .env("USERPROFILE", cache)
+        .env("CFFIXED_USER_HOME", cache)
         .env("LOCALAPPDATA", cache);
     command
 }
@@ -1139,6 +1158,11 @@ fn escaping_leaves_the_json_report_and_its_fingerprints_where_they_were() {
     assert!(!output.stdout.contains(&0x1b));
 }
 
+/// With no `PATH`, the working directory is what gets scanned.
+///
+/// The scan options here also make this an explicit invocation rather than the
+/// automatic journey, so it stays stateless: the report lines a saving run adds
+/// are absent, and `--rules` is what decides that, not the missing path.
 #[test]
 fn a_bare_invocation_scans_the_working_directory() {
     let rules = rules_dir(MATCHING_RULE);
@@ -1147,6 +1171,12 @@ fn a_bare_invocation_scans_the_working_directory() {
     let output = run_args_in(
         src.path(),
         &["--rules", path_str(&rules), "--no-default-rules"],
+    );
+
+    assert!(
+        !stdout(&output).contains("Report: "),
+        "a supplied scan option keeps the run stateless: {}",
+        stdout(&output)
     );
 
     assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
@@ -1285,6 +1315,8 @@ fn help_documents_only_the_forms_that_work() {
     assert!(text.contains("[OPTIONS] [PATH]"), "stdout: {text}");
     assert!(text.contains("<COMMAND>"), "stdout: {text}");
     assert!(!text.contains("[PATH] [COMMAND]"), "stdout: {text}");
+    // `review` is one of those commands, and is documented with the rest.
+    assert!(text.contains("review"), "stdout: {text}");
 }
 
 /// An asset-heavy repository must not bury stderr under one warning per file.
