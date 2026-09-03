@@ -3,6 +3,7 @@ use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::sync::OnceLock;
 
 use siloscan_core::cache::content_hash;
 use siloscan_core::serde_json::{self, Value};
@@ -16,6 +17,19 @@ struct ReferenceBuild {
     _temp: TempDir,
     siloscan: PathBuf,
     ss: PathBuf,
+    siloscan_tui: PathBuf,
+}
+
+/// The pinned v1.5.1 build, made once for the whole test binary.
+///
+/// Both lanes in this file need it, and building it is by far the slowest step
+/// here. The lock is never dropped, so the reference checkout outlives the
+/// process inside the system temporary directory; that costs one directory the
+/// operating system reclaims, against a second release build of the same commit.
+static REFERENCE: OnceLock<ReferenceBuild> = OnceLock::new();
+
+fn reference() -> &'static ReferenceBuild {
+    REFERENCE.get_or_init(|| build_reference(&repo_root()))
 }
 
 type JsonNormalizer = fn(&[u8]) -> Result<(Value, Vec<u8>), String>;
@@ -142,7 +156,17 @@ fn build_reference(repo: &Path) -> ReferenceBuild {
             .arg(source.join("Cargo.toml"))
             .arg("--target-dir")
             .arg(&target)
-            .args(["--target", host, "-p", "siloscan", "--bins"]),
+            // The standalone TUI too: the cross-version reader lane opens a
+            // candidate report in the real v1.5.1 terminal UI.
+            .args([
+                "--target",
+                host,
+                "-p",
+                "siloscan",
+                "-p",
+                "siloscan-tui",
+                "--bins",
+            ]),
         "build the pinned v1.5.1 reference offline",
     );
 
@@ -163,13 +187,16 @@ fn build_reference(repo: &Path) -> ReferenceBuild {
     let release = target.join(host).join("release");
     let siloscan = release.join(format!("siloscan{}", std::env::consts::EXE_SUFFIX));
     let ss = release.join(format!("ss{}", std::env::consts::EXE_SUFFIX));
-    assert!(siloscan.is_file(), "missing {}", siloscan.display());
-    assert!(ss.is_file(), "missing {}", ss.display());
+    let siloscan_tui = release.join(format!("siloscan-tui{}", std::env::consts::EXE_SUFFIX));
+    for binary in [&siloscan, &ss, &siloscan_tui] {
+        assert!(binary.is_file(), "missing {}", binary.display());
+    }
 
     ReferenceBuild {
         _temp: temp,
         siloscan,
         ss,
+        siloscan_tui,
     }
 }
 
@@ -1148,10 +1175,145 @@ fn explicit_v1_compatibility() {
     let oracle = oracle_root();
     verify_oracle_bundle(&oracle);
 
-    let reference = build_reference(&repo_root());
-    check_cli_inventory(&oracle, &reference);
-    check_mixed_formats(&oracle, &reference);
-    check_default_pack(&oracle, &reference);
-    check_baseline_interop(&oracle, &reference);
-    check_cache_modes(&oracle, &reference);
+    let reference = reference();
+    check_cli_inventory(&oracle, reference);
+    check_mixed_formats(&oracle, reference);
+    check_default_pack(&oracle, reference);
+    check_baseline_interop(&oracle, reference);
+    check_cache_modes(&oracle, reference);
+}
+
+// ---------------------------------------------------------------------------
+// Cross-version readers
+//
+// A report outlives the build that wrote it, so both directions have to open.
+// The third row of the plan's reader matrix - implicit latest refusing a
+// marker-free report - is proved by
+// `v2_cli::implicit_review_refuses_a_marker_free_report`, which needs no
+// reference build and is not repeated here.
+// ---------------------------------------------------------------------------
+
+/// The counts the mixed fixture's report shows once a session has loaded it.
+/// Frozen in `golden/tui-states.tsv` as the snapshot session's first frame, and
+/// the same for both versions because both produce the same 23 findings.
+const MIXED_SESSION_READY: &str = "23 new, 0 baselined, 1 suppressed";
+
+/// Python for the PTY driver. The hosted lanes install nothing extra, so this
+/// is whichever interpreter the platform already calls a Python 3.
+fn python() -> &'static str {
+    for candidate in ["python3", "python"] {
+        if Command::new(candidate)
+            .arg("--version")
+            .output()
+            .is_ok_and(|output| output.status.success())
+        {
+            return candidate;
+        }
+    }
+    panic!("the reader lane needs python3 to drive a terminal session");
+}
+
+/// One TUI session, driven through `scripts/tui_pty.py`.
+///
+/// The driver owns the terminal assertions - the session left the alternate
+/// screen and turned raw mode back off - so the case here only names the report
+/// to open and the text that proves the report was actually read.
+fn open_in_terminal(case: &str, binary: &Path, arguments: &[OsString]) {
+    let repo = repo_root();
+    let mut command = Command::new(python());
+    command
+        .current_dir(&repo)
+        .arg(repo.join("scripts/tui_pty.py"))
+        .args(["--marker", MIXED_SESSION_READY])
+        .args(["--key", "q"])
+        // The finding count, on screen, from the document that was opened.
+        .args(["--expect", MIXED_SESSION_READY])
+        .args(["--status", "0"])
+        .arg("--")
+        .arg(binary)
+        .args(arguments);
+    let output = command_output(&mut command, case);
+    assert!(
+        output.status.success(),
+        "{case} did not open the report\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// A JSON report from one binary, written where the other one can open it.
+fn capture_report(binary: &Path, oracle: &Path, destination: &Path, case: &str) {
+    let output = isolated_run(binary, &mixed_args(oracle, "json", true), None);
+    assert_process(case, &output, 1);
+    fs::write(destination, &output.stdout)
+        .unwrap_or_else(|error| panic!("write {}: {error}", destination.display()));
+}
+
+#[test]
+fn cross_version_readers() {
+    if cfg!(windows) {
+        eprintln!("skipped: the reader lane drives a POSIX pseudo-terminal");
+        return;
+    }
+
+    let oracle = oracle_root();
+    let reference = reference();
+    let temp = tempfile::tempdir().expect("reader temp dir should be creatable");
+    let candidate_report = temp.path().join("candidate.json");
+    let reference_report = temp.path().join("reference.json");
+    capture_report(
+        Path::new(CANDIDATE_SILOSCAN),
+        &oracle,
+        &candidate_report,
+        "reader-candidate-report",
+    );
+    capture_report(
+        &reference.siloscan,
+        &oracle,
+        &reference_report,
+        "reader-reference-report",
+    );
+
+    // The candidate's own report carries the four v2 markers; the reference's
+    // does not. That is what the two directions below are reading.
+    let candidate: Value = serde_json::from_slice(
+        &fs::read(&candidate_report).expect("candidate report should be readable"),
+    )
+    .expect("candidate report should be JSON");
+    for marker in ["report_kind", "scope", "outcome", "setup"] {
+        assert!(
+            !candidate[marker].is_null(),
+            "candidate report lost {marker}"
+        );
+    }
+    let legacy: Value = serde_json::from_slice(
+        &fs::read(&reference_report).expect("reference report should be readable"),
+    )
+    .expect("reference report should be JSON");
+    for marker in ["report_kind", "scope", "outcome", "setup"] {
+        assert!(legacy[marker].is_null(), "the v1.5.1 report is marker-free");
+    }
+
+    // Forwards: the real v1.5.1 terminal UI opens a complete candidate report
+    // and shows its findings, ignoring the fields it has never heard of.
+    open_in_terminal(
+        "reference-tui-reads-candidate",
+        &reference.siloscan_tui,
+        &[
+            OsString::from("--report"),
+            candidate_report.clone().into_os_string(),
+        ],
+    );
+
+    // Backwards: the candidate's explicit reader opens a supported marker-free
+    // v1.5.1 report, which is the only reader path allowed to accept one.
+    open_in_terminal(
+        "candidate-review-reads-reference",
+        Path::new(CANDIDATE_SILOSCAN),
+        &[
+            OsString::from("review"),
+            OsString::from("--report"),
+            reference_report.clone().into_os_string(),
+        ],
+    );
 }
