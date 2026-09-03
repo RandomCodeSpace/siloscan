@@ -132,3 +132,4 @@ fn line_starts(content: &str) -> Vec<usize> {
 pub mod ast;
 pub mod boundary;
 pub mod duplication;
+pub mod metric;

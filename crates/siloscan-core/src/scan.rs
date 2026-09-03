@@ -1122,6 +1122,10 @@ struct ParseNeeds {
     boundary: bool,
     /// Languages some ast rule carries a query for, sorted and deduplicated.
     ast_languages: Vec<String>,
+    /// Languages some metric rule measures, sorted and deduplicated. A metric
+    /// rule with no `languages` filter measures every language the engine has a
+    /// node-kind table for.
+    metric_languages: Vec<String>,
 }
 
 impl ParseNeeds {
@@ -1135,11 +1139,21 @@ impl ParseNeeds {
                         .ast_languages
                         .extend(queries.iter().map(|q| q.language.clone()));
                 }
+                CompiledPayload::Metric { .. } => match &rule.languages {
+                    Some(languages) => needs.metric_languages.extend(languages.iter().cloned()),
+                    None => needs.metric_languages.extend(
+                        crate::engines::metric::LANGUAGES
+                            .iter()
+                            .map(|lang| (*lang).to_string()),
+                    ),
+                },
                 _ => {}
             }
         }
         needs.ast_languages.sort();
         needs.ast_languages.dedup();
+        needs.metric_languages.sort();
+        needs.metric_languages.dedup();
         needs
     }
 
@@ -1148,7 +1162,12 @@ impl ParseNeeds {
         let Some(language) = language else {
             return false;
         };
-        self.boundary || self.ast_languages.iter().any(|wanted| wanted == language)
+        self.boundary
+            || self.ast_languages.iter().any(|wanted| wanted == language)
+            || self
+                .metric_languages
+                .iter()
+                .any(|wanted| wanted == language)
     }
 }
 
@@ -1527,6 +1546,15 @@ fn scan_text(
     file_findings.extend(crate::engines::ast::scan_file(
         &rules.rules,
         ast_queries,
+        path_rel,
+        language,
+        content,
+        tree.as_ref(),
+    ));
+    // The same tree, walked once more: a metric rule counts what a query
+    // cannot.
+    file_findings.extend(crate::engines::metric::scan_file(
+        &rules.rules,
         path_rel,
         language,
         content,
@@ -4235,6 +4263,7 @@ rules:
         let ast_only = ParseNeeds {
             boundary: false,
             ast_languages: vec!["rust".to_string()],
+            metric_languages: Vec::new(),
         };
 
         let gated = parse_decision(&boundary, Some(&config), Some("rust"), 4096);
@@ -4262,6 +4291,36 @@ rules:
             parse_decision(&ast_only, Some(&config), Some("rust"), 4096),
             ParseDecision::Skip(Some("exceeds max_parse_bytes (4096 > 8)".to_string()))
         );
+    }
+
+    /// A metric rule reads a tree and nothing else, so a file it measures has
+    /// to be parsed even when no ast or boundary rule asked for one. Without a
+    /// `languages` filter the rule measures every language with a node-kind
+    /// table.
+    #[test]
+    fn a_metric_rule_alone_wants_a_tree() {
+        let unfiltered = "version: 1\nrules:\n  - id: a.b\n    severity: info\n    message: m\n    \
+                          metric: { measure: nesting-depth, max: 3 }\n";
+        let filtered = "version: 1\nrules:\n  - id: a.b\n    severity: info\n    message: m\n    \
+                        languages: [\"rust\"]\n    metric: { measure: nesting-depth, max: 3 }\n";
+
+        let needs = ParseNeeds::of(&RuleSet {
+            rules: load_str(unfiltered, "metric").unwrap(),
+            sources: vec![("metric".to_string(), unfiltered.to_string())],
+        });
+        assert!(!needs.boundary);
+        assert!(needs.ast_languages.is_empty());
+        assert!(needs.wants(Some("rust")));
+        assert!(needs.wants(Some("ruby")));
+        assert!(!needs.wants(Some("yaml")));
+        assert!(!needs.wants(None));
+
+        let needs = ParseNeeds::of(&RuleSet {
+            rules: load_str(filtered, "metric").unwrap(),
+            sources: vec![("metric".to_string(), filtered.to_string())],
+        });
+        assert!(needs.wants(Some("rust")));
+        assert!(!needs.wants(Some("ruby")));
     }
 
     /// A boundary rule's `paths` envelope selects the files it reports *from*.
