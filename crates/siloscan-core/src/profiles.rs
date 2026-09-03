@@ -59,6 +59,11 @@ impl Profile {
 }
 
 /// Every embedded profile document, ordered by identity.
+///
+/// One entry per (family, language) pair, and the document beside it under
+/// `rules/profiles/`. `tests/profile_corpus.rs` refuses a document on disk that
+/// no entry here names, and refuses an entry whose rules do not match its
+/// identity.
 pub const REGISTRY: &[Profile] = &[
     Profile::new(
         "maintainability-c@1",
@@ -86,6 +91,11 @@ pub const REGISTRY: &[Profile] = &[
         include_str!("../rules/profiles/maintainability-ruby.yaml"),
     ),
     Profile::new(
+        "maintainability-rust@1",
+        "rust",
+        include_str!("../rules/profiles/maintainability-rust.yaml"),
+    ),
+    Profile::new(
         "reliability-c@1",
         "c",
         include_str!("../rules/profiles/reliability-c.yaml"),
@@ -109,6 +119,11 @@ pub const REGISTRY: &[Profile] = &[
         "reliability-ruby@1",
         "ruby",
         include_str!("../rules/profiles/reliability-ruby.yaml"),
+    ),
+    Profile::new(
+        "reliability-rust@1",
+        "rust",
+        include_str!("../rules/profiles/reliability-rust.yaml"),
     ),
 ];
 
@@ -227,6 +242,11 @@ mod tests {
             identities, sorted,
             "the registry is not ordered by identity"
         );
+        // `select` dedups on identity, so a repeat here would load once
+        // and read as two documents in this list.
+        let mut unique = identities.clone();
+        unique.dedup();
+        assert_eq!(identities, unique, "the registry repeats an identity");
     }
 
     #[test]

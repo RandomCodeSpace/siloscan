@@ -1,0 +1,34 @@
+# The reliability profile for rust: one document per (profile, language)
+# pair, loaded whole or not at all. See research/embedded-profiles/design.md
+# section 1 for the packaging and the identity, and section 6 for the corpus
+# and noise gates every rule here had to pass.
+#
+# Every rule is a concept-only citation. No pattern text, query text or
+# message text is taken from any upstream project.
+version: 1
+rules:
+  - id: reliability.rust.self-comparison
+    severity: warning
+    message: "both operands of this comparison are the same identifier, so its result is fixed"
+    ast:
+      rust: "((binary_expression left: (identifier) @l operator: \"==\" right: (identifier) @r) @report (#eq? @l @r))"
+  - id: reliability.rust.self-assignment
+    severity: warning
+    message: "this assignment writes a variable to itself and has no effect"
+    ast:
+      rust: "((assignment_expression left: (identifier) @l right: (identifier) @r) @report (#eq? @l @r))"
+  - id: reliability.rust.identical-if-branches
+    severity: warning
+    message: "both arms of this if have the same body, so the condition decides nothing"
+    ast:
+      rust: "((if_expression consequence: (block) @a alternative: (else_clause (block) @b)) @report (#eq? @a @b))"
+  - id: reliability.rust.unimplemented-marker
+    severity: warning
+    message: "todo! and unimplemented! panic at run time, so this path is unfinished"
+    ast:
+      rust: "((macro_invocation macro: (identifier) @report (#match? @report \"^(todo|unimplemented)$\")))"
+  - id: reliability.rust.mem-forget
+    severity: warning
+    message: "mem::forget skips the value's destructor and leaks whatever it owns"
+    ast:
+      rust: "((call_expression function: (scoped_identifier path: (identifier) @p name: (identifier) @f) @report (#eq? @p \"mem\") (#eq? @f \"forget\")))"

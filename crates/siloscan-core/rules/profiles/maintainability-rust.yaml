@@ -1,0 +1,42 @@
+# The maintainability profile for rust: one document per (profile, language)
+# pair, loaded whole or not at all. See research/embedded-profiles/design.md
+# section 1 for the packaging and the identity, and section 6 for the corpus
+# and noise gates every rule here had to pass.
+#
+# Every rule is a concept-only citation. No pattern text, query text or
+# message text is taken from any upstream project.
+version: 1
+rules:
+  - id: maintainability.rust.dbg-macro
+    severity: info
+    message: "dbg! is a debugging aid and is not meant to be committed"
+    ast:
+      rust: "((macro_invocation macro: (identifier) @report (#eq? @report \"dbg\")))"
+  - id: maintainability.rust.function-length
+    severity: info
+    message: "this function is longer than the profile allows"
+    languages: [rust]
+    metric:
+      measure: function-length
+      max: 120
+  - id: maintainability.rust.parameter-count
+    severity: info
+    message: "this function takes more parameters than the profile allows"
+    languages: [rust]
+    metric:
+      measure: parameter-count
+      max: 7
+  - id: maintainability.rust.nesting-depth
+    severity: info
+    message: "this function nests deeper than the profile allows"
+    languages: [rust]
+    metric:
+      measure: nesting-depth
+      max: 5
+  - id: maintainability.rust.cyclomatic-complexity
+    severity: info
+    message: "this function has more decision points than the profile allows"
+    languages: [rust]
+    metric:
+      measure: cyclomatic-complexity
+      max: 25

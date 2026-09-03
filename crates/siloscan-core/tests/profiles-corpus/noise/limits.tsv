@@ -67,3 +67,17 @@ reliability.ruby.identical-if-branches	0	0.000000	2026-09-03	#78 P4b: no finding
 reliability.ruby.rescue-exception	0	0.846836	2026-09-03	#78 P4b: max of puma 0.8468, rails 0.1157, sinatra 0.2817
 reliability.ruby.rescue-modifier	0	0.846836	2026-09-03	#78 P4b: max of puma 0.8468, rails 0.3984, sinatra 0.1690
 reliability.ruby.self-assignment	0	0.010768	2026-09-03	#78 P4b: max of puma 0.0000, rails 0.0108, sinatra 0.0000
+# rust, measured against ripgrep 15.2.0, tokio 1.40.0 and serde 1.0.229.
+# max_per_kloc is the highest of the three, rounded up to the four decimals
+# this file carries: the gate compares the unrounded rate, so rounding down
+# would fail the measurement the row records.
+reliability.rust.self-comparison	0	0.0000	2026-09-03	#78 P4a
+reliability.rust.self-assignment	0	0.0000	2026-09-03	#78 P4a
+reliability.rust.identical-if-branches	0	0.0283	2026-09-03	#78 P4a
+reliability.rust.unimplemented-marker	0	0.6605	2026-09-03	#78 P4a
+reliability.rust.mem-forget	0	0.1176	2026-09-03	#78 P4a
+maintainability.rust.dbg-macro	0	0.0353	2026-09-03	#78 P4a
+maintainability.rust.function-length	0	0.7206	2026-09-03	#78 P4a
+maintainability.rust.parameter-count	0	0.0118	2026-09-03	#78 P4a
+maintainability.rust.nesting-depth	0	0.0901	2026-09-03	#78 P4a
+maintainability.rust.cyclomatic-complexity	0	0.1201	2026-09-03	#78 P4a

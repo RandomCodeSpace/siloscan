@@ -95,3 +95,24 @@ ruby/metric-over.rb	19	maintainability.ruby.cyclomatic-complexity	25 branches pl
 ruby/metric-under.rb	1	NONE	seven parameters is exactly the profile's limit
 ruby/metric-under.rb	4	NONE	five nested if expressions is exactly the profile's limit
 ruby/metric-under.rb	17	NONE	24 branches plus the entry path is 25, exactly the profile's limit
+# rust
+rust/dbg-macro-positive.rs	2	maintainability.rust.dbg-macro	dbg! is a debugging aid left in the source
+rust/dbg-macro-negative.rs	2	NONE	the statement is an ordinary binding with no debugging macro
+rust/function-length-over.rs	1	maintainability.rust.function-length	the function is 121 lines, one over the profile's 120
+rust/function-length-under.rs	1	NONE	the function is 120 lines, which the profile allows
+rust/parameter-count-over.rs	1	maintainability.rust.parameter-count	the function takes 8 parameters, one over the profile's 7
+rust/parameter-count-under.rs	1	NONE	the function takes 7 parameters, which the profile allows
+rust/nesting-depth-over.rs	1	maintainability.rust.nesting-depth	the loops nest 6 deep, one over the profile's 5
+rust/nesting-depth-under.rs	1	NONE	the loops nest 5 deep, which the profile allows
+rust/cyclomatic-complexity-over.rs	1	maintainability.rust.cyclomatic-complexity	the decision count is 26, one over the profile's 25
+rust/cyclomatic-complexity-under.rs	1	NONE	the decision count is 25, which the profile allows
+rust/self-comparison-positive.rs	2	reliability.rust.self-comparison	both operands are the identical identifier, so the comparison cannot decide anything
+rust/self-comparison-negative.rs	2	NONE	the operands are two different identifiers, which is an ordinary comparison
+rust/self-assignment-positive.rs	2	reliability.rust.self-assignment	the assignment writes the variable back to itself and has no effect
+rust/self-assignment-negative.rs	2	NONE	the assignment reads a different variable, so it has an effect
+rust/identical-if-branches-positive.rs	2	reliability.rust.identical-if-branches	both arms are byte-identical, which is the copy-paste shape the rule owns
+rust/identical-if-branches-negative.rs	2	NONE	the two arms differ, so the condition decides the value
+rust/unimplemented-marker-positive.rs	2	reliability.rust.unimplemented-marker	todo! is a placeholder that panics at run time
+rust/unimplemented-marker-negative.rs	2	NONE	the macro is an ordinary one and not a placeholder
+rust/mem-forget-positive.rs	3	reliability.rust.mem-forget	the call is the mem::forget path, which skips the destructor
+rust/mem-forget-negative.rs	2	NONE	the call drops the value, which runs the destructor the rule is about
