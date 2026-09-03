@@ -5,9 +5,8 @@
 #
 # Identity: reliability-cpp@1. See crates/siloscan-core/src/profiles.rs.
 #
-# Three candidates from the rule matrix are deliberately absent, each removed
-# on the measurement recorded in tests/profiles-corpus/noise/limits.tsv rather
-# than re-tuned:
+# Four candidates from the rule matrix are deliberately absent, each removed on
+# a measurement over the pinned noise set rather than re-tuned:
 #   self-comparison           every finding read on nlohmann/json and abseil is
 #                             a deliberate reflexivity assertion over an
 #                             overloaded operator== - `CHECK(it1 == it1)`,
@@ -20,6 +19,17 @@
 #                             `try { f(); FAIL(); } catch (const E&) {}`
 #                             assertion idiom or a fuzz entry point, not an
 #                             error dropped by accident.
+#   empty-if-body             the whole noise set yields two findings, both on
+#                             abseil and both parse artifacts rather than a
+#                             stray semicolon: in btree.h a `#endif` sits
+#                             between an `if` and its body, which leaves an
+#                             empty consequence node at the end of the `if`
+#                             line, and in raw_hash_set.h a condition
+#                             containing `Set::template EqualElement<...>`
+#                             hits tree-sitter-cpp's `<`/`>` ambiguity and the
+#                             report lands on the `;` of the next statement.
+#                             Zero true positives on three repositories is not
+#                             a threshold to tune.
 version: 1
 rules:
   - id: reliability.cpp.self-assignment
@@ -41,13 +51,6 @@ rules:
         (if_statement
           condition: (condition_clause
             value: (assignment_expression) @report))
-
-  - id: reliability.cpp.empty-if-body
-    severity: warning
-    message: 'The body of this if is a stray semicolon, so the branch does nothing.'
-    ast:
-      cpp: |
-        (if_statement consequence: (expression_statement . ";" .) @report)
 
   - id: reliability.cpp.identical-if-branches
     severity: warning

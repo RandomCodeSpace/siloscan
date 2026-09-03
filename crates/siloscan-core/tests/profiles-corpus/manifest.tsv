@@ -47,13 +47,11 @@ c/metric-under.c	154	NONE	five nested if statements is exactly the profile's lim
 c/metric-under.c	167	NONE	29 branches plus the entry path is 30, exactly this document's limit
 cpp/positive.cpp	2	reliability.cpp.self-assignment	the assignment writes `a` to itself and has no effect
 cpp/positive.cpp	5	reliability.cpp.assignment-in-condition	the condition assigns rather than compares, with no second pair of parentheses
-cpp/positive.cpp	11	reliability.cpp.empty-if-body	the branch body is a stray semicolon
-cpp/positive.cpp	15	reliability.cpp.identical-if-branches	both arms are the byte-identical block `{ return 1; }`
+cpp/positive.cpp	11	reliability.cpp.identical-if-branches	both arms are the byte-identical block `{ return 1; }`
 cpp/positive.hpp	2	maintainability.cpp.using-namespace-in-header	the directive is at global scope in a header, so it leaks into every includer
 cpp/negative.cpp	2	NONE	the operands are different identifiers, which is an ordinary assignment
 cpp/negative.cpp	5	NONE	the second pair of parentheses is the compilers' own deliberate-assignment form
-cpp/negative.cpp	11	NONE	an empty block is a different node from a stray semicolon
-cpp/negative.cpp	15	NONE	the two arms return different values, so the condition decides something
+cpp/negative.cpp	11	NONE	the two arms return different values, so the condition decides something
 cpp/negative.hpp	2	NONE	the call is qualified, so the header imports no namespace
 cpp/metric-over.cpp	1	maintainability.cpp.parameter-count	the function takes 8 parameters, one over the profile's 7
 cpp/metric-over.cpp	4	maintainability.cpp.nesting-depth	six nested if statements, one over the profile's 5

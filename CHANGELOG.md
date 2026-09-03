@@ -6,6 +6,15 @@ All notable changes to this project are documented here. The format follows
 
 ## Unreleased
 
+### Fixed
+
+- A `.h` file whose content is C++ is detected as `cpp` rather than `c`, so the
+  C rules stop running over C++ headers. The content decides: after comments are
+  removed, a line that opens `namespace `, `class `, `template<`, `template <`,
+  `public:`, `private:`, `protected:`, or `extern "C++"` makes the file C++, and
+  everything else stays C. Per-file metrics attribution and the `languages:`
+  setup line change only for `.h` files that are C++.
+
 ### Added
 
 - A `metric:` rule payload, with `measure: function-length | parameter-count |

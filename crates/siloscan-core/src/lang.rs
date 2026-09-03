@@ -2,13 +2,92 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 /// Detect programming language from file path or content.
-/// The extension map decides for any file that has an extension; the shebang is
-/// consulted only for extensionless files.
+/// The extension map decides for any file that has an extension, except `.h`,
+/// which is C or C++ by its content; the shebang is consulted only for
+/// extensionless files.
 pub fn detect(path: &Path, content: &str) -> Option<&'static str> {
-    if path.extension().is_some() {
+    if let Some(extension) = path.extension().and_then(|extension| extension.to_str()) {
+        if extension.eq_ignore_ascii_case("h") {
+            return Some(if is_cpp_header(content) { "cpp" } else { "c" });
+        }
         return detect_by_extension(path);
     }
     detect_by_shebang(content)
+}
+
+/// Whether a `.h` header is C++ rather than C.
+///
+/// Comments are removed first, so prose that mentions a C++ keyword cannot
+/// decide the file, and every signal is then anchored at the start of the
+/// remaining code on the line, so an identifier or a string that happens to
+/// contain one of these words cannot decide it either. A line that opens one of
+/// these declarations is C++ and nothing else:
+///
+/// - `namespace `
+/// - `class `
+/// - `template<` or `template <`
+/// - `public:`, `private:`, `protected:`
+/// - `extern "C++"`
+///
+/// Deliberately absent: `nullptr` and `constexpr` are C23 keywords, and `::`
+/// appears in C23 attributes such as `[[gnu::unused]]`, so none of the three
+/// separates the two languages. An empty header, and any header that declares
+/// only C constructs, stays C.
+fn is_cpp_header(content: &str) -> bool {
+    let mut code = String::new();
+    let mut in_block_comment = false;
+    for line in content.lines() {
+        code.clear();
+        let mut rest = line;
+        loop {
+            if in_block_comment {
+                match rest.find("*/") {
+                    Some(end) => {
+                        rest = &rest[end + 2..];
+                        in_block_comment = false;
+                    }
+                    None => break,
+                }
+            } else {
+                match (rest.find("/*"), rest.find("//")) {
+                    (Some(block), line_comment)
+                        if line_comment.is_none_or(|slash| block < slash) =>
+                    {
+                        code.push_str(&rest[..block]);
+                        rest = &rest[block + 2..];
+                        in_block_comment = true;
+                    }
+                    (_, Some(slash)) => {
+                        code.push_str(&rest[..slash]);
+                        break;
+                    }
+                    _ => {
+                        code.push_str(rest);
+                        break;
+                    }
+                }
+            }
+        }
+        if opens_cpp_declaration(code.trim()) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Whether one comment-free, trimmed line opens a C++-only declaration.
+fn opens_cpp_declaration(line: &str) -> bool {
+    const PREFIXES: [&str; 8] = [
+        "namespace ",
+        "class ",
+        "template<",
+        "template <",
+        "public:",
+        "private:",
+        "protected:",
+        "extern \"C++\"",
+    ];
+    PREFIXES.iter().any(|prefix| line.starts_with(prefix))
 }
 
 /// Apply an accepted config extension mapping before the built-in detector.
@@ -36,7 +115,8 @@ fn detect_by_extension(path: &Path) -> Option<&'static str> {
         "ts" | "tsx" => Some("typescript"),
         "go" => Some("go"),
         "java" => Some("java"),
-        "c" | "h" => Some("c"),
+        // `h` is not here: `detect` decides it from the file's content.
+        "c" => Some("c"),
         "cpp" | "cc" | "cxx" | "hpp" | "hh" => Some("cpp"),
         "cs" => Some("csharp"),
         "rb" => Some("ruby"),
@@ -132,6 +212,53 @@ mod tests {
     fn test_extension_h() {
         let path = PathBuf::from("header.h");
         assert_eq!(detect(&path, ""), Some("c"));
+    }
+
+    #[test]
+    fn test_header_c_stays_c() {
+        let path = PathBuf::from("header.h");
+        let content = "#ifndef WIDGET_H\n#define WIDGET_H\nstruct widget { int id; };\nvoid widget_init(struct widget *w);\n#endif\n";
+        assert_eq!(detect(&path, content), Some("c"));
+    }
+
+    #[test]
+    fn test_header_with_class_is_cpp() {
+        let path = PathBuf::from("header.h");
+        let content = "#pragma once\nclass Widget {\npublic:\n  int id() const;\n};\n";
+        assert_eq!(detect(&path, content), Some("cpp"));
+    }
+
+    #[test]
+    fn test_header_with_namespace_is_cpp() {
+        let path = PathBuf::from("header.h");
+        let content = "#pragma once\nnamespace widget {\nint id();\n}\n";
+        assert_eq!(detect(&path, content), Some("cpp"));
+    }
+
+    #[test]
+    fn test_header_comment_mentioning_namespace_stays_c() {
+        let path = PathBuf::from("header.h");
+        let content = "/*\n * namespace foo is not a thing here, and neither is\n * class bar or template <typename T>.\n */\n// namespace again\nint widget_id(void);\n";
+        assert_eq!(detect(&path, content), Some("c"));
+    }
+
+    #[test]
+    fn test_header_empty_stays_c() {
+        let path = PathBuf::from("header.h");
+        assert_eq!(detect(&path, ""), Some("c"));
+    }
+
+    #[test]
+    fn test_header_code_after_block_comment_is_cpp() {
+        let path = PathBuf::from("header.h");
+        let content = "/* a leading comment */ template <typename T> class Widget;\n";
+        assert_eq!(detect(&path, content), Some("cpp"));
+    }
+
+    #[test]
+    fn test_header_uppercase_extension_reads_content() {
+        let path = PathBuf::from("Header.H");
+        assert_eq!(detect(&path, "namespace widget {}\n"), Some("cpp"));
     }
 
     #[test]
