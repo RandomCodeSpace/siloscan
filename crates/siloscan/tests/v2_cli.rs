@@ -806,7 +806,19 @@ fn an_unknown_profile_identity_is_refused_with_the_resolve_exit_code() {
                 text.contains("unknown profile: reliability-elixir@1"),
                 "{name} {extra:?}: {text}"
             );
-            assert!(text.contains("available: none"), "{name} {extra:?}: {text}");
+            // The tail lists what the registry does hold, so it moves as
+            // documents land. What it may never be is empty or a repeat of the
+            // name that was refused, either of which sends the reader looking
+            // for a document instead of at their own spelling.
+            let available = text
+                .split_once("available: ")
+                .map(|(_, tail)| tail.trim())
+                .unwrap_or_else(|| panic!("{name} {extra:?}: no available list: {text}"));
+            assert!(!available.is_empty(), "{name} {extra:?}: {text}");
+            assert!(
+                !available.contains("reliability-elixir@1"),
+                "{name} {extra:?}: {text}"
+            );
         }
     }
 }
