@@ -3,7 +3,16 @@
 #   rule_id       the rule the ceiling belongs to
 #   max_corpus    findings this rule may leave on NONE rows of manifest.tsv
 #   max_per_kloc  findings per thousand code lines this rule may leave on any
-#                 one repository of the pinned noise set
+#                 one repository of the pinned noise set. The thousand lines are
+#                 the code lines of that repository's own pinned language, summed
+#                 out of the report's per-file metrics and nothing else: the
+#                 report's `metrics.totals.code_lines` sums every tier-1 language
+#                 in the tree, which would divide a TypeScript rule's findings by
+#                 the repository's JavaScript build scripts as well and report a
+#                 rate lower than the truth. Only `reliability.*` and
+#                 `maintainability.*` findings are counted; `--profiles` adds to
+#                 the secrets pack rather than replacing it, and those findings
+#                 belong to the detection corpus.
 #   measured_at   the value measured when the rule landed, as a date
 #   ticket        what the number was measured for
 # One file, two readers: tests/profile_corpus.rs enforces max_corpus, and

@@ -64,6 +64,7 @@ def result(findings, code_lines=10_000, name="cobra"):
     return profile_noise.Result(
         repo=repo(name=name),
         files_scanned=36,
+        files_total=65,
         code_lines=code_lines,
         elapsed_seconds=1.25,
         findings=findings,
@@ -221,11 +222,47 @@ class Breaches(unittest.TestCase):
         self.assertEqual(len(over), 1)
         self.assertIn("gin", over[0])
 
+    def test_a_secrets_rule_never_spends_a_profile_budget(self):
+        # tally() already drops these; breaches() repeats the filter so a
+        # result built any other way cannot charge one to a profile.
+        found = result({"secrets.generic-api-key": 400})
+        self.assertEqual(profile_noise.breaches([found], self.limits), [])
+
     def test_every_breaching_rule_is_named_separately(self):
         found = result(
             {"reliability.go.err-shadow": 60, "reliability.go.nil-deref": 60}
         )
         self.assertEqual(len(profile_noise.breaches([found], self.limits)), 2)
+
+
+class Languages(unittest.TestCase):
+    def test_the_extension_table_covers_the_ten_grammars(self):
+        self.assertEqual(len(set(profile_noise.EXTENSIONS.values())), 10)
+
+    def test_a_path_maps_by_its_extension(self):
+        self.assertEqual(profile_noise.language_of("src/cmd/root.go"), "go")
+        self.assertEqual(profile_noise.language_of("a/b.TSX"), "typescript")
+        self.assertEqual(profile_noise.language_of("include/x.hpp"), "cpp")
+
+    def test_an_unknown_extension_has_no_language(self):
+        self.assertIsNone(profile_noise.language_of("README.md"))
+
+    def test_an_extensionless_file_is_not_its_own_name(self):
+        self.assertIsNone(profile_noise.language_of("Makefile"))
+        self.assertIsNone(profile_noise.language_of("bin/go"))
+
+    def test_a_dot_in_a_directory_is_not_an_extension(self):
+        self.assertIsNone(profile_noise.language_of("vendor.d/LICENSE"))
+
+
+class ProfileFamilies(unittest.TestCase):
+    def test_the_two_profile_families_are_profile_rules(self):
+        self.assertTrue(profile_noise.is_profile_rule("reliability.go.nil-deref"))
+        self.assertTrue(profile_noise.is_profile_rule("maintainability.go.long-fn"))
+
+    def test_a_secrets_rule_is_not_a_profile_rule(self):
+        self.assertFalse(profile_noise.is_profile_rule("secrets.aws-access-key-id"))
+        self.assertFalse(profile_noise.is_profile_rule("metrics.duplicate-block"))
 
 
 class Tally(unittest.TestCase):
@@ -234,27 +271,56 @@ class Tally(unittest.TestCase):
             {"rule_id": "reliability.go.nil-deref"},
             {"rule_id": "reliability.go.nil-deref"},
             {"rule_id": "reliability.go.err-shadow"},
+            {"rule_id": "secrets.generic-api-key"},
         ],
         "baselined": [{"rule_id": "reliability.go.nil-deref"}],
         "suppressed": [{"rule_id": "reliability.go.err-shadow"}],
         "metrics": {
-            "files": {"a.go": {}, "b.go": {}},
-            "totals": {"lines": 120, "code_lines": 100},
+            "files": {
+                "a.go": {"lines": 60, "code_lines": 40},
+                "b.go": {"lines": 90, "code_lines": 60},
+                "vendor/tool.py": {"lines": 300, "code_lines": 250},
+                "README.md": {"lines": 20},
+            },
+            "totals": {"lines": 470, "code_lines": 350},
         },
     }
 
     def test_findings_are_counted_per_rule(self):
-        _, _, findings = profile_noise.tally(self.REPORT)
+        *_, findings = profile_noise.tally(self.REPORT, "go")
         self.assertEqual(findings["reliability.go.nil-deref"], 3)
         self.assertEqual(findings["reliability.go.err-shadow"], 2)
 
-    def test_files_and_code_lines_come_from_the_metrics_block(self):
-        files, code_lines, _ = profile_noise.tally(self.REPORT)
+    def test_only_profile_rules_are_tallied(self):
+        # --profiles adds to the secrets pack rather than replacing it, so
+        # every real run carries secrets findings that are not a profile's to
+        # answer for.
+        *_, findings = profile_noise.tally(self.REPORT, "go")
+        self.assertEqual(
+            sorted(findings),
+            ["reliability.go.err-shadow", "reliability.go.nil-deref"],
+        )
+        self.assertNotIn("secrets.generic-api-key", findings)
+
+    def test_code_lines_are_the_measured_language_and_not_the_total(self):
+        files, files_total, code_lines, _ = profile_noise.tally(self.REPORT, "go")
         self.assertEqual(files, 2)
+        self.assertEqual(files_total, 4)
+        # 40 + 60, not the 350 that totals.code_lines sums across languages.
         self.assertEqual(code_lines, 100)
 
+    def test_a_file_with_no_code_lines_contributes_none(self):
+        _, _, code_lines, _ = profile_noise.tally(
+            {"metrics": {"files": {"a.go": {"lines": 10}}}}, "go"
+        )
+        self.assertEqual(code_lines, 0)
+
+    def test_a_language_with_no_files_measures_nothing(self):
+        files, files_total, code_lines, _ = profile_noise.tally(self.REPORT, "ruby")
+        self.assertEqual((files, files_total, code_lines), (0, 4, 0))
+
     def test_an_empty_report_tallies_to_nothing(self):
-        self.assertEqual(profile_noise.tally({}), (0, 0, {}))
+        self.assertEqual(profile_noise.tally({}, "go"), (0, 0, 0, {}))
 
 
 class Tables(unittest.TestCase):
@@ -269,6 +335,7 @@ class Tables(unittest.TestCase):
         self.assertIn("# binary_sha256=" + "0" * 64, text)
         self.assertIn(f"# commit={SHA_B}", text)
         self.assertIn("# files_scanned=36", text)
+        self.assertIn("# files_total=65", text)
         self.assertIn("# elapsed_seconds=1.25", text)
         self.assertIn("reliability.go.err-shadow\t4\t0.4000\t0.5000\twithin", text)
 

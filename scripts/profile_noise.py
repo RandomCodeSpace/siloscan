@@ -4,9 +4,28 @@
 The profile corpus under ``crates/siloscan-core/tests/profiles-corpus`` holds
 hand-written positives and negatives. It measures what its author thought of.
 The noise set measures what a rule does to real code nobody wrote for it: the
-thirty repositories recorded in ``research/embedded-profiles/noise-set.md``,
-each pinned to a commit, cloned into a temporary directory at measurement time
-and never committed.
+twenty-nine repositories recorded in
+``research/embedded-profiles/noise-set.md``, each pinned to a commit, cloned
+into a temporary directory at measurement time and never committed.
+
+Two things about the numerator and the denominator, both of which would be
+wrong if taken at face value:
+
+**Only profile findings are counted.** ``--profiles`` adds the embedded profile
+documents to the secrets pack, it does not replace it, and ``--no-default-rules``
+would suppress the profiles along with it. Every run therefore reports
+``secrets.*`` findings as well, and those belong to the detection corpus and its
+own gates, not to a profile's noise budget. So the tally keeps only ids whose
+first segment is ``reliability`` or ``maintainability`` - the same closed family
+set ``tests/profile_corpus.rs`` enforces on every shipped document.
+
+**The denominator is the repository's own language.** ``metrics.totals.code_lines``
+sums every tier-1 language in the tree, so a TypeScript repository carrying
+JavaScript build scripts would divide a TypeScript rule's findings by both and
+report a rate lower than the truth. The rate here is over the code lines of the
+language the repository was pinned for, summed out of ``metrics.files``. The
+report has no per-file language field, so the file's extension decides, using a
+copy of the table in ``crates/siloscan-core/src/lang.rs``.
 
 What this script does, in order:
 
@@ -80,6 +99,53 @@ LANGUAGES = {
 
 COMMIT = re.compile(r"^[0-9a-f]{40}$")
 
+#: First segment of every rule id the profiles ship. A finding outside these two
+#: families came from the embedded secrets pack, which ``--profiles`` adds to
+#: rather than replaces, and is measured by the detection corpus instead.
+#: ``PROFILE_FAMILIES`` in ``tests/profile_corpus.rs`` is the same list.
+PROFILE_FAMILIES = ("reliability", "maintainability")
+
+#: File extension to language, copied from ``detect_by_extension`` in
+#: ``crates/siloscan-core/src/lang.rs``. The JSON report's per-file metrics
+#: carry line counts and no language, so this is the only way to restrict the
+#: denominator to the language a repository was pinned for. It is a copy and can
+#: drift: if ``FileMetrics`` ever gains a language field, read that instead.
+EXTENSIONS = {
+    "rs": "rust",
+    "py": "python",
+    "js": "javascript",
+    "mjs": "javascript",
+    "cjs": "javascript",
+    "ts": "typescript",
+    "tsx": "typescript",
+    "go": "go",
+    "java": "java",
+    "c": "c",
+    "h": "c",
+    "cpp": "cpp",
+    "cc": "cpp",
+    "cxx": "cpp",
+    "hpp": "cpp",
+    "hh": "cpp",
+    "cs": "csharp",
+    "rb": "ruby",
+}
+
+
+def is_profile_rule(rule_id: str) -> bool:
+    """Whether a rule id belongs to a profile rather than the secrets pack."""
+    return rule_id.split(".", 1)[0] in PROFILE_FAMILIES
+
+
+def language_of(path: str) -> str | None:
+    """The language of one scanned path, by extension. ``None`` for anything
+    the ten grammars do not cover, an extensionless file included - a file
+    named ``go`` is not a Go file."""
+    name = path.rpartition("/")[2]
+    if "." not in name:
+        return None
+    return EXTENSIONS.get(name.rpartition(".")[2].lower())
+
 
 class NoiseError(Exception):
     """A malformed input, a moved pin, or a scan that did not run."""
@@ -113,10 +179,16 @@ class Result:
     """One repository, measured."""
 
     repo: Repository
+    #: Files of the repository's own language. The denominator's population.
     files_scanned: int
+    #: Every file the scan took metrics on, whatever its language. Recorded so
+    #: a reader can see how much of the tree the rate does not speak for.
+    files_total: int
+    #: Code lines of the repository's own language, and nothing else.
     code_lines: int
     elapsed_seconds: float
-    #: rule id -> findings on this repository. Rules with no findings are absent.
+    #: Profile rule id -> findings on this repository. Rules with no findings
+    #: are absent, and secrets-pack ids never appear.
     findings: dict[str, int]
 
 
@@ -225,10 +297,17 @@ def per_kloc(findings: int, code_lines: int) -> float:
 
 
 def breaches(results: list[Result], limits: dict[str, Limit]) -> list[str]:
-    """Every (repository, rule) whose rate is above the rule's ceiling."""
+    """Every (repository, rule) whose rate is above the rule's ceiling.
+
+    Profile rules only, for the reason in the module docstring. ``tally`` has
+    already dropped everything else; this repeats the filter so a result built
+    any other way cannot charge a ``secrets.*`` finding to a profile's budget.
+    """
     over = []
     for result in results:
         for rule_id in sorted(result.findings):
+            if not is_profile_rule(rule_id):
+                continue
             count = result.findings[rule_id]
             rate = per_kloc(count, result.code_lines)
             ceiling = limit_for(limits, rule_id).max_per_kloc
@@ -319,24 +398,33 @@ def scan(binary: Path, tree: Path, profiles: str) -> tuple[dict, float]:
         raise NoiseError(f"{' '.join(command)} produced no JSON: {error}") from error
 
 
-def tally(report: dict) -> tuple[int, int, dict[str, int]]:
-    """``(files scanned, code lines, findings per rule)`` out of one report.
+def tally(report: dict, language: str) -> tuple[int, int, int, dict[str, int]]:
+    """``(files of `language`, files total, code lines of `language`, findings
+    per profile rule)`` out of one report.
+
+    Two restrictions, both argued in the module docstring: only
+    ``reliability.*`` and ``maintainability.*`` findings are counted, because
+    ``--profiles`` adds to the secrets pack rather than replacing it; and the
+    code lines are the ones belonging to ``language``, because
+    ``metrics.totals.code_lines`` sums every tier-1 language in the tree.
 
     Suppressed and baselined findings are counted with the rest. A noise
     measurement asks what a rule reports about code that never heard of it, and
     a repository that happens to carry a `siloscan:ignore` comment did not make
     the rule quieter.
     """
-    metrics = report.get("metrics", {})
-    files = len(metrics.get("files", {}))
-    code_lines = int(metrics.get("totals", {}).get("code_lines", 0))
+    files = report.get("metrics", {}).get("files", {})
+    matching = [path for path in files if language_of(path) == language]
+    code_lines = sum(int(files[path].get("code_lines") or 0) for path in matching)
 
     findings: dict[str, int] = {}
     for bucket in ("findings", "baselined", "suppressed"):
         for finding in report.get(bucket, []):
             rule_id = finding["rule_id"]
+            if not is_profile_rule(rule_id):
+                continue
             findings[rule_id] = findings.get(rule_id, 0) + 1
-    return files, code_lines, findings
+    return len(matching), len(files), code_lines, findings
 
 
 # ------------------------------------------------------------------ output
@@ -375,6 +463,7 @@ def repository_file(result: Result, limits: dict[str, Limit], head: list[str]) -
         f"# commit={result.repo.commit}",
         f"# licence={result.repo.licence}",
         f"# files_scanned={result.files_scanned}",
+        f"# files_total={result.files_total}",
         f"# code_lines={result.code_lines}",
         f"# elapsed_seconds={result.elapsed_seconds:.2f}",
         "rule_id\tfindings\tper_kloc\tmax_per_kloc\tverdict",
@@ -486,10 +575,11 @@ def main(argv: list[str]) -> int:
         except NoiseError as error:
             print(f"error: {error}", file=sys.stderr)
             return 2
-        files, code_lines, findings = tally(report)
+        files, files_total, code_lines, findings = tally(report, repo.language)
         result = Result(
             repo=repo,
             files_scanned=files,
+            files_total=files_total,
             code_lines=code_lines,
             elapsed_seconds=elapsed,
             findings=findings,

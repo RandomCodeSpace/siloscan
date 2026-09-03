@@ -48,6 +48,30 @@ const PROFILES_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/rules/profiles"
 /// raises the severity that fails a build.
 const ALLOWED_SEVERITIES: [Severity; 2] = [Severity::Warning, Severity::Info];
 
+/// The profile families. Closed on purpose: the family is the first segment of
+/// every rule id the profiles ship, and `scripts/profile_noise.py` uses the
+/// same two names to tell a profile finding from a secrets finding when it
+/// counts a noise run. A third family would have to be added in both places,
+/// deliberately, or the noise gate would stop seeing it.
+const PROFILE_FAMILIES: [&str; 2] = ["reliability", "maintainability"];
+
+/// Languages a profile document may be written for: the ten grammars the crate
+/// compiles in, spelled the way `crate::lang` reports them. A document for
+/// anything else selects nothing under `Auto`, because detection can never name
+/// its language, and would sit in the registry reporting nothing forever.
+const PROFILE_LANGUAGES: [&str; 10] = [
+    "rust",
+    "python",
+    "javascript",
+    "typescript",
+    "go",
+    "java",
+    "c",
+    "cpp",
+    "csharp",
+    "ruby",
+];
+
 // ------------------------------------------------------------- expectations
 
 #[derive(Debug, PartialEq, Eq)]
@@ -470,17 +494,31 @@ impl Measurement {
         stats
     }
 
-    /// Per rule id: every `NONE` row it reported, as printable lines.
+    /// Per rule id: every measured line it reported and should not have, as
+    /// printable lines.
+    ///
+    /// Two shapes spend the same budget. A `NONE` row reported at all is the
+    /// obvious one. The other is a rule id on a positive row that the row does
+    /// not account for: the row's expectation is satisfied by the first of its
+    /// listed ids, and without this a row expecting `a|b` and satisfied by `a`
+    /// would let `c` fire on the same line for free. It is the same thing
+    /// `detection_corpus.rs` refuses on a measured line, charged here to the
+    /// rule that did it, because that is the rule whose budget it is.
     fn false_positives(&self) -> BTreeMap<&str, Vec<String>> {
         let mut spent: BTreeMap<&str, Vec<String>> = BTreeMap::new();
         for row in &self.corpus.rows {
-            if row.expect.is_positive() {
-                continue;
-            }
             for rule_id in self.hits(&row.path, row.line) {
+                let label = match &row.expect {
+                    Expect::Nothing => "FALSE POSITIVE",
+                    Expect::OneOf(ids) if ids.contains(rule_id) => continue,
+                    Expect::OneOf(_) => "UNACCOUNTED",
+                };
                 spent.entry(rule_id).or_default().push(format!(
-                    "  FALSE POSITIVE {}:{} reported {rule_id} - {}",
-                    row.path, row.line, row.justification
+                    "  {label} {}:{} reported {rule_id} on a row expecting {} - {}",
+                    row.path,
+                    row.line,
+                    row.expect.describe(),
+                    row.justification
                 ));
             }
         }
@@ -548,6 +586,45 @@ fn shipped() -> Measurement {
     measure(Corpus::load(Path::new(CORPUS_DIR)), profiles::REGISTRY)
 }
 
+/// Every language whose recall is under its declared floor.
+///
+/// The comparison the recall gate makes, as a function, so a test can hand it a
+/// measurement that fails and read the failure rather than catch a panic.
+fn recall_failures(measurement: &Measurement) -> Vec<String> {
+    measurement
+        .recall_by_language()
+        .iter()
+        .filter_map(|(language, (positives, reported))| {
+            let recall = *reported as f64 / *positives as f64;
+            let floor = measurement.corpus.floor(language);
+            (recall < floor).then(|| {
+                format!(
+                    "language {language}: recall {recall:.4} is below its floor {floor:.4} \
+                     ({reported} of {positives} positives reported)"
+                )
+            })
+        })
+        .collect()
+}
+
+/// Every rule that spent more of its false-positive budget than it has.
+fn limit_failures(measurement: &Measurement) -> Vec<String> {
+    measurement
+        .false_positives()
+        .iter()
+        .filter_map(|(rule_id, lines)| {
+            let limit = measurement.corpus.limit(rule_id).max_corpus;
+            (lines.len() > limit).then(|| {
+                format!(
+                    "rule {rule_id}: {} findings on measured lines it does not own, limit {limit}\n{}",
+                    lines.len(),
+                    lines.join("\n")
+                )
+            })
+        })
+        .collect()
+}
+
 // ---------------------------------------------------------- load strictness
 
 /// Everything wrong with one document's shape, as printable lines.
@@ -558,6 +635,18 @@ fn strictness_failures(document: &Document, registered_language: &str) -> Vec<St
     if document.language != registered_language {
         failures.push(format!(
             "{identity}: identity says language {} but the registry entry says {registered_language}",
+            document.language
+        ));
+    }
+    if !PROFILE_FAMILIES.contains(&document.profile.as_str()) {
+        failures.push(format!(
+            "{identity}: profile family {} is not one of {PROFILE_FAMILIES:?}",
+            document.profile
+        ));
+    }
+    if !PROFILE_LANGUAGES.contains(&document.language.as_str()) {
+        failures.push(format!(
+            "{identity}: language {} is not one of the ten compiled grammars",
             document.language
         ));
     }
@@ -577,10 +666,49 @@ fn strictness_failures(document: &Document, registered_language: &str) -> Vec<St
                 rule.id
             ));
         }
+        failures.extend(wrong_language(identity, &document.language, rule));
         failures.extend(unimplemented_predicates(identity, rule));
     }
 
     failures
+}
+
+/// Where a rule in a single-language document reaches past that language.
+///
+/// A document covers exactly one language, and the harness scans exactly that
+/// language's corpus directory with it. A rule inside it that also carries a
+/// Python query, or that leaves `languages` open, therefore ships behaviour
+/// nothing in this corpus measures: it fires on Python files in a user's tree
+/// with no row anywhere saying what it should do there.
+///
+/// The two payload shapes say it differently. An `ast` rule names its languages
+/// as the keys of its query map; every other payload names them in `languages`,
+/// where absent means every language.
+fn wrong_language(identity: &str, language: &str, rule: &CompiledRule) -> Vec<String> {
+    if let CompiledPayload::Ast { queries } = &rule.payload {
+        return queries
+            .iter()
+            .filter(|ast| ast.language != language)
+            .map(|ast| {
+                format!(
+                    "{identity}: rule {} carries a {} query in a {language} document",
+                    rule.id, ast.language
+                )
+            })
+            .collect();
+    }
+
+    match rule.languages.as_deref() {
+        Some([only]) if only == language => Vec::new(),
+        Some(names) => vec![format!(
+            "{identity}: rule {} is scoped to {names:?}, expected exactly [{language}]",
+            rule.id
+        )],
+        None => vec![format!(
+            "{identity}: rule {} names no languages, so it runs on every file in the tree",
+            rule.id
+        )],
+    }
 }
 
 /// Predicates a rule's AST queries use that the engine does not implement.
@@ -608,9 +736,10 @@ fn unimplemented_predicates(identity: &str, rule: &CompiledRule) -> Vec<String> 
                     rule.id, predicate.operator
                 ));
             }
-            for (property, _) in query.property_predicates(pattern) {
+            for (property, positive) in query.property_predicates(pattern) {
+                let operator = if *positive { "is?" } else { "is-not?" };
                 failures.push(format!(
-                    "{identity}: rule {} query for {language} pattern {pattern} uses #is? {}, \
+                    "{identity}: rule {} query for {language} pattern {pattern} uses #{operator} {}, \
                      which the engine ignores at match time",
                     rule.id, property.key
                 ));
@@ -790,19 +919,7 @@ fn profile_recall_meets_its_floor_per_language() {
         );
     }
 
-    let failures: Vec<String> = stats
-        .iter()
-        .filter_map(|(language, (positives, reported))| {
-            let recall = *reported as f64 / *positives as f64;
-            let floor = measurement.corpus.floor(language);
-            (recall < floor).then(|| {
-                format!(
-                    "language {language}: recall {recall:.4} is below its floor {floor:.4} \
-                     ({reported} of {positives} positives reported)"
-                )
-            })
-        })
-        .collect();
+    let failures = recall_failures(&measurement);
     assert!(
         failures.is_empty(),
         "{}\n{}",
@@ -818,19 +935,7 @@ fn profile_recall_meets_its_floor_per_language() {
 #[test]
 fn no_rule_exceeds_its_false_positive_limit() {
     let measurement = shipped();
-    let spent = measurement.false_positives();
-
-    let mut failures = Vec::new();
-    for (rule_id, lines) in &spent {
-        let limit = measurement.corpus.limit(rule_id).max_corpus;
-        if lines.len() > limit {
-            failures.push(format!(
-                "rule {rule_id}: {} findings on NONE rows, limit {limit}\n{}",
-                lines.len(),
-                lines.join("\n")
-            ));
-        }
-    }
+    let failures = limit_failures(&measurement);
     assert!(
         failures.is_empty(),
         "{}\n{}",
@@ -861,6 +966,18 @@ rules:
     message: a comparison
     ast:
       rust: '(binary_expression left: (identifier) operator: "==" right: (identifier)) @report'
+"#;
+
+/// A rule that reports nothing at all: it looks for a macro the corpus does
+/// not spell. What a recall floor is for.
+const SILENT_DOCUMENT: &str = r#"
+version: 1
+rules:
+  - id: reliability.rust.self-comparison
+    severity: warning
+    message: never fires
+    ast:
+      rust: '(macro_invocation macro: (identifier) @report (#eq? @report "todo"))'
 "#;
 
 /// A two-row Rust corpus in a temporary directory: one positive the strict
@@ -959,40 +1076,172 @@ fn the_harness_counts_a_false_positive_against_its_limit() {
         },
         "a declared limit is what the rule is held to"
     );
+    assert!(
+        limit_failures(&measurement).is_empty(),
+        "one finding against a limit of one is within budget"
+    );
+}
+
+/// Both gates have to be able to fail, or their passing says nothing. Each
+/// half here calls the same function the gate test calls and reads the failure
+/// it returns, rather than asserting that a panic happened somewhere.
+#[test]
+fn the_gates_report_the_failures_they_exist_to_catch() {
+    const RULE: &str = "reliability.rust.self-comparison";
+    const NO_LIMITS: &str = "rule_id\tmax_corpus\tmax_per_kloc\tmeasured_at\tticket\n";
+
+    // A floor of 1.0 against a document whose rule never fires.
+    let silent = [Profile::new(IDENTITY, "rust", SILENT_DOCUMENT)];
+    let dir = in_test_corpus(NO_LIMITS);
+    let measurement = measure(Corpus::load(dir.path()), &silent);
+    let failures = recall_failures(&measurement);
+    assert_eq!(failures.len(), 1, "{}", measurement.report());
+    assert!(
+        failures[0].contains("language rust: recall 0.0000 is below its floor 1.0000"),
+        "{}",
+        failures[0]
+    );
+    assert_eq!(measurement.misses().len(), 1, "{}", measurement.report());
+
+    // A rule with no declared limit reporting one negative.
+    let noisy = [Profile::new(IDENTITY, "rust", NOISY_DOCUMENT)];
+    let dir = in_test_corpus(NO_LIMITS);
+    let measurement = measure(Corpus::load(dir.path()), &noisy);
+    let failures = limit_failures(&measurement);
+    assert_eq!(failures.len(), 1, "{}", measurement.report());
+    assert!(
+        failures[0].starts_with(&format!("rule {RULE}: 1 findings")),
+        "{}",
+        failures[0]
+    );
+    assert!(failures[0].contains("FALSE POSITIVE"), "{}", failures[0]);
+}
+
+/// A rule id nobody put on the row is charged to that rule, even when the row
+/// is a positive another id already satisfied. Without this, a row expecting
+/// `a|b` and satisfied by `a` is a free pass for every other rule in the
+/// document on that line.
+#[test]
+fn an_unaccounted_id_on_a_positive_row_spends_its_own_budget() {
+    const OTHER: &str = "reliability.rust.other-comparison";
+    // Two rules over the same shape: the row names only the first, so the
+    // second is a finding the manifest does not account for.
+    let document: &'static str = r#"
+version: 1
+rules:
+  - id: reliability.rust.self-comparison
+    severity: warning
+    message: both operands are the same identifier
+    ast:
+      rust: '((binary_expression left: (identifier) @l operator: "==" right: (identifier) @r) @report (#eq? @l @r))'
+  - id: reliability.rust.other-comparison
+    severity: info
+    message: a comparison
+    ast:
+      rust: '(binary_expression left: (identifier) operator: "==" right: (identifier)) @report'
+"#;
+    let registry = [Profile::new(IDENTITY, "rust", document)];
+    let dir = in_test_corpus("rule_id\tmax_corpus\tmax_per_kloc\tmeasured_at\tticket\n");
+    let measurement = measure(Corpus::load(dir.path()), &registry);
+
+    // The positive is still satisfied: recall does not see the extra id.
+    assert!(
+        recall_failures(&measurement).is_empty(),
+        "{}",
+        measurement.report()
+    );
+
+    let spent = measurement.false_positives();
+    assert!(
+        !spent.contains_key("reliability.rust.self-comparison"),
+        "the id the row names spends nothing: {spent:?}"
+    );
+    let charged = spent.get(OTHER).expect("the unaccounted id is charged");
+    assert_eq!(charged.len(), 2, "{charged:?}");
+    assert!(
+        charged
+            .iter()
+            .any(|line| line.contains("UNACCOUNTED") && line.contains("rust/positive.rs:2")),
+        "the positive row charges the id it does not account for: {charged:?}"
+    );
+    assert!(
+        charged
+            .iter()
+            .any(|line| line.contains("FALSE POSITIVE") && line.contains("rust/negative.rs:2")),
+        "the negative row charges it too: {charged:?}"
+    );
+    assert_eq!(limit_failures(&measurement).len(), 1);
 }
 
 /// The strictness test has to be able to fail. Each of these is a document the
 /// registry must never carry, and each one is refused for its own reason.
 #[test]
 fn strictness_refuses_what_it_is_there_to_refuse() {
-    let cases: [(&str, &str, &str, &str); 4] = [
+    // `(what is wrong, identity, the registry's language, document, the words
+    // the refusal has to say)`. The expected wording is pinned per case so a
+    // document refused for the wrong reason does not read as a pass: every one
+    // of these is a valid document in every respect but one.
+    let cases: [(&str, &str, &str, &'static str, &str); 7] = [
         (
             "severity",
             "reliability-rust@1",
             "rust",
-            "version: 1\nrules:\n  - id: reliability.rust.x\n    severity: error\n    message: m\n    regex:\n      pattern: 'x'\n",
+            "version: 1\nrules:\n  - id: reliability.rust.x\n    severity: error\n    \
+             message: m\n    languages: [rust]\n    regex:\n      pattern: 'x'\n",
+            "expected warning or info",
         ),
         (
             "rule id",
             "reliability-rust@1",
             "rust",
-            "version: 1\nrules:\n  - id: reliability.x\n    severity: info\n    message: m\n    regex:\n      pattern: 'x'\n",
+            "version: 1\nrules:\n  - id: reliability.x\n    severity: info\n    \
+             message: m\n    languages: [rust]\n    regex:\n      pattern: 'x'\n",
+            "is not reliability.rust.<check>",
         ),
         (
             "unimplemented predicate",
             "reliability-rust@1",
             "rust",
-            "version: 1\nrules:\n  - id: reliability.rust.x\n    severity: info\n    message: m\n    ast:\n      rust: '((identifier) @report (#is-uppercase? @report))'\n",
+            "version: 1\nrules:\n  - id: reliability.rust.x\n    severity: info\n    \
+             message: m\n    ast:\n      rust: '((identifier) @report (#is-uppercase? @report))'\n",
+            "which the engine ignores at match time",
         ),
         (
             "registry disagreement",
             "reliability-rust@1",
             "python",
-            "version: 1\nrules:\n  - id: reliability.rust.x\n    severity: info\n    message: m\n    regex:\n      pattern: 'x'\n",
+            "version: 1\nrules:\n  - id: reliability.rust.x\n    severity: info\n    \
+             message: m\n    languages: [rust]\n    regex:\n      pattern: 'x'\n",
+            "the registry entry says python",
+        ),
+        (
+            "profile family typo",
+            "reliabilty-rust@1",
+            "rust",
+            "version: 1\nrules:\n  - id: reliabilty.rust.x\n    severity: info\n    \
+             message: m\n    languages: [rust]\n    regex:\n      pattern: 'x'\n",
+            "profile family reliabilty is not one of",
+        ),
+        (
+            "a python query inside a rust document",
+            "reliability-rust@1",
+            "rust",
+            "version: 1\nrules:\n  - id: reliability.rust.x\n    severity: info\n    \
+             message: m\n    ast:\n      rust: '(identifier) @report'\n      \
+             python: '(identifier) @report'\n",
+            "carries a python query in a rust document",
+        ),
+        (
+            "an unscoped regex rule",
+            "reliability-rust@1",
+            "rust",
+            "version: 1\nrules:\n  - id: reliability.rust.x\n    severity: info\n    \
+             message: m\n    regex:\n      pattern: 'x'\n",
+            "names no languages",
         ),
     ];
 
-    for (why, identity, language, source) in cases {
+    for (why, identity, language, source, expected) in cases {
         let rules = load_str(source, identity).expect("the case loads; only its shape is wrong");
         let (profile, identity_language) =
             split_identity(identity).expect("a well-formed identity");
@@ -1003,9 +1252,10 @@ fn strictness_refuses_what_it_is_there_to_refuse() {
             rules,
             source,
         };
+        let failures = strictness_failures(&document, language);
         assert!(
-            !strictness_failures(&document, language).is_empty(),
-            "a document with a bad {why} is refused"
+            failures.iter().any(|line| line.contains(expected)),
+            "a document with a bad {why} is refused for it; got {failures:?}"
         );
     }
 
