@@ -58,7 +58,10 @@ pub fn accept_baseline(state: &mut AppState, row_idx: usize) {
     state.clamp_ratchet();
     state.clamp_selection();
 
-    if let Err(e) = persist_baseline(&state.root, &state.dirty_baseline) {
+    // The baseline root, not the scan root: a config-anchored scan measures its
+    // fingerprints from the config root, so that is the only place a baseline
+    // written here is read back from.
+    if let Err(e) = persist_baseline(&state.baseline_root, &state.dirty_baseline) {
         state.status = format!("baseline: {e}");
     }
 }
@@ -258,7 +261,6 @@ mod tests {
                 rules: Vec::new(),
                 ..Default::default()
             }),
-            None,
         );
         state.rows = rows;
         state
@@ -292,6 +294,44 @@ mod tests {
                 path: "src/a.rs".to_string(),
             }]
         );
+    }
+
+    /// Under config anchoring the two roots differ: sources are read from the
+    /// module being reviewed, fingerprints are measured from the config root,
+    /// and the baseline belongs where the fingerprints do. A baseline written
+    /// beside the module is a file the next scan of that module never reads,
+    /// so the ratchet would silently accept nothing.
+    #[test]
+    fn accept_baseline_writes_to_the_baseline_root_not_the_scan_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        let module = repo.join("modules/api");
+        fs::create_dir_all(&module).unwrap();
+
+        let mut state = state(
+            &module,
+            vec![row(
+                finding("a.one", "modules/api/src/a.rs", 1, "aa"),
+                Status::New,
+            )],
+        );
+        state.baseline_root = repo.to_path_buf();
+
+        accept_baseline(&mut state, 0);
+
+        assert!(state.status.is_empty(), "{}", state.status);
+        assert!(
+            repo.join(baseline::BASELINE_PATH).is_file(),
+            "the baseline belongs at the config root"
+        );
+        assert!(
+            !module.join(baseline::BASELINE_PATH).exists(),
+            "nothing may be written beside the module"
+        );
+        let baseline = baseline::load(repo).unwrap().unwrap();
+        assert_eq!(baseline.entries.len(), 1);
+        assert_eq!(baseline.entries[0].path, "modules/api/src/a.rs");
+        assert!(baseline::load(&module).unwrap().is_none());
     }
 
     #[test]

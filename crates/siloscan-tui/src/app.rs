@@ -2,80 +2,69 @@
 //! back into `AppState`.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::mpsc::Sender;
 use std::thread;
 
-use siloscan_core::baseline::Baseline;
 use siloscan_core::config::Config;
 use siloscan_core::findings::Finding;
 use siloscan_core::metrics::DUPLICATE_BLOCK_RULE_ID;
 use siloscan_core::output::REDACTED_MATCH;
-use siloscan_core::rules::{RuleSet, Severity};
-use siloscan_core::scan::{self, Progress, ScanOptions, ScanReport};
-use siloscan_core::walk::IgnoreOptions;
+use siloscan_core::plan::{ResolvedScanPlan, ResolvedScanReport, ScanRequest};
+use siloscan_core::rules::Severity;
+use siloscan_core::scan::{Progress, ScanReport};
 
-use crate::snapshot::{HIDDEN_MATCH_NOTE, SnapshotData};
+use crate::snapshot::{HIDDEN_MATCH_NOTE, SavedOutcome, SnapshotData};
 use crate::state::{AppState, FindingRow, Scroll, Status};
 use crate::ui::dashboard;
 
 /// The report is boxed so a progress tick, which is the common event by far,
 /// stays small.
-#[derive(Debug, Clone)]
 pub enum AppEvent {
     Progress(Progress),
-    ScanDone(Box<ScanReport>),
-    /// The scan never ran: a boundary rule names a silo the config does not
-    /// define. Reported in the status line rather than killing the session.
+    ScanDone(Box<ResolvedScanReport>),
+    /// The scan never produced a report: setup refused the request, or a
+    /// boundary rule names a silo the config does not define. Reported in the
+    /// status line rather than killing the session.
     Failed(String),
 }
 
-/// Everything about a session's walk that a rescan has to reproduce, in one
-/// value.
+/// Run an already-resolved plan on a worker thread, streaming progress and then
+/// the report.
 ///
-/// One value rather than a parameter each: `run`, `on_key` and `start_scan` do
-/// nothing with these but carry them through to [`spawn_scan`], and a second
-/// loose flag threaded beside the first is how two of them end up passed in the
-/// wrong order. It is also what the `--report` check compares against, so
-/// "this session configured its walk" stays a single question.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct WalkPolicy {
-    /// Which ignore sources the walk consults.
-    pub ignore: IgnoreOptions,
-    /// Follow symlinks whose target is inside the scan root. A target outside
-    /// it is never followed, whatever this says.
-    pub follow_symlinks: bool,
+/// This is the session's first scan, whose plan was resolved before the
+/// terminal was taken so that a setup refusal reaches the caller instead of a
+/// status line nobody asked for.
+pub fn spawn_scan(plan: ResolvedScanPlan, tx: Sender<AppEvent>) {
+    thread::spawn(move || execute(plan, &tx));
 }
 
-/// Run a scan on a worker thread, streaming progress and then the report.
-/// Send failures mean the UI is gone, which is not an error worth reporting.
-pub fn spawn_scan(
-    root: PathBuf,
-    rules: Arc<RuleSet>,
-    baseline: Option<Arc<Baseline>>,
-    config: Option<Arc<Config>>,
-    walk: WalkPolicy,
-    tx: Sender<AppEvent>,
-) {
-    thread::spawn(move || {
-        let progress_tx = tx.clone();
-        let mut on_progress = |progress: Progress| {
-            let _ = progress_tx.send(AppEvent::Progress(progress));
-        };
-        // `ScanOptions` is `#[non_exhaustive]`: built from its default, not as
-        // a struct literal.
-        let mut options = ScanOptions::default();
-        options.baseline = baseline.as_deref();
-        options.config = config.as_deref();
-        options.ignore = walk.ignore;
-        options.follow_symlinks = walk.follow_symlinks;
-        let event = match scan::scan_opts(&root, &rules, &options, &mut on_progress) {
-            Ok(report) => AppEvent::ScanDone(Box::new(report)),
-            Err(e) => AppEvent::Failed(e),
-        };
-        let _ = tx.send(event);
+/// Resolve a fresh plan for `request` and run it, both on a worker thread.
+///
+/// Every rescan goes through here rather than reusing the plan the session
+/// booted with. A plan is immutable and holds the config, rules, baseline,
+/// coverage report, cache and admitted inventory as they were when it was
+/// resolved; reusing one would show the same tree after the file that changed
+/// is exactly what the reader pressed `r` to see.
+pub fn spawn_fresh_scan(request: ScanRequest, tx: Sender<AppEvent>) {
+    thread::spawn(move || match ResolvedScanPlan::resolve(&request) {
+        Ok(plan) => execute(plan, &tx),
+        Err(error) => {
+            let _ = tx.send(AppEvent::Failed(error.to_string()));
+        }
     });
+}
+
+/// Send failures mean the UI is gone, which is not an error worth reporting.
+fn execute(plan: ResolvedScanPlan, tx: &Sender<AppEvent>) {
+    let progress_tx = tx.clone();
+    let mut on_progress = |progress: Progress| {
+        let _ = progress_tx.send(AppEvent::Progress(progress));
+    };
+    let event = match plan.execute(&mut on_progress) {
+        Ok(report) => AppEvent::ScanDone(Box::new(report)),
+        Err(e) => AppEvent::Failed(e),
+    };
+    let _ = tx.send(event);
 }
 
 /// Report a scan that never produced findings. The rows already on screen are
@@ -151,6 +140,7 @@ pub fn apply_report(state: &mut AppState, report: ScanReport, config: Option<&Co
 /// back to "no coverage report" on a pre-1.2 snapshot, and the footer says why.
 pub fn apply_snapshot(state: &mut AppState, data: SnapshotData, config: Option<&Config>) {
     let hidden = data.hides_match_text();
+    let outcome = data.outcome();
     let mut rows = merge_rows(data.findings, data.baselined, data.suppressed);
     if hidden {
         for row in &mut rows {
@@ -165,17 +155,41 @@ pub fn apply_snapshot(state: &mut AppState, data: SnapshotData, config: Option<&
     state.boundary_edges = Vec::new();
     state.metrics = data.metrics;
     state.snapshot_anchor = data.anchor;
+    state.saved_outcome = outcome;
     state.snapshot = Some(data.source);
     reset_cursors(state);
     refresh_silos(state, config);
     report_debt(state);
-    // Said before the match-text note, because it is about the numbers the
-    // footer has just printed rather than about one column.
+
+    // The gate first: it is the one claim about the run as a whole, and the two
+    // notes after it are about what this screen is not showing. They go on
+    // their own row rather than into the status line, which shares its width
+    // with the tabs, the bindings and the read-only banner and would clip them.
+    let mut notes = vec![outcome_note(state.saved_outcome)];
     if let Some(threshold) = data.min_severity {
-        state.status = format!("{} | {}", state.status, filtered_note(threshold));
+        notes.push(filtered_note(threshold));
     }
     if hidden {
-        state.status = format!("{} | {HIDDEN_MATCH_NOTE}", state.status);
+        notes.push(HIDDEN_MATCH_NOTE.to_string());
+    }
+    state.snapshot_notes = notes.join(" | ");
+}
+
+/// What the footer says about the gate the saved run was judged against.
+///
+/// A resolved report records the threshold and whether the unfiltered run
+/// reached it, so a filtered report still reads as failed when every failing
+/// finding was filtered out of it. A legacy or core-writer report records
+/// neither, and saying so is the only honest answer: the rows on screen are not
+/// evidence that the run passed, and a footer that stayed silent would let a
+/// filtered legacy report read as authoritatively clean.
+fn outcome_note(outcome: Option<SavedOutcome>) -> String {
+    match outcome {
+        None => "saved outcome unavailable".to_string(),
+        Some(outcome) if outcome.threshold_reached => {
+            format!("saved outcome: fail-on {} reached", outcome.fail_on)
+        }
+        Some(outcome) => format!("saved outcome: fail-on {} not reached", outcome.fail_on),
     }
 }
 
@@ -282,8 +296,13 @@ pub fn refresh_silos(state: &mut AppState, config: Option<&Config>) {
 mod tests {
     use super::*;
 
-    use siloscan_core::rules::Severity;
+    use std::path::PathBuf;
+    use std::sync::Arc;
+
+    use siloscan_core::rules::{RuleSet, Severity};
     use siloscan_core::scan::SkippedFile;
+
+    use crate::snapshot::{SavedCapability, SavedMarkers, SavedScope, SavedSetup};
 
     fn finding(rule_id: &str, path: &str, line: u64, column: u64) -> Finding {
         Finding {
@@ -306,7 +325,6 @@ mod tests {
                 rules: Vec::new(),
                 ..Default::default()
             }),
-            None,
         )
     }
 
@@ -482,6 +500,7 @@ mod tests {
             findings: vec![finding("z.rule", "api/b.rs", 1, 1)],
             baselined: vec![finding("b.rule", "core/a.rs", 9, 2)],
             suppressed: Vec::new(),
+            markers: None,
             metrics: Metrics {
                 files: std::collections::BTreeMap::from([
                     (
@@ -745,8 +764,12 @@ mod tests {
                 "the credential reached the screen at {width}x{height}:\n{text}"
             );
         }
-        // And the footer still says match text is being withheld.
-        assert!(state.status.contains(HIDDEN_MATCH_NOTE), "{}", state.status);
+        // And the notes row still says match text is being withheld.
+        assert!(
+            state.snapshot_notes.contains(HIDDEN_MATCH_NOTE),
+            "{}",
+            state.snapshot_notes
+        );
     }
 
     /// Redaction that is not announced is indistinguishable from a report that
@@ -757,22 +780,23 @@ mod tests {
         apply_snapshot(&mut state, pre_redaction_data(), None);
 
         assert!(
-            state.status.contains(HIDDEN_MATCH_NOTE),
-            "status: {}",
-            state.status
+            state.snapshot_notes.contains(HIDDEN_MATCH_NOTE),
+            "notes: {}",
+            state.snapshot_notes
         );
-        assert!(
-            state.status.starts_with("1 new, 1 baselined"),
-            "the debt counts are still reported: {}",
-            state.status
+        assert_eq!(
+            state.status, "1 new, 1 baselined, 0 suppressed",
+            "the debt counts keep the status line to themselves"
         );
 
         state.screen = crate::state::Screen::Triage;
-        let text = render_text(&state, 200, 50);
-        assert!(
-            text.contains(HIDDEN_MATCH_NOTE),
-            "not in the footer:\n{text}"
-        );
+        for (width, height) in [(200, 50), (120, 40), (80, 24)] {
+            let text = render_text(&state, width, height);
+            assert!(
+                text.contains(HIDDEN_MATCH_NOTE),
+                "not on screen at {width}x{height}:\n{text}"
+            );
+        }
     }
 
     /// A 1.2 report was redacted by the writer, so the UI has no reason to
@@ -791,7 +815,7 @@ mod tests {
             .any(|row| row.finding.matched == "20 duplicated lines (block 0123456789ab)");
         assert!(kept, "a 1.2 report's match text must be left alone");
         assert_eq!(state.status, "1 new, 1 baselined, 0 suppressed");
-        assert!(!state.status.contains(HIDDEN_MATCH_NOTE));
+        assert_eq!(state.snapshot_notes, "saved outcome unavailable");
     }
 
     // -- filtered reports ------------------------------------------------
@@ -811,39 +835,42 @@ mod tests {
 
         assert!(
             state
-                .status
+                .snapshot_notes
                 .contains("filtered report: findings below error hidden"),
-            "status: {}",
-            state.status
+            "notes: {}",
+            state.snapshot_notes
         );
-        assert!(
-            state.status.starts_with("1 new, 1 baselined"),
-            "the debt counts are still reported: {}",
-            state.status
+        assert_eq!(
+            state.status, "1 new, 1 baselined, 0 suppressed",
+            "the debt counts are still reported"
         );
 
-        // The footer is where it has to land, at the sizes the board lays out
-        // for; the status line is drawn from `state.status` at all of them.
+        // The notes row is where it has to land, at every size the board lays
+        // out for - including the one the status line would clip it at.
         state.screen = crate::state::Screen::Triage;
-        let text = render_text(&state, 200, 50);
-        assert!(
-            text.contains("filtered report"),
-            "not in the footer:\n{text}"
-        );
+        for (width, height) in [(200, 50), (120, 40), (80, 24)] {
+            let text = render_text(&state, width, height);
+            assert!(
+                text.contains("filtered report"),
+                "not on screen at {width}x{height}:\n{text}"
+            );
+        }
     }
 
-    /// An unfiltered report says nothing, and its footer is byte for byte what
-    /// it was before any of this existed.
+    /// An unfiltered report says nothing about filtering. It still says its
+    /// outcome is unavailable, because a report with no outcome recorded is not
+    /// a report of a run that passed.
     #[test]
     fn an_unfiltered_snapshot_says_nothing_about_filtering() {
         let mut state = state();
         apply_snapshot(&mut state, snapshot_data(), None);
 
         assert_eq!(state.status, "1 new, 1 baselined, 0 suppressed");
+        assert_eq!(state.snapshot_notes, "saved outcome unavailable");
     }
 
-    /// Two notices about the same report, in a fixed order: the one about the
-    /// numbers, then the one about the column.
+    /// Three notices about the same report, in a fixed order: the gate, then
+    /// the numbers, then the column.
     #[test]
     fn a_filtered_pre_one_two_snapshot_says_both() {
         let mut state = state();
@@ -853,11 +880,82 @@ mod tests {
         apply_snapshot(&mut state, data, None);
 
         assert_eq!(
-            state.status,
+            state.snapshot_notes,
             format!(
-                "1 new, 1 baselined, 0 suppressed | filtered report: findings \
-                 below warning hidden | {HIDDEN_MATCH_NOTE}"
+                "saved outcome unavailable | filtered report: findings below \
+                 warning hidden | {HIDDEN_MATCH_NOTE}"
             )
+        );
+    }
+
+    // -- the saved outcome -----------------------------------------------
+
+    /// The four markers of a resolved report, with the gate `reached` records.
+    fn resolved_markers(reached: bool) -> SavedMarkers {
+        SavedMarkers {
+            scope: SavedScope {
+                identity: "sha256-v1:aa".to_string(),
+                kind: siloscan_core::plan::ScopeKind::Directory,
+                path_base_ancestor_levels: 0,
+            },
+            outcome: SavedOutcome {
+                fail_on: Severity::Error,
+                threshold_reached: reached,
+            },
+            setup: SavedSetup {
+                languages: vec!["rust".to_string()],
+                capabilities: vec![SavedCapability {
+                    id: "cache".to_string(),
+                    status: "enabled".to_string(),
+                    reason: None,
+                }],
+                explicit_overrides: Vec::new(),
+            },
+        }
+    }
+
+    /// A resolved report was judged before its findings were filtered, so the
+    /// gate it records is the run's answer rather than a count of what is left
+    /// on screen.
+    #[test]
+    fn a_resolved_snapshot_reports_the_gate_its_run_was_judged_against() {
+        let mut state = state();
+        let mut data = snapshot_data();
+        data.findings.clear();
+        data.baselined.clear();
+        data.min_severity = Some(Severity::Error);
+        data.markers = Some(resolved_markers(true));
+
+        apply_snapshot(&mut state, data, None);
+
+        assert_eq!(
+            state.saved_outcome,
+            Some(SavedOutcome {
+                fail_on: Severity::Error,
+                threshold_reached: true
+            })
+        );
+        assert_eq!(state.status, "0 new, 0 baselined, 0 suppressed");
+        assert_eq!(
+            state.snapshot_notes,
+            "saved outcome: fail-on error reached | filtered report: findings \
+             below error hidden"
+        );
+    }
+
+    /// A run that passed says so, in the same place and the same words.
+    #[test]
+    fn a_resolved_snapshot_reports_a_gate_that_was_not_reached() {
+        let mut state = state();
+        let mut data = snapshot_data();
+        data.markers = Some(resolved_markers(false));
+
+        apply_snapshot(&mut state, data, None);
+
+        assert_eq!(state.status, "1 new, 1 baselined, 0 suppressed");
+        assert_eq!(
+            state.snapshot_notes,
+            "saved outcome: fail-on error not reached"
         );
     }
 
@@ -874,54 +972,117 @@ mod tests {
         assert_eq!(state.rows.len(), 5);
     }
 
-    #[test]
-    fn spawn_scan_streams_progress_then_the_report() {
-        use siloscan_core::rules::load_str;
+    /// A tree with one finding in it, and the request that scans it.
+    ///
+    /// The cache is off: a session test must not read or write the user's own
+    /// cache directory, and a warm entry from a previous run would decide what
+    /// this one reports.
+    fn needle_project(dir: &std::path::Path) -> ScanRequest {
         use std::fs;
-        use std::sync::mpsc;
 
-        let dir = std::env::temp_dir().join(format!("siloscan-tui-app-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(dir.join("src")).unwrap();
-        fs::write(dir.join("src/a.rs"), b"let x = needle;\n").unwrap();
+        fs::write(dir.join("src/a.rs"), b"let x = \"needle-42\";\n").unwrap();
+        // The pattern does not match the rule file that declares it, so the one
+        // finding in this tree is the one the fixture put there.
+        fs::write(
+            dir.join("rules.yaml"),
+            "version: 1\nrules:\n  - id: test.needle\n    severity: warning\n    message: \"needle\"\n    regex:\n      pattern: \"needle-[0-9]+\"\n",
+        )
+        .unwrap();
 
-        let rules = Arc::new(RuleSet {
-            rules: load_str(
-                "version: 1\nrules:\n  - id: test.needle\n    severity: warning\n    message: \"needle\"\n    regex:\n      pattern: \"needle\"\n",
-                "test",
-            )
-            .unwrap(), ..Default::default() });
+        ScanRequest::explicit(dir)
+            .with_rule_dirs(vec![dir.to_path_buf()])
+            .without_embedded_rules()
+            .without_cache()
+    }
 
-        let (tx, rx) = mpsc::channel();
-        spawn_scan(
-            dir.clone(),
-            Arc::clone(&rules),
-            None,
-            None,
-            WalkPolicy::default(),
-            tx,
-        );
-
+    /// Fold every event of one scan into `state`, and count the progress ticks.
+    fn drain(state: &mut AppState, rx: std::sync::mpsc::Receiver<AppEvent>) -> usize {
         let mut progress = 0usize;
-        let mut state = AppState::new(dir.clone(), Arc::clone(&rules), None);
-        state.scan_running = true;
         for event in rx {
             match event {
                 AppEvent::Progress(p) => {
                     progress += 1;
                     state.progress = Some(p);
                 }
-                AppEvent::ScanDone(report) => apply_report(&mut state, *report, None),
-                AppEvent::Failed(e) => apply_failure(&mut state, e),
+                AppEvent::ScanDone(resolved) => {
+                    let (report, setup, context) = resolved.into_parts();
+                    state.setup = Some(setup);
+                    state.rules = Arc::new(context.rules().clone());
+                    apply_report(state, report, context.config());
+                }
+                AppEvent::Failed(e) => apply_failure(state, e),
             }
         }
+        progress
+    }
+
+    #[test]
+    fn spawn_scan_streams_progress_then_the_report() {
+        use std::sync::mpsc;
+
+        let dir = tempfile::tempdir().unwrap();
+        let request = needle_project(dir.path());
+        let plan = ResolvedScanPlan::resolve(&request).expect("the request resolves");
+
+        let (tx, rx) = mpsc::channel();
+        spawn_scan(plan, tx);
+
+        let mut state = AppState::new(dir.path().to_path_buf(), Arc::new(RuleSet::default()));
+        state.scan_running = true;
+        let progress = drain(&mut state, rx);
 
         assert!(progress >= 2);
         assert!(!state.scan_running);
         assert_eq!(state.rows.len(), 1);
         assert_eq!(state.rows[0].finding.path, "src/a.rs");
         assert_eq!(state.debt_counts(), (1, 0, 0));
+        assert!(state.setup.is_some(), "the plan's setup arrives with it");
+    }
 
-        let _ = fs::remove_dir_all(&dir);
+    /// A rescan resolves its own plan, so what it reports is the tree as it is
+    /// now rather than the tree the session booted on.
+    #[test]
+    fn a_fresh_scan_resolves_the_request_again() {
+        use std::fs;
+        use std::sync::mpsc;
+
+        let dir = tempfile::tempdir().unwrap();
+        let request = needle_project(dir.path());
+        let mut state = AppState::new(dir.path().to_path_buf(), Arc::new(RuleSet::default()));
+
+        let (tx, rx) = mpsc::channel();
+        spawn_fresh_scan(request.clone(), tx);
+        drain(&mut state, rx);
+        assert_eq!(state.rows.len(), 1);
+
+        fs::write(dir.path().join("src/a.rs"), b"let x = \"clean\";\n").unwrap();
+        let (tx, rx) = mpsc::channel();
+        spawn_fresh_scan(request, tx);
+        drain(&mut state, rx);
+
+        assert!(state.rows.is_empty(), "the second scan re-walked the tree");
+    }
+
+    /// A request that setup refuses is a status line, not a dead session: the
+    /// rows already on screen stay, and the reader can fix the config and press
+    /// `r` again.
+    #[test]
+    fn a_fresh_scan_reports_a_setup_refusal_in_the_status_line() {
+        use std::sync::mpsc;
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = AppState::new(dir.path().to_path_buf(), Arc::new(RuleSet::default()));
+        apply_report(&mut state, report(), None);
+
+        let (tx, rx) = mpsc::channel();
+        spawn_fresh_scan(
+            ScanRequest::explicit(dir.path().join("gone")).without_cache(),
+            tx,
+        );
+        drain(&mut state, rx);
+
+        assert!(state.status.contains("gone"), "{}", state.status);
+        assert_eq!(state.rows.len(), 5, "a refusal keeps the board");
     }
 }

@@ -566,7 +566,6 @@ mod tests {
                 rules: Vec::new(),
                 ..Default::default()
             }),
-            None,
         );
         state.rows = rows;
         state
@@ -661,6 +660,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut state = sample();
         state.root = dir.path().to_path_buf();
+        // A scan-root-anchored session, so the baseline lives at the root too.
+        state.baseline_root = dir.path().to_path_buf();
 
         apply_verdict(&mut state, Verdict::Baseline);
 

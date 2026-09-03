@@ -1235,7 +1235,7 @@ mod tests {
     }
 
     fn empty(rules: RuleSet) -> AppState {
-        AppState::new(PathBuf::from("."), Arc::new(rules), None)
+        AppState::new(PathBuf::from("."), Arc::new(rules))
     }
 
     fn state() -> AppState {
@@ -1523,6 +1523,7 @@ mod tests {
                 baselined: Vec::new(),
                 suppressed: Vec::new(),
                 metrics: siloscan_core::metrics::Metrics::default(),
+                markers: None,
             },
             None,
         );

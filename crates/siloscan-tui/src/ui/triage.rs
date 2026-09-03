@@ -1358,7 +1358,6 @@ mod tests {
                 rules: Vec::new(),
                 ..Default::default()
             }),
-            None,
         );
         state.rows = vec![
             row("secret.token", Severity::Info, "src/a.rs", Status::New),

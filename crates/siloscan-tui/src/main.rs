@@ -4,7 +4,9 @@ use std::env;
 use std::path::PathBuf;
 use std::process;
 
-use siloscan_tui::{ReviewSession, WalkPolicy};
+use siloscan_core::plan::ScanRequest;
+use siloscan_core::walk::IgnoreOptions;
+use siloscan_tui::ReviewSession;
 
 const USAGE: &str = "\
 siloscan-tui - interactive terminal UI for siloscan
@@ -44,6 +46,21 @@ Options:
   -V, --version        Print version
 ";
 
+/// Everything this command line says about the walk, in one value.
+///
+/// One value rather than a loose flag each: nothing here is read on its own,
+/// the whole of it is either handed to the [`ScanRequest`] or refused beside
+/// `--report`, and "did this command line configure its walk at all" stays a
+/// single comparison.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct WalkPolicy {
+    /// Which ignore sources the walk consults.
+    ignore: IgnoreOptions,
+    /// Follow symlinks whose target is inside the scan root. A target outside
+    /// it is never followed, whatever this says.
+    follow_symlinks: bool,
+}
+
 #[derive(Debug, Default, PartialEq, Eq)]
 struct Args {
     path: PathBuf,
@@ -81,18 +98,43 @@ fn main() {
             report,
             source_base: PathBuf::from("."),
             config: args.config,
+            // This command names the file to open, so it is the explicit
+            // reader: there is no scope to match it against.
+            expect: None,
         },
         None => ReviewSession::Live {
-            path: args.path,
-            rules: args.rules,
-            no_default_rules: args.no_default_rules,
-            config: args.config,
-            walk: args.walk,
+            request: scan_request(args),
         },
     };
     if let Err(error) = siloscan_tui::run(session) {
         fail(&format!("error: {error}"));
     }
+}
+
+/// What this command line asks the core to scan.
+///
+/// Every `with_*` call records an explicit override whatever value it carries,
+/// so each one is made only when the option was actually supplied. This command
+/// always names a path - `.` is its documented default - so the request is
+/// always an explicit one.
+fn scan_request(args: Args) -> ScanRequest {
+    let mut request = ScanRequest::explicit(args.path);
+    if !args.rules.is_empty() {
+        request = request.with_rule_dirs(args.rules);
+    }
+    if args.no_default_rules {
+        request = request.without_embedded_rules();
+    }
+    if let Some(config) = args.config {
+        request = request.with_config(config);
+    }
+    if args.walk.ignore != IgnoreOptions::default() {
+        request = request.with_ignore_options(args.walk.ignore);
+    }
+    if args.walk.follow_symlinks {
+        request = request.following_symlinks();
+    }
+    request
 }
 
 fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<Args, String> {
@@ -179,7 +221,6 @@ fn fail(message: &str) -> ! {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use siloscan_core::walk::IgnoreOptions;
 
     fn parse(argv: &[&str]) -> Result<Args, String> {
         parse_args(argv.iter().map(|arg| (*arg).to_string()))

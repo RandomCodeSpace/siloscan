@@ -179,11 +179,12 @@ pub fn draw(frame: &mut Frame, state: &AppState) {
     let area = frame.area();
     let strip_height = strip_height(state.screen, area);
 
-    let [strip, content, status] = Layout::default()
+    let [strip, content, notes, status] = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(strip_height),
             Constraint::Min(0),
+            Constraint::Length(notes_height(state)),
             Constraint::Length(1),
         ])
         .areas(area);
@@ -196,9 +197,39 @@ pub fn draw(frame: &mut Frame, state: &AppState) {
     }
 
     draw_content(frame, content, state, &mut layout_map);
+    draw_notes(frame, notes, state);
     draw_status(frame, status, state, &mut layout_map);
 
     set_layout(layout_map);
+}
+
+/// The row a loaded report's notes are drawn on, or none when there are no
+/// notes - which is every live session.
+fn notes_height(state: &AppState) -> u16 {
+    u16::from(!state.snapshot_notes.is_empty())
+}
+
+/// What the session is not showing about the report it loaded: the outcome its
+/// run recorded, the threshold it was filtered at, whether match text is being
+/// withheld.
+///
+/// A row of its own, and not part of the status bar, because the status bar
+/// shares its width with the tabs, the bindings and the read-only banner. At
+/// 120 columns that leaves the message about forty columns and clips the rest,
+/// which is how a filtered report whose gate failed came to be drawn as a board
+/// reading `0 new` with nothing on screen contradicting it. These notes are the
+/// contradiction; they do not get to be the part that is dropped.
+fn draw_notes(frame: &mut Frame, area: Rect, state: &AppState) {
+    if area.height == 0 {
+        return;
+    }
+    // The threshold and the file name reach this from the report, which is
+    // scanned input like any other.
+    let text = sanitize_for_terminal(&state.snapshot_notes).into_owned();
+    frame.render_widget(
+        Paragraph::new(Line::styled(text, Style::default().fg(theme::WARNING))),
+        area,
+    );
 }
 
 /// The dashboard screen renders the charts as its content, so it needs no
@@ -636,7 +667,6 @@ mod tests {
                 rules: Vec::new(),
                 ..Default::default()
             }),
-            None,
         );
 
         let mut terminal =
@@ -656,7 +686,6 @@ mod tests {
                 rules: Vec::new(),
                 ..Default::default()
             }),
-            None,
         );
 
         let mut terminal =
@@ -740,7 +769,6 @@ rules:
                 rules: Vec::new(),
                 ..Default::default()
             }),
-            None,
         );
         state.rows = ["src/a.rs", "src/b.rs", "tests/c.rs"]
             .into_iter()
@@ -948,7 +976,6 @@ rules:
                 rules: Vec::new(),
                 ..Default::default()
             }),
-            None,
         );
 
         let specs = [
@@ -1200,14 +1227,14 @@ rules:
     /// the top-level directories of the report's own paths.
     fn snapshot_state() -> AppState {
         let dir = tempfile::tempdir().unwrap();
-        let data = crate::snapshot::load(&fixture(&dir)).expect("the fixture is a valid report");
+        let data =
+            crate::snapshot::load(&fixture(&dir), None).expect("the fixture is a valid report");
         let mut state = AppState::new(
             PathBuf::from("."),
             Arc::new(RuleSet {
                 rules: Vec::new(),
                 ..Default::default()
             }),
-            None,
         );
         crate::app::apply_snapshot(&mut state, data, None);
         state
@@ -1216,8 +1243,15 @@ rules:
     #[test]
     fn booting_from_a_report_file_renders_the_dashboard_with_its_numbers() {
         let dir = tempfile::tempdir().unwrap();
-        let (state, config) = crate::load_snapshot(&fixture(&dir), std::path::Path::new("."), None)
-            .expect("the fixture boots");
+        let session = crate::OpenSession::open(crate::ReviewSession::SavedReport {
+            report: fixture(&dir),
+            source_base: PathBuf::from("."),
+            config: None,
+            expect: None,
+        })
+        .expect("the fixture boots");
+        let config = session.config.clone();
+        let state = &session.state;
 
         assert_eq!(state.snapshot.as_deref(), Some("report.json"));
         assert!(state.is_snapshot());
@@ -1235,7 +1269,7 @@ rules:
             assert_eq!(names, vec!["api", "core"]);
         }
 
-        let text = render_text(&state, 200, 50);
+        let text = render_text(state, 200, 50);
         assert!(text.contains("12.5%"), "duplication density: {text}");
         assert!(text.contains("40 dup lines"), "{text}");
         assert!(text.contains("200 loc"), "module card lines: {text}");
@@ -1247,13 +1281,13 @@ rules:
         // The layout is the live one, at every size the live board handles, and
         // the bindings keep their columns however long the file name is.
         for (width, height) in [(200, 50), (80, 24), (40, 12)] {
-            let map = render(&state, width, height);
+            let map = render(state, width, height);
             assert!(map.status.is_some(), "{width}x{height}");
             assert!(map.dashboard_tab.is_some(), "{width}x{height}");
         }
         // At 80 columns the banner gives up its parenthetical rather than the
         // columns the bindings are drawn in.
-        let narrow = render_text(&state, 80, 24);
+        let narrow = render_text(state, 80, 24);
         assert!(narrow.contains("report.json"), "{narrow}");
         assert!(!narrow.contains("(read-only)"), "{narrow}");
     }
@@ -1385,18 +1419,21 @@ rules:
         let mut state = snapshot_state();
         let before = state.clone();
 
-        // (a) Rescan: the global binding, refused with its reason.
-        let (tx, _rx) = std::sync::mpsc::channel();
-        crate::on_key(
-            &mut state,
-            key(KeyCode::Char('r')),
-            None,
-            crate::app::WalkPolicy::default(),
-            &tx,
-        );
-        assert_eq!(state.status, crate::state::READ_ONLY_RESCAN);
-        assert!(!state.scan_running);
-        assert_eq!(state.rows, before.rows);
+        // (a) Rescan: the global binding, refused with its reason. Driven
+        // through the session, since that is what holds the `r` binding and
+        // what a read-only session refuses by having no request to resolve.
+        let dir = tempfile::tempdir().unwrap();
+        let mut session = crate::OpenSession::open(crate::ReviewSession::SavedReport {
+            report: fixture(&dir),
+            source_base: PathBuf::from("."),
+            config: None,
+            expect: None,
+        })
+        .expect("the fixture boots");
+        session.on_key(key(KeyCode::Char('r')));
+        assert_eq!(session.status(), crate::state::READ_ONLY_RESCAN);
+        assert!(!session.is_scanning());
+        assert!(session.is_read_only());
 
         // (b) Ratchet verdicts: same refusal, nothing written.
         state.screen = Screen::Ratchet;
