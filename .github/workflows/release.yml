@@ -82,7 +82,19 @@ jobs:
             fi
             echo "reusing the existing draft $REF_NAME"
           else
-            gh release create "$REF_NAME" --draft --verify-tag --title "$REF_NAME" --generate-notes
+            # The release body is this version's CHANGELOG section. A missing
+            # section is a release-preparation error, not a reason to fall
+            # back to generated notes.
+            version="${REF_NAME#v}"
+            awk -v v="$version" '
+              /^## / { active = ($2 == v) ; if (active) { next } }
+              active { print }
+            ' CHANGELOG.md > "$RUNNER_TEMP/release-notes.md"
+            if ! grep -q '[^[:space:]]' "$RUNNER_TEMP/release-notes.md"; then
+              echo "CHANGELOG.md has no '## $version' section" >&2
+              exit 1
+            fi
+            gh release create "$REF_NAME" --draft --verify-tag --title "$REF_NAME" --notes-file "$RUNNER_TEMP/release-notes.md"
           fi
 
   # The same archive, package, install and identity gates a pre-tag candidate
