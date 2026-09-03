@@ -21,7 +21,7 @@ use ratatui::widgets::{Paragraph, Row, Table};
 
 use siloscan_core::findings::{Finding, sanitize_for_terminal};
 use siloscan_core::metrics::DUPLICATE_BLOCK_RULE_ID;
-use siloscan_core::output::REDACTED_MATCH;
+use siloscan_core::output::{self, REDACTED_MATCH};
 use siloscan_core::rules::Severity;
 
 use crate::state::{AppState, Filters, Pane, Screen, Status};
@@ -889,12 +889,16 @@ fn draw_code(frame: &mut Frame, state: &AppState, area: Rect) {
         return;
     };
 
+    // The pane draws the file, so the credential is in the bytes it read; the
+    // detail column's redaction would be pointless with the raw span beside it.
+    let redact = output::redacts_match(&state.rules, &row.finding.rule_id);
     let lines = match read_source(&state.root, &row.finding.path) {
         Ok(source) => code_lines(
             &source,
             &row.finding,
             inner.height as usize,
             state.scroll.code,
+            redact,
         ),
         Err(reason) => vec![Line::from(format!(
             "source unavailable: {}",
@@ -917,7 +921,18 @@ fn read_source(root: &Path, path: &str) -> Result<String, String> {
 }
 
 /// A window of `height` source lines centred on the finding, offset by `scroll`.
-fn code_lines(source: &str, finding: &Finding, height: usize, scroll: usize) -> Vec<Line<'static>> {
+///
+/// `redact` stands for [`output::redacts_match`] on the finding's rule: with it
+/// set the highlighted span renders as [`REDACTED_MATCH`] instead of the bytes
+/// it covers, so a credential the report withholds does not reach the screen
+/// through the file it was found in.
+fn code_lines(
+    source: &str,
+    finding: &Finding,
+    height: usize,
+    scroll: usize,
+    redact: bool,
+) -> Vec<Line<'static>> {
     let all: Vec<&str> = source.lines().collect();
     if all.is_empty() {
         return vec![Line::from("source unavailable: empty file".to_string())];
@@ -938,28 +953,27 @@ fn code_lines(source: &str, finding: &Finding, height: usize, scroll: usize) -> 
         let text = *text;
         let gutter = Span::styled(format!("{number:>5} "), theme::dim());
         if number as u64 == finding.line {
-            let (before, matched, after) = split_span(
-                text,
-                finding.column.max(1) as usize - 1,
-                highlight_len(finding),
-            );
             // The finding line is drawn in its severity color; the matched span
             // inverts that color instead of inverting the terminal default, so
             // the severity stays readable inside the highlight.
             let color = theme::severity_color(finding.severity);
             let context = Style::default().fg(color);
-            // Sanitizing comes after `split_span`: the split is by byte offset
-            // into the file's own bytes, and escaping one of them to four
-            // characters would move every offset behind it.
-            lines.push(Line::from(vec![
-                gutter,
-                Span::styled(sanitize_for_terminal(before).into_owned(), context),
-                Span::styled(
-                    sanitize_for_terminal(matched).into_owned(),
-                    context.add_modifier(Modifier::REVERSED | Modifier::BOLD),
-                ),
-                Span::styled(sanitize_for_terminal(after).into_owned(), context),
-            ]));
+            let marked = context.add_modifier(Modifier::REVERSED | Modifier::BOLD);
+            // Sanitizing comes after the split: it is by byte offset into the
+            // file's own bytes, and escaping one of them to four characters
+            // would move every offset behind it.
+            lines.push(match split_finding(text, finding, redact) {
+                Some((before, matched, after)) => Line::from(vec![
+                    gutter,
+                    Span::styled(sanitize_for_terminal(before).into_owned(), context),
+                    Span::styled(matched, marked),
+                    Span::styled(sanitize_for_terminal(after).into_owned(), context),
+                ]),
+                None => Line::from(vec![
+                    gutter,
+                    Span::styled(REDACTED_MATCH.to_string(), marked),
+                ]),
+            });
         } else {
             lines.push(Line::from(vec![
                 gutter,
@@ -968,6 +982,39 @@ fn code_lines(source: &str, finding: &Finding, height: usize, scroll: usize) -> 
         }
     }
     lines
+}
+
+/// The finding's line split into (before, highlighted, after), the highlighted
+/// piece already in the form it is drawn in.
+///
+/// `None` means the line must not be drawn at all: the rule redacts, so the
+/// line holds a credential, and the span covering it could not be located. A
+/// snapshot's `matched` is already the placeholder, which appears nowhere in
+/// the file, so that is the case this catches. The caller draws the placeholder
+/// on its own instead.
+fn split_finding<'a>(
+    text: &'a str,
+    finding: &Finding,
+    redact: bool,
+) -> Option<(&'a str, String, &'a str)> {
+    let column = finding.column.max(1) as usize - 1;
+    if !redact {
+        let (before, matched, after) = split_span(text, column, highlight_len(finding));
+        return Some((before, sanitize_for_terminal(matched).into_owned(), after));
+    }
+
+    let start = locate(text, column, &finding.matched)?;
+    let (before, _, after) = split_span(text, start, finding.matched.len());
+    Some((before, REDACTED_MATCH.to_string(), after))
+}
+
+/// Where the match sits on its line: at the recorded column, or wherever else
+/// it appears. `None` when the line does not carry it at all.
+fn locate(text: &str, column: usize, matched: &str) -> Option<usize> {
+    if text.is_char_boundary(column) && text[column..].starts_with(matched) {
+        return Some(column);
+    }
+    text.find(matched)
 }
 
 /// Bytes of the source line the finding's match covers.
@@ -1266,7 +1313,7 @@ mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::buffer::Buffer;
-    use siloscan_core::rules::RuleSet;
+    use siloscan_core::rules::{RuleSet, load_str};
 
     use crate::state::FindingRow;
 
@@ -1711,12 +1758,12 @@ mod tests {
         finding.column = 6;
         finding.matched = "20".to_string();
 
-        let lines = code_lines(&source, &finding, 11, 0);
+        let lines = code_lines(&source, &finding, 11, 0, false);
         assert_eq!(lines.len(), 11);
         assert!(lines[0].to_string().contains("line 15"));
         assert!(lines[5].to_string().contains("line 20"));
 
-        let scrolled = code_lines(&source, &finding, 11, 4);
+        let scrolled = code_lines(&source, &finding, 11, 4, false);
         assert!(scrolled[0].to_string().contains("line 19"));
 
         // Gutter, before, matched, after.
@@ -1731,7 +1778,7 @@ mod tests {
         finding.column = 14;
         finding.matched = REDACTED_MATCH.to_string();
 
-        let lines = code_lines(source, &finding, 1, 0);
+        let lines = code_lines(source, &finding, 1, 0, false);
         // The placeholder is 10 bytes; highlighting them would mark
         // `hunter2";` and part of nothing at all.
         assert!(lines[0].spans[2].content.is_empty());
@@ -1744,17 +1791,107 @@ mod tests {
         );
     }
 
+    /// The pane draws the file itself, so the credential is in the bytes it
+    /// read even though the table and the detail column redact. This covers the
+    /// wiring from the rule set to the split, which `code_lines` alone cannot.
+    #[test]
+    fn the_code_pane_redacts_a_live_secret_finding() {
+        const SECRET: &str = "AKIAIOSFODNN7EXAMPLE";
+
+        let root = temp_root("redact");
+        fs::write(root.join("src/a.rs"), format!("let key = \"{SECRET}\";\n")).unwrap();
+
+        let mut state = state(root.clone());
+        state.rules = Arc::new(RuleSet {
+            rules: load_str(
+                "version: 1\nrules:\n  - id: secret.aws-key\n    severity: error\n    \
+                 message: aws access key\n    secret:\n      pattern: 'AKIA[0-9A-Z]{16}'\n",
+                "test",
+            )
+            .expect("rules load"),
+            ..Default::default()
+        });
+        state.rows.truncate(1);
+        let finding = &mut state.rows[0].finding;
+        finding.rule_id = "secret.aws-key".to_string();
+        finding.line = 1;
+        finding.column = 12;
+        finding.matched = SECRET.to_string();
+        set_view(TriageView::default());
+
+        let (buffer, _) = render(&state, 160, 48);
+        let screen = dump(&buffer);
+
+        assert!(
+            !screen.contains(SECRET),
+            "credential reached the screen: {screen}"
+        );
+        assert!(screen.contains(REDACTED_MATCH), "{screen}");
+        // Only the match is withheld; the line it sits on is still readable.
+        assert!(screen.contains("let key = "), "{screen}");
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A snapshot carries the placeholder as the match, so the span covering
+    /// the credential cannot be found in the file the pane read. The line is
+    /// then not drawn at all: it is the credential.
+    #[test]
+    fn a_redacting_rule_whose_span_is_not_found_draws_the_placeholder_alone() {
+        const SECRET: &str = "AKIAIOSFODNN7EXAMPLE";
+
+        let source = format!("let key = \"{SECRET}\";\n");
+        let mut finding = finding("secret.aws-key", Severity::Error, "a.rs", 1, "m");
+        finding.column = 12;
+        finding.matched = REDACTED_MATCH.to_string();
+
+        let lines = code_lines(&source, &finding, 1, 0, true);
+        let text = lines[0].to_string();
+        assert!(
+            !text.contains(SECRET),
+            "credential reached the screen: {text}"
+        );
+        assert!(text.contains(REDACTED_MATCH), "{text}");
+        // Gutter and placeholder, nothing of the line itself.
+        assert_eq!(lines[0].spans.len(), 2);
+
+        // The same finding against a rule set that does not redact keeps the
+        // line, which is what a snapshot loaded against unrelated rules needs.
+        let plain = code_lines(&source, &finding, 1, 0, false);
+        assert!(plain[0].to_string().contains(SECRET));
+    }
+
+    /// The located case: the span is replaced, the rest of the line stays.
+    #[test]
+    fn a_redacting_rule_replaces_the_located_span() {
+        const SECRET: &str = "AKIAIOSFODNN7EXAMPLE";
+
+        let source = format!("let key = \"{SECRET}\";\n");
+        let mut finding = finding("secret.aws-key", Severity::Error, "a.rs", 1, "m");
+        finding.column = 12;
+        finding.matched = SECRET.to_string();
+
+        let lines = code_lines(&source, &finding, 1, 0, true);
+        let text = lines[0].to_string();
+        assert!(
+            !text.contains(SECRET),
+            "credential reached the screen: {text}"
+        );
+        assert!(text.contains(REDACTED_MATCH), "{text}");
+        assert!(text.contains("let key = "), "{text}");
+    }
+
     #[test]
     fn code_window_survives_short_lines_and_bad_columns() {
         let mut finding = finding("r", Severity::Info, "a.rs", 1, "m");
         finding.column = 99;
         finding.matched = "needle".to_string();
-        let lines = code_lines("ab\n", &finding, 4, 0);
+        let lines = code_lines("ab\n", &finding, 4, 0, false);
         assert_eq!(lines.len(), 1);
         assert_eq!(lines[0].spans[1].content, "ab");
         assert!(lines[0].spans[2].content.is_empty());
 
-        assert_eq!(code_lines("", &finding, 4, 0).len(), 1);
+        assert_eq!(code_lines("", &finding, 4, 0, false).len(), 1);
     }
 
     #[test]

@@ -16,6 +16,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Gauge, Paragraph, Wrap};
 
 use siloscan_core::findings::{Finding, sanitize_for_terminal};
+use siloscan_core::output::{self, REDACTED_MATCH};
 
 use crate::actions;
 use crate::state::{AppState, Pane, Status};
@@ -245,8 +246,11 @@ fn draw_code(frame: &mut Frame, state: &AppState, finding: &Finding, area: Rect)
     let block = theme::pane_block(&title, true);
 
     let height = area.height.saturating_sub(2) as usize;
+    // The pane draws the file, so the credential is in the bytes it read; the
+    // detail pane's redaction would be pointless with the raw span next to it.
+    let redact = output::redacts_match(&state.rules, &finding.rule_id);
     let lines = match fs::read_to_string(&path) {
-        Ok(content) => code_lines(&content, finding, state.scroll.code, height.max(1)),
+        Ok(content) => code_lines(&content, finding, state.scroll.code, height.max(1), redact),
         // Unreadable source is a dead end for this finding, not a crash: say so
         // in the same dim guidance voice the other empty panes use.
         Err(e) => vec![
@@ -273,11 +277,17 @@ fn draw_code(frame: &mut Frame, state: &AppState, finding: &Finding, area: Rect)
 
 /// The window of source around the finding, gutter included, with the matched
 /// span highlighted. `offset` scrolls the window down from that anchor.
+///
+/// `redact` stands for [`output::redacts_match`] on the finding's rule: with it
+/// set the highlighted span renders as [`REDACTED_MATCH`] instead of the bytes
+/// it covers, so a credential the report withholds does not reach the screen
+/// through the file it was found in.
 pub fn code_lines(
     content: &str,
     finding: &Finding,
     offset: usize,
     height: usize,
+    redact: bool,
 ) -> Vec<Line<'static>> {
     let all: Vec<&str> = content.lines().collect();
     if all.is_empty() {
@@ -304,7 +314,7 @@ pub fn code_lines(
             );
             let mut spans = vec![gutter];
             if number == target {
-                spans.extend(highlight(text, finding.column, &finding.matched));
+                spans.extend(highlight(text, finding.column, &finding.matched, redact));
             } else {
                 spans.push(Span::raw(sanitize_for_terminal(text).into_owned()));
             }
@@ -315,7 +325,14 @@ pub fn code_lines(
 
 /// Split a line around the matched span. The column is a 1-based byte offset;
 /// anything that does not line up falls back to a plain line.
-fn highlight(text: &str, column: u64, matched: &str) -> Vec<Span<'static>> {
+///
+/// That fallback is safe for a plain finding, since it is taken only when the
+/// line does not contain the match. It is not safe for a redacting one: a
+/// snapshot's `matched` is already the placeholder, so the span cannot be
+/// located and the line drawn in its place would be the credential itself.
+/// A redacting finding whose span is not found therefore renders as the
+/// placeholder alone.
+fn highlight(text: &str, column: u64, matched: &str, redact: bool) -> Vec<Span<'static>> {
     let style = Style::default()
         .fg(Color::Black)
         .bg(Color::Yellow)
@@ -327,6 +344,7 @@ fn highlight(text: &str, column: u64, matched: &str) -> Vec<Span<'static>> {
     } else {
         match text.find(matched) {
             Some(found) => found,
+            None if redact => return vec![Span::styled(REDACTED_MATCH.to_string(), style)],
             None => return vec![Span::raw(sanitize_for_terminal(text).into_owned())],
         }
     };
@@ -335,9 +353,13 @@ fn highlight(text: &str, column: u64, matched: &str) -> Vec<Span<'static>> {
     // Sanitizing follows the slicing: `column` and `matched.len()` are byte
     // offsets into the file's own bytes, and escaping one byte to four
     // characters would move every offset behind it.
+    let span = match redact {
+        true => REDACTED_MATCH.to_string(),
+        false => sanitize_for_terminal(&text[start..end]).into_owned(),
+    };
     vec![
         Span::raw(sanitize_for_terminal(&text[..start]).into_owned()),
-        Span::styled(sanitize_for_terminal(&text[start..end]).into_owned(), style),
+        Span::styled(span, style),
         Span::raw(sanitize_for_terminal(&text[end..]).into_owned()),
     ]
 }
@@ -735,7 +757,7 @@ mod tests {
         let content = "let x = 1;\nlet a = needle;\nlet y = 2;\n";
         let f = finding("a.one", "src/a.rs", 2);
 
-        let lines = code_lines(content, &f, 0, 3);
+        let lines = code_lines(content, &f, 0, 3, false);
         assert_eq!(lines.len(), 3);
 
         let target = &lines[1];
@@ -756,7 +778,7 @@ mod tests {
         let mut f = finding("a.one", "src/a.rs", 1);
         f.column = 900;
 
-        let lines = code_lines(content, &f, 0, 1);
+        let lines = code_lines(content, &f, 0, 1, false);
         let target = &lines[0];
         assert!(
             target
@@ -766,7 +788,7 @@ mod tests {
         );
 
         f.matched = "gone".to_string();
-        let lines = code_lines(content, &f, 0, 1);
+        let lines = code_lines(content, &f, 0, 1, false);
         let text: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(text.ends_with("let a = needle;"));
     }
@@ -776,9 +798,9 @@ mod tests {
         let content = "a\nb\nc\n";
         let f = finding("a.one", "src/a.rs", 1);
 
-        assert!(code_lines("", &f, 0, 5).is_empty());
-        assert_eq!(code_lines(content, &f, 99, 5).len(), 1);
-        assert_eq!(code_lines(content, &f, 0, 99).len(), 3);
+        assert!(code_lines("", &f, 0, 5, false).is_empty());
+        assert_eq!(code_lines(content, &f, 99, 5, false).len(), 1);
+        assert_eq!(code_lines(content, &f, 0, 99, false).len(), 3);
     }
 
     #[test]
@@ -858,6 +880,9 @@ mod tests {
     /// A live scan hands the UI the engine's findings with the raw match text
     /// still in them - only the JSON writer redacts, and this path never goes
     /// through it. The detail pane has to redact for itself.
+    ///
+    /// The code pane has the same duty against the file it reads; that is
+    /// `the_code_pane_redacts_a_live_secret_finding`.
     #[test]
     fn the_detail_pane_redacts_a_live_secret_finding() {
         const SECRET: &str = "AKIAIOSFODNN7EXAMPLE";
@@ -902,6 +927,89 @@ mod tests {
             secret.matches(REDACTED_MATCH).count(),
             "redacting twice must render the same thing as redacting once"
         );
+    }
+
+    /// The code pane draws the file itself, so the credential is in the bytes
+    /// it read even though the detail pane redacts. The highlighted span is the
+    /// match, so it is the span that has to carry the placeholder.
+    #[test]
+    fn the_code_pane_redacts_a_live_secret_finding() {
+        const SECRET: &str = "AKIAIOSFODNN7EXAMPLE";
+
+        let render = |rule_id: &str, matched: &str, source: &str| {
+            let dir = tempfile::tempdir().unwrap();
+            fs::create_dir_all(dir.path().join("src")).unwrap();
+            fs::write(dir.path().join("src/a.rs"), source).unwrap();
+
+            let mut row = row(rule_id, "src/a.rs", 1, Status::New);
+            row.finding.matched = matched.to_string();
+            row.finding.column = 12;
+            let mut state = state(vec![row]);
+            state.rules = Arc::new(secret_rules());
+            state.root = dir.path().to_path_buf();
+
+            let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+            terminal
+                .draw(|frame| {
+                    draw_ratchet(frame, &state, frame.area());
+                })
+                .unwrap();
+            terminal.backend().to_string()
+        };
+
+        let secret = render(
+            "secret.aws-key",
+            SECRET,
+            &format!("let key = \"{SECRET}\";\n"),
+        );
+        assert!(!secret.contains(SECRET), "credential reached the screen");
+        assert!(
+            secret.contains(REDACTED_MATCH),
+            "placeholder missing from the code pane"
+        );
+        // Only the match is withheld; the line it sits on is still readable.
+        assert!(
+            secret.contains("let key = "),
+            "the rest of the line was withheld"
+        );
+
+        // Every other payload keeps its match text: it is not a credential and
+        // showing it is the reason the pane exists.
+        let regex = render(
+            "style.needle",
+            "plain-match-text",
+            "let a = plain-match-text;\n",
+        );
+        assert!(regex.contains("plain-match-text"), "{regex}");
+        assert!(!regex.contains(REDACTED_MATCH), "{regex}");
+    }
+
+    /// A snapshot carries the placeholder as the match, so the span covering
+    /// the credential cannot be found in the file the pane read. The line is
+    /// then not drawn at all: it is the credential.
+    #[test]
+    fn a_redacting_rule_whose_span_is_not_found_draws_the_placeholder_alone() {
+        const SECRET: &str = "AKIAIOSFODNN7EXAMPLE";
+
+        let content = format!("let key = \"{SECRET}\";\n");
+        let mut f = finding("secret.aws-key", "src/a.rs", 1);
+        f.column = 12;
+        f.matched = REDACTED_MATCH.to_string();
+
+        let lines = code_lines(&content, &f, 0, 1, true);
+        let text = lines[0].to_string();
+        assert!(
+            !text.contains(SECRET),
+            "credential reached the screen: {text}"
+        );
+        assert!(text.contains(REDACTED_MATCH), "{text}");
+        // Gutter and placeholder, nothing of the line itself.
+        assert_eq!(lines[0].spans.len(), 2);
+
+        // The same finding against a rule set that does not redact keeps the
+        // line, which is what a snapshot loaded against unrelated rules needs.
+        let plain = code_lines(&content, &f, 0, 1, false);
+        assert!(plain[0].to_string().contains(SECRET));
     }
 
     #[test]
