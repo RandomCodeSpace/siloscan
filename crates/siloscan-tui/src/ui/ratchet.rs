@@ -324,9 +324,14 @@ pub fn code_lines(
 }
 
 /// Split a line around the matched span. The column is a 1-based byte offset;
-/// anything that does not line up falls back to a plain line - which cannot
-/// carry the match, since that fallback is taken only when the line does not
-/// contain it.
+/// anything that does not line up falls back to a plain line.
+///
+/// That fallback is safe for a plain finding, since it is taken only when the
+/// line does not contain the match. It is not safe for a redacting one: a
+/// snapshot's `matched` is already the placeholder, so the span cannot be
+/// located and the line drawn in its place would be the credential itself.
+/// A redacting finding whose span is not found therefore renders as the
+/// placeholder alone.
 fn highlight(text: &str, column: u64, matched: &str, redact: bool) -> Vec<Span<'static>> {
     let style = Style::default()
         .fg(Color::Black)
@@ -339,6 +344,7 @@ fn highlight(text: &str, column: u64, matched: &str, redact: bool) -> Vec<Span<'
     } else {
         match text.find(matched) {
             Some(found) => found,
+            None if redact => return vec![Span::styled(REDACTED_MATCH.to_string(), style)],
             None => return vec![Span::raw(sanitize_for_terminal(text).into_owned())],
         }
     };
@@ -973,6 +979,34 @@ mod tests {
         );
         assert!(regex.contains("plain-match-text"), "{regex}");
         assert!(!regex.contains(REDACTED_MATCH), "{regex}");
+    }
+
+    /// A snapshot carries the placeholder as the match, so the span covering
+    /// the credential cannot be found in the file the pane read. The line is
+    /// then not drawn at all: it is the credential.
+    #[test]
+    fn a_redacting_rule_whose_span_is_not_found_draws_the_placeholder_alone() {
+        const SECRET: &str = "AKIAIOSFODNN7EXAMPLE";
+
+        let content = format!("let key = \"{SECRET}\";\n");
+        let mut f = finding("secret.aws-key", "src/a.rs", 1);
+        f.column = 12;
+        f.matched = REDACTED_MATCH.to_string();
+
+        let lines = code_lines(&content, &f, 0, 1, true);
+        let text = lines[0].to_string();
+        assert!(
+            !text.contains(SECRET),
+            "credential reached the screen: {text}"
+        );
+        assert!(text.contains(REDACTED_MATCH), "{text}");
+        // Gutter and placeholder, nothing of the line itself.
+        assert_eq!(lines[0].spans.len(), 2);
+
+        // The same finding against a rule set that does not redact keeps the
+        // line, which is what a snapshot loaded against unrelated rules needs.
+        let plain = code_lines(&content, &f, 0, 1, false);
+        assert!(plain[0].to_string().contains(SECRET));
     }
 
     #[test]
