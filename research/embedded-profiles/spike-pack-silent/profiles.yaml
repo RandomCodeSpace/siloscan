@@ -1,0 +1,69 @@
+# THROWAWAY SPIKE PACK for issue #78, silent variant.
+#
+# The same ten query shapes as ../spike-pack/profiles.yaml with predicates that
+# cannot match the scale tree. Every file is still parsed and every query is
+# still run; nothing is reported. The pair isolates parse-plus-query cost from
+# the cost of carrying findings.
+version: 1
+rules:
+  - id: spike.rust.unwrap-call
+    severity: warning
+    message: unwrap panics on the error path
+    ast:
+      rust: '(call_expression function: (field_expression field: (field_identifier) @report (#eq? @report "zzunwrapzz")))'
+
+  - id: spike.rust.expect-call
+    severity: info
+    message: expect panics on the error path
+    ast:
+      rust: '(call_expression function: (field_expression field: (field_identifier) @report (#eq? @report "zzexpectzz")))'
+
+  - id: spike.rust.panic-macro
+    severity: warning
+    message: panic aborts the caller
+    ast:
+      rust: '(macro_invocation macro: (identifier) @report (#eq? @report "zzpaniczz"))'
+
+  - id: spike.rust.todo-macro
+    severity: info
+    message: unfinished code path
+    ast:
+      rust: |
+        (macro_invocation macro: (identifier) @report (#eq? @report "zztodozz"))
+        (macro_invocation macro: (identifier) @report (#eq? @report "zzunimplementedzz"))
+
+  - id: spike.rust.dbg-macro
+    severity: warning
+    message: leftover debugging macro
+    ast:
+      rust: '(macro_invocation macro: (identifier) @report (#eq? @report "zzdbgzz"))'
+
+  - id: spike.rust.numeric-cast
+    severity: info
+    message: unchecked numeric cast
+    ast:
+      rust: '(type_cast_expression type: (type_identifier) @report (#eq? @report "ZzNoSuchTypeZz"))'
+
+  - id: spike.rust.allow-attribute
+    severity: info
+    message: a lint is switched off here
+    ast:
+      rust: '(attribute_item (attribute (identifier) @report (#eq? @report "zzallowzz")))'
+
+  - id: spike.rust.unsafe-block
+    severity: warning
+    message: unsafe block
+    ast:
+      rust: '(unsafe_block (block (identifier) @report (#eq? @report "zznothingzz")))'
+
+  - id: spike.rust.match-arm-count
+    severity: info
+    message: match arm
+    ast:
+      rust: '(match_arm pattern: (match_pattern (identifier) @report (#eq? @report "zznoarmzz")))'
+
+  - id: spike.rust.parameter-list
+    severity: info
+    message: parameter list
+    ast:
+      rust: '(function_item name: (identifier) @report (#eq? @report "zznofnzz"))'
