@@ -1,0 +1,2431 @@
+{
+  "schema": "siloscan-research/rule-matrix/1",
+  "issue": 78,
+  "generated_for": "siloscan v2.0.0 rule schema (version: 1)",
+  "profiles": [
+    "reliability",
+    "maintainability"
+  ],
+  "rules": [
+    {
+      "id": "maintainability.todo-marker",
+      "profile": "maintainability",
+      "language": "any",
+      "engine": "regex",
+      "severity": "info",
+      "concept_source": {
+        "project": "siloscan",
+        "rule": "original",
+        "license": "MIT (this repository)",
+        "use": "original",
+        "text_taken": false
+      },
+      "expected_noise": {
+        "level": "low",
+        "reason": "Case-sensitive uppercase markers only, so identifiers such as `todos` and `Todo` do not match; the residual noise is vendored third-party text, which the pack's existing path excludes already handle."
+      },
+      "positive_example": "// TODO: handle the empty case\nfn f() {}\n",
+      "negative_example": "// the todos list is rendered elsewhere\nlet todos = vec![];\n",
+      "default": "yes",
+      "regex": "\\b(?:TODO|FIXME|HACK|XXX)\\b",
+      "notes": "Already shipped as the README's `Add a rule` example; this promotes it into the default maintainability profile."
+    },
+    {
+      "id": "maintainability.commented-out-code",
+      "profile": "maintainability",
+      "language": "any",
+      "engine": "regex",
+      "severity": "info",
+      "concept_source": {
+        "project": "siloscan",
+        "rule": "original",
+        "license": "MIT (this repository)",
+        "use": "original",
+        "text_taken": false
+      },
+      "expected_noise": {
+        "level": "medium",
+        "reason": "A commented line that ends in `;` or `{` after a control keyword is usually dead code, but it also fires on prose documentation that quotes a statement and on commented-out example code in headers."
+      },
+      "positive_example": "// if (x > 0) { return 1; }\nint f(void) { return 0; }\n",
+      "negative_example": "// if the value is positive we return early\nint f(void) { return 0; }\n",
+      "default": "no",
+      "regex": "(?m)^[ \\t]*(?://|#)[ \\t]*(?:if|for|while|switch|return|else)\\b[^\\n]*[;{}][ \\t]*$",
+      "notes": "Held out of the launch set; needs corpus measurement first."
+    },
+    {
+      "id": "maintainability.function-length",
+      "profile": "maintainability",
+      "language": "any (10 AST languages)",
+      "engine": "metric",
+      "severity": "info",
+      "concept_source": {
+        "project": "concept only: Clippy `too_many_lines`/`too_many_arguments`, ESLint `max-lines-per-function`/`max-params`/`max-depth`/`complexity`",
+        "rule": "function-length",
+        "license": "MIT / Apache-2.0 OR MIT",
+        "use": "concept",
+        "text_taken": false
+      },
+      "expected_noise": {
+        "level": "medium",
+        "reason": "Threshold-driven; every large legacy file reports, and a good default threshold cannot be picked without corpus measurement."
+      },
+      "positive_example": "// see notes: metric rules have no query, the engine counts nodes\n",
+      "negative_example": "// see notes\n",
+      "default": "no",
+      "notes": "METRIC: needs a new engine. Report a function body longer than N statement lines. Not expressible as a tree-sitter query, because a query cannot count or compare depth. Decided separately from the rule pack."
+    },
+    {
+      "id": "maintainability.parameter-count",
+      "profile": "maintainability",
+      "language": "any (10 AST languages)",
+      "engine": "metric",
+      "severity": "info",
+      "concept_source": {
+        "project": "concept only: Clippy `too_many_lines`/`too_many_arguments`, ESLint `max-lines-per-function`/`max-params`/`max-depth`/`complexity`",
+        "rule": "parameter-count",
+        "license": "MIT / Apache-2.0 OR MIT",
+        "use": "concept",
+        "text_taken": false
+      },
+      "expected_noise": {
+        "level": "medium",
+        "reason": "Low intrinsic noise but the threshold is a policy choice, and C callback signatures legitimately exceed most thresholds."
+      },
+      "positive_example": "// see notes: metric rules have no query, the engine counts nodes\n",
+      "negative_example": "// see notes\n",
+      "default": "no",
+      "notes": "METRIC: needs a new engine. Report a function taking more than N parameters. Not expressible as a tree-sitter query, because a query cannot count or compare depth. Decided separately from the rule pack."
+    },
+    {
+      "id": "maintainability.nesting-depth",
+      "profile": "maintainability",
+      "language": "any (10 AST languages)",
+      "engine": "metric",
+      "severity": "info",
+      "concept_source": {
+        "project": "concept only: Clippy `too_many_lines`/`too_many_arguments`, ESLint `max-lines-per-function`/`max-params`/`max-depth`/`complexity`",
+        "rule": "nesting-depth",
+        "license": "MIT / Apache-2.0 OR MIT",
+        "use": "concept",
+        "text_taken": false
+      },
+      "expected_noise": {
+        "level": "medium",
+        "reason": "Fires repeatedly inside one deeply nested function unless the engine reports only the outermost offending block."
+      },
+      "positive_example": "// see notes: metric rules have no query, the engine counts nodes\n",
+      "negative_example": "// see notes\n",
+      "default": "no",
+      "notes": "METRIC: needs a new engine. Report a block nested deeper than N levels. Not expressible as a tree-sitter query, because a query cannot count or compare depth. Decided separately from the rule pack."
+    },
+    {
+      "id": "maintainability.cyclomatic-complexity",
+      "profile": "maintainability",
+      "language": "any (10 AST languages)",
+      "engine": "metric",
+      "severity": "info",
+      "concept_source": {
+        "project": "concept only: Clippy `too_many_lines`/`too_many_arguments`, ESLint `max-lines-per-function`/`max-params`/`max-depth`/`complexity`",
+        "rule": "cyclomatic-complexity",
+        "license": "MIT / Apache-2.0 OR MIT",
+        "use": "concept",
+        "text_taken": false
+      },
+      "expected_noise": {
+        "level": "medium",
+        "reason": "Threshold-driven, and the count has to be defined per language before it can be compared across a mixed repository."
+      },
+      "positive_example": "// see notes: metric rules have no query, the engine counts nodes\n",
+      "negative_example": "// see notes\n",
+      "default": "no",
+      "notes": "METRIC: needs a new engine. Report a function whose decision count exceeds N. Not expressible as a tree-sitter query, because a query cannot count or compare depth. Decided separately from the rule pack."
+    },
+    {
+      "id": "reliability.rust.self-comparison",
+      "profile": "reliability",
+      "language": "rust",
+      "engine": "ast",
+      "severity": "error",
+      "concept_source": {
+        "project": "rust-clippy",
+        "rule": "eq_op",
+        "license": "Apache-2.0 OR MIT",
+        "use": "concept",
+        "text_taken": false
+      },
+      "expected_noise": {
+        "level": "low",
+        "reason": "Only fires when both operands are the identical identifier token; a deliberate NaN check is written `x.is_nan()`, not `x == x`, in idiomatic Rust."
+      },
+      "positive_example": "fn f(a: i32) -> bool {\n    a == a\n}\n",
+      "negative_example": "fn f(a: i32, b: i32) -> bool {\n    a == b\n}\n",
+      "default": "yes",
+      "ast": {
+        "rust": "((binary_expression left: (identifier) @l operator: \"==\" right: (identifier) @r) @report (#eq? @l @r))"
+      }
+    },
+    {
+      "id": "reliability.rust.self-assignment",
+      "profile": "reliability",
+      "language": "rust",
+      "engine": "ast",
+      "severity": "error",
+      "concept_source": {
+        "project": "rust-clippy",
+        "rule": "self_assignment",
+        "license": "Apache-2.0 OR MIT",
+        "use": "concept",
+        "text_taken": false
+      },
+      "expected_noise": {
+        "level": "low",
+        "reason": "`a = a` has no effect in any Rust program; the only false positive shape would be a macro expansion, which this query never sees."
+      },
+      "positive_example": "fn f(mut a: i32) {\n    a = a;\n}\n",
+      "negative_example": "fn f(mut a: i32, b: i32) {\n    a = b;\n}\n",
+      "default": "yes",
+      "ast": {
+        "rust": "((assignment_expression left: (identifier) @l right: (identifier) @r) @report (#eq? @l @r))"
+      }
+    },
+    {
+      "id": "reliability.rust.identical-if-branches",
+      "profile": "reliability",
+      "language": "rust",
+      "engine": "ast",
+      "severity": "warning",
+      "concept_source": {
+        "project": "rust-clippy",
+        "rule": "if_same_then_else",
+        "license": "Apache-2.0 OR MIT",
+        "use": "concept",
+        "text_taken": false
+      },
+      "expected_noise": {
+        "level": "low",
+        "reason": "Compares the two block texts byte for byte, so it fires only when both arms are literally the same source, which is a copy-paste mistake rather than a style."
+      },
+      "positive_example": "fn f(c: bool) -> i32 {\n    if c { 1 } else { 1 }\n}\n",
+      "negative_example": "fn f(c: bool) -> i32 {\n    if c { 1 } else { 2 }\n}\n",
+      "default": "yes",
+      "ast": {
+        "rust": "((if_expression consequence: (block) @a alternative: (else_clause (block) @b)) @report (#eq? @a @b))"
+      }
+    },
+    {
+      "id": "reliability.rust.unreachable-after-return",
+      "profile": "reliability",
+      "language": "rust",
+      "engine": "ast",
+      "severity": "warning",
+      "concept_source": {
+        "project": "rustc",
+        "rule": "unreachable_code",
+        "license": "Apache-2.0 OR MIT (rust-lang/rust; not re-verified in this pass)",
+        "use": "concept",
+        "text_taken": false
+      },
+      "expected_noise": {
+        "level": "low",
+        "reason": "A statement immediately following `return;` in the same block is dead in every case; rustc warns about it too, so the finding rarely survives review."
+      },
+      "positive_example": "fn f() -> i32 {\n    return 1;\n    let x = 2;\n}\n",
+      "negative_example": "fn f() -> i32 {\n    let x = 2;\n    return x;\n}\n",
+      "default": "yes",
+      "ast": {
+        "rust": "(block (expression_statement (return_expression)) . (_) @report)"
+      }
+    },
+    {
+      "id": "reliability.rust.unimplemented-marker",
+      "profile": "reliability",
+      "language": "rust",
+      "engine": "ast",
+      "severity": "warning",
+      "concept_source": {
+        "project": "rust-clippy",
+        "rule": "todo / unimplemented",
+        "license": "Apache-2.0 OR MIT",
+        "use": "concept",
+        "text_taken": false
+      },
+      "expected_noise": {
+        "level": "low",
+        "reason": "`todo!` and `unimplemented!` panic at runtime; both are placeholders by definition, so a hit is always an unfinished path."
+      },
+      "positive_example": "fn f() {\n    todo!()\n}\n",
+      "negative_example": "fn f() {\n    println!(\"done\")\n}\n",
+      "default": "yes",
+      "ast": {
+        "rust": "((macro_invocation macro: (identifier) @report (#match? @report \"^(todo|unimplemented)$\")))"
+      }
+    },
+    {
+      "id": "reliability.rust.mem-forget",
+      "profile": "reliability",
+      "language": "rust",
+      "engine": "ast",
+      "severity": "warning",
+      "concept_source": {
+        "project": "rust-clippy",
+        "rule": "mem_forget",
+        "license": "Apache-2.0 OR MIT",
+        "use": "concept",
+        "text_taken": false
+      },
+      "expected_noise": {
+        "level": "low",
+        "reason": "`mem::forget` is rare and always deliberate-looking; the query requires the `mem::` path so a local helper named `forget` does not match."
+      },
+      "positive_example": "use std::mem;\nfn f(v: Vec<u8>) {\n    mem::forget(v);\n}\n",
+      "negative_example": "fn f(v: Vec<u8>) {\n    drop(v);\n}\n",
+      "default": "yes",
+      "ast": {
+        "rust": "((call_expression function: (scoped_identifier path: (identifier) @p name: (identifier) @f) @report (#eq? @p \"mem\") (#eq? @f \"forget\")))"
+      }
+    },
+    {
+      "id": "reliability.rust.unwrap-in-library",
+      "profile": "reliability",
+      "language": "rust",
+      "engine": "ast",
+      "severity": "warning",
+      "concept_source": {
+        "project": "rust-clippy",
+        "rule": "unwrap_used / expect_used",
+        "license": "Apache-2.0 OR MIT",
+        "use": "concept",
+        "text_taken": false
+      },
+      "expected_noise": {
+        "level": "medium",
+        "reason": "Fires on every `unwrap()`/`expect()`, including the ones guarded by an invariant a line above; on a real crate this is the highest-count rule in the Rust set even after excluding tests."
+      },
+      "positive_example": "fn f(x: Option<i32>) -> i32 {\n    x.unwrap()\n}\n",
+      "negative_example": "fn f(x: Option<i32>) -> i32 {\n    x.unwrap_or(0)\n}\n",
+      "default": "no",
+      "ast": {
+        "rust": "((call_expression function: (field_expression field: (field_identifier) @report) (#match? @report \"^(unwrap|expect)$\")))"
+      },
+      "paths": {
+        "exclude": [
+          "**/tests/**",
+          "**/benches/**",
+          "**/examples/**",
+          "**/build.rs"
+        ]
+      },
+      "notes": "Held out of the launch set on noise. Ships enabled only if a corpus run puts it under the per-rule false-positive limit."
+    },
+    {
+      "id": "maintainability.rust.dbg-macro",
+      "profile": "maintainability",
+      "language": "rust",
+      "engine": "ast",
+      "severity": "info",
+      "concept_source": {
+        "project": "rust-clippy",
+        "rule": "dbg_macro",
+        "license": "Apache-2.0 OR MIT",
+        "use": "concept",
+        "text_taken": false
+      },
+      "expected_noise": {
+        "level": "low",
+        "reason": "`dbg!` is a debugging aid that is never intended to ship; the pack's own AST engine test already uses this exact shape."
+      },
+      "positive_example": "fn f(x: i32) {\n    dbg!(x);\n}\n",
+      "negative_example": "fn f(x: i32) {\n    let _ = x;\n}\n",
+      "default": "yes",
+      "ast": {
+        "rust": "((macro_invocation macro: (identifier) @report (#eq? @report \"dbg\")))"
+      }
+    },
+    {
+      "id": "maintainability.rust.empty-function-body",
+      "profile": "maintainability",
+      "language": "rust",
+      "engine": "ast",
+      "severity": "info",
+      "concept_source": {
+        "project": "siloscan",
+        "rule": "original",
+        "license": "MIT (this repository)",
+        "use": "original",
+        "text_taken": false
+      },
+      "expected_noise": {
+        "level": "medium",
+        "reason": "Empty bodies are legitimate for default trait method overrides and for no-op `Drop` implementations, which are common in real crates."
+      },
+      "positive_example": "fn f() {}\n",
+      "negative_example": "fn f() {\n    let x = 1;\n}\n",
+      "default": "no",
+      "ast": {
+        "rust": "(function_item body: (block \"{\" . \"}\") @report)"
+      }
+    },
+    {
+      "id": "maintainability.rust.print-in-library",
+      "profile": "maintainability",
+      "language": "rust",
+      "engine": "ast",
+      "severity": "info",
+      "concept_source": {
+        "project": "rust-clippy",
+        "rule": "print_stdout / print_stderr",
+        "license": "Apache-2.0 OR MIT",
+        "use": "concept",
+        "text_taken": false
+      },
+      "expected_noise": {
+        "level": "high",
+        "reason": "Fires on every line of a CLI crate's own output code, which is the majority of `println!` uses in this repository's own workspace."
+      },
+      "positive_example": "fn f() {\n    println!(\"hi\");\n}\n",
+      "negative_example": "fn f() {\n    log::info!(\"hi\");\n}\n",
+      "default": "no",
+      "ast": {
+        "rust": "((macro_invocation macro: (identifier) @report (#match? @report \"^(print|println|eprint|eprintln)$\")))"
+      },
+      "notes": "Rejected for the launch set: not separable from intentional CLI output without a path convention the pack cannot assume."
+    },
+    {
+      "id": "reliability.python.mutable-default-argument",
+      "profile": "reliability",
+      "language": "python",
+      "engine": "ast",
+      "severity": "error",
+      "concept_source": {
+        "project": "ruff",
+        "rule": "B006 mutable-argument-default",
+        "license": "MIT",
+        "use": "concept",
+        "text_taken": false
+      },
+      "expected_noise": {
+        "level": "low",
+        "reason": "A literal list, dict or set as a default is shared across calls in every Python version; there is no idiom that wants this."
+      },
+      "positive_example": "def f(items=[]):\n    return items\n",
+      "negative_example": "def f(items=None):\n    return items or []\n",
+      "default": "yes",
+      "ast": {
+        "python": "(default_parameter value: [(list) (dictionary) (set)] @report)\n(typed_default_parameter value: [(list) (dictionary) (set)] @report)"
+      }
+    },
+    {
+      "id": "reliability.python.self-comparison",
+      "profile": "reliability",
+      "language": "python",
+      "engine": "ast",
+      "severity": "error",
+      "concept_source": {
+        "project": "ruff",
+        "rule": "PLR0124 comparison-with-itself",
+        "license": "MIT",
+        "use": "concept",
+        "text_taken": false
+      },
+      "expected_noise": {
+        "level": "low",
+        "reason": "Both operands must be the same identifier token; the one legitimate use, a NaN test, is written `math.isnan(x)` in practice."
+      },
+      "positive_example": "def f(a):\n    return a == a\n",
+      "negative_example": "def f(a, b):\n    return a == b\n",
+      "default": "yes",
+      "ast": {
+        "python": "((comparison_operator (identifier) @l \"==\" (identifier) @r) @report (#eq? @l @r))"
+      }
+    },
+    {
+      "id": "reliability.python.bare-except",
+      "profile": "reliability",
+      "language": "python",
+      "engine": "ast",
+      "severity": "warning",
+      "concept_source": {
+        "project": "ruff",
+        "rule": "E722 bare-except",
+        "license": "MIT",
+        "use": "concept",
+        "text_taken": false
+      },
+      "expected_noise": {
+        "level": "low",
+        "reason": "A bare `except:` also catches `KeyboardInterrupt` and `SystemExit`; the query requires the colon to follow `except` directly, so `except Exception:` does not match."
+      },
+      "positive_example": "def f():\n    try:\n        g()\n    except:\n        pass\n",
+      "negative_example": "def f():\n    try:\n        g()\n    except ValueError:\n        pass\n",
+      "default": "yes",
+      "ast": {
+        "python": "(except_clause \"except\" . \":\") @report"
+      }
+    },
+    {
+      "id": "reliability.python.swallowed-exception",
+      "profile": "reliability",
+      "language": "python",
+      "engine": "ast",
+      "severity": "warning",
+      "concept_source": {
+        "project": "ruff",
+        "rule": "S110 try-except-pass",
+        "license": "MIT",
+        "use": "concept",
+        "text_taken": false
+      },
+      "expected_noise": {
+        "level": "low",
+        "reason": "The handler body must be exactly one `pass`; a handler that logs, comments or re-raises does not match, so intentional suppression written with `contextlib.suppress` is untouched."
+      },
+      "positive_example": "def f():\n    try:\n        g()\n    except ValueError:\n        pass\n",
+      "negative_example": "def f():\n    try:\n        g()\n    except ValueError:\n        log.warning('x')\n",
+      "default": "yes",
+      "ast": {
+        "python": "(except_clause (block . (pass_statement) .) @report)"
+      }
+    },
+    {
+      "id": "reliability.python.assert-on-tuple",
+      "profile": "reliability",
+      "language": "python",
+      "engine": "ast",
+      "severity": "error",
+      "concept_source": {
+        "project": "ruff",
+        "rule": "F631 assert-on-string-literal family",
+        "license": "MIT",
+        "use": "concept",
+        "text_taken": false
+      },
+      "expected_noise": {
+        "level": "low",
+        "reason": "A non-empty tuple is always truthy, so `assert (x, 'msg')` never fails; there is no correct program with this shape."
+      },
+      "positive_example": "def f(x):\n    assert (x, 'must be set')\n",
+      "negative_example": "def f(x):\n    assert x, 'must be set'\n",
+      "default": "yes",
+      "ast": {
+        "python": "(assert_statement (tuple) @report)"
+      }
+    },
+    {
+      "id": "reliability.python.identical-if-branches",
+      "profile": "reliability",
+      "language": "python",
+      "engine": "ast",
+      "severity": "warning",
+      "concept_source": {
+        "project": "concept: SonarSource S1871",
+        "rule": "identical branches",
+        "license": "SONAR Source-Available License v1.0 (non-OSI; upstream repo now private)",
+        "use": "concept",
+        "text_taken": false
+      },
+      "expected_noise": {
+        "level": "low",
+        "reason": "Byte-identical branch bodies only; indentation differences alone keep it from firing on coincidentally similar arms."
+      },
+      "positive_example": "def f(c):\n    if c:\n        return 1\n    else:\n        return 1\n",
+      "negative_example": "def f(c):\n    if c:\n        return 1\n    else:\n        return 2\n",
+      "default": "yes",
+      "ast": {
+        "python": "((if_statement consequence: (block) @a alternative: (else_clause body: (block) @b)) @report (#eq? @a @b))"
+      }
+    },
+    {
+      "id": "reliability.python.unreachable-after-return",
+      "profile": "reliability",
+      "language": "python",
+      "engine": "ast",
+      "severity": "warning",
+      "concept_source": {
+        "project": "concept: SonarSource S1763",
+        "rule": "unreachable code",
+        "license": "SONAR Source-Available License v1.0 (non-OSI; upstream repo now private)",
+        "use": "concept",
+        "text_taken": false
+      },
+      "expected_noise": {
+        "level": "low",
+        "reason": "A statement immediately after `return` in the same block is dead; Python has no fallthrough construct that makes this legal."
+      },
+      "positive_example": "def f():\n    return 1\n    x = 2\n",
+      "negative_example": "def f():\n    x = 2\n    return x\n",
+      "default": "yes",
+      "ast": {
+        "python": "(block (return_statement) . (_) @report)"
+      }
+    },
+    {
+      "id": "reliability.python.type-equality",
+      "profile": "reliability",
+      "language": "python",
+      "engine": "ast",
+      "severity": "warning",
+      "concept_source": {
+        "project": "ruff",
+        "rule": "E721 type-comparison",
+        "license": "MIT",
+        "use": "concept",
+        "text_taken": false
+      },
+      "expected_noise": {
+        "level": "medium",
+        "reason": "`type(x) == T` is usually meant as `isinstance`, but exact-type dispatch is a real pattern in serialization code, so a minority of hits are deliberate."
+      },
+      "positive_example": "def f(x):\n    return type(x) == int\n",
+      "negative_example": "def f(x):\n    return isinstance(x, int)\n",
+      "default": "no",
+      "ast": {
+        "python": "((comparison_operator (call function: (identifier) @f) \"==\") @report (#eq? @f \"type\"))"
+      }
+    },
+    {
+      "id": "maintainability.python.empty-function-body",
+      "profile": "maintainability",
+      "language": "python",
+      "engine": "ast",
+      "severity": "info",
+      "concept_source": {
+        "project": "siloscan",
+        "rule": "original",
+        "license": "MIT (this repository)",
+        "use": "original",
+        "text_taken": false
+      },
+      "expected_noise": {
+        "level": "high",
+        "reason": "`def f(): ...` and `pass` bodies are the normal spelling of a Protocol, an abstract base method and a stub file, so most hits are correct code."
+      },
+      "positive_example": "def f():\n    pass\n",
+      "negative_example": "def f():\n    return 1\n",
+      "default": "no",
+      "ast": {
+        "python": "(function_definition body: (block . (pass_statement) .) @report)"
+      },
+      "notes": "Rejected for the launch set: indistinguishable from Protocol and ABC stubs."
+    },
+    {
+      "id": "maintainability.python.print-call",
+      "profile": "maintainability",
+      "language": "python",
+      "engine": "ast",
+      "severity": "info",
+      "concept_source": {
+        "project": "ruff",
+        "rule": "T201 print",
+        "license": "MIT",
+        "use": "concept",
+        "text_taken": false
+      },
+      "expected_noise": {
+        "level": "high",
+        "reason": "Fires on every script and CLI entry point; the pack cannot tell a debug print from a program's own output."
+      },
+      "positive_example": "def f():\n    print('hi')\n",
+      "negative_example": "def f():\n    log.info('hi')\n",
+      "default": "no",
+      "ast": {
+        "python": "((call function: (identifier) @report (#eq? @report \"print\")))"
+      },
+      "notes": "Rejected for the launch set on noise."
+    },
+    {
+      "id": "reliability.javascript.self-comparison",
+      "profile": "reliability",
+      "language": "javascript",
+      "engine": "ast",
+      "severity": "error",
+      "concept_source": {
+        "project": "eslint",
+        "rule": "no-self-compare",
+        "license": "MIT",
+        "use": "concept",
+        "text_taken": false
+      },
+      "expected_noise": {
+        "level": "low",
+        "reason": "Both operands must be the same identifier; the NaN idiom is `Number.isNaN(x)` in any code new enough to have a linter."
+      },
+      "positive_example": "function f(a) {\n  return a === a;\n}\n",
+      "negative_example": "function f(a, b) {\n  return a === b;\n}\n",
+      "default": "yes",
+      "ast": {
+        "javascript": "((binary_expression left: (identifier) @l operator: [\"==\" \"===\"] right: (identifier) @r) @report (#eq? @l @r))"
+      }
+    },
+    {
+      "id": "reliability.javascript.self-assignment",
+      "profile": "reliability",
+      "language": "javascript",
+      "engine": "ast",
+      "severity": "error",
+      "concept_source": {
+        "project": "eslint",
+        "rule": "no-self-assign",
+        "license": "MIT",
+        "use": "concept",
+        "text_taken": false
+      },
+      "expected_noise": {
+        "level": "low",
+        "reason": "`a = a` is a no-op; the only near-miss, a property assignment such as `this.a = a`, is a different node shape and does not match."
+      },
+      "positive_example": "function f(a) {\n  a = a;\n  return a;\n}\n",
+      "negative_example": "function f(a, b) {\n  a = b;\n  return a;\n}\n",
+      "default": "yes",
+      "ast": {
+        "javascript": "((assignment_expression left: (identifier) @l right: (identifier) @r) @report (#eq? @l @r))"
+      }
+    },
+    {
+      "id": "reliability.javascript.empty-catch",
+      "profile": "reliability",
+      "language": "javascript",
+      "engine": "ast",
+      "severity": "warning",
+      "concept_source": {
+        "project": "eslint",
+        "rule": "no-empty",
+        "license": "MIT",
+        "use": "concept",
+        "text_taken": false
+      },
+      "expected_noise": {
+        "level": "low",
+        "reason": "The block must be literally `{}`; a handler containing only a comment keeps its comment node and does not match, which is the documented way to opt out."
+      },
+      "positive_example": "try {\n  g();\n} catch (e) {}\n",
+      "negative_example": "try {\n  g();\n} catch (e) {\n  log(e);\n}\n",
+      "default": "yes",
+      "ast": {
+        "javascript": "(catch_clause body: (statement_block \"{\" . \"}\") @report)"
+      }
+    },
+    {
+      "id": "reliability.javascript.identical-if-branches",
+      "profile": "reliability",
+      "language": "javascript",
+      "engine": "ast",
+      "severity": "warning",
+      "concept_source": {
+        "project": "concept: SonarSource S1871",
+        "rule": "identical branches",
+        "license": "SONAR Source-Available License v1.0 (non-OSI; upstream repo now private)",
+        "use": "concept",
+        "text_taken": false
+      },
+      "expected_noise": {
+        "level": "low",
+        "reason": "Byte-identical block text on both arms, which is a copy-paste error rather than a style choice."
+      },
+      "positive_example": "function f(c) {\n  if (c) {\n    return 1;\n  } else {\n    return 1;\n  }\n}\n",
+      "negative_example": "function f(c) {\n  if (c) {\n    return 1;\n  } else {\n    return 2;\n  }\n}\n",
+      "default": "yes",
+      "ast": {
+        "javascript": "((if_statement consequence: (statement_block) @a alternative: (else_clause (statement_block) @b)) @report (#eq? @a @b))"
+      }
+    },
+    {
+      "id": "reliability.javascript.unreachable-after-return",
+      "profile": "reliability",
+      "language": "javascript",
+      "engine": "ast",
+      "severity": "warning",
+      "concept_source": {
+        "project": "eslint",
+        "rule": "no-unreachable",
+        "license": "MIT",
+        "use": "concept",
+        "text_taken": false
+      },
+      "expected_noise": {
+        "level": "medium",
+        "reason": "A hoisted `function` declaration written after `return` is still reachable and is legal, idiomatic JavaScript; the candidate query does not exclude it, so every helper declared at the bottom of a function would report."
+      },
+      "positive_example": "function f() {\n  return 1;\n  const x = 2;\n}\n",
+      "negative_example": "function f() {\n  const x = 2;\n  return x;\n}\n",
+      "default": "no",
+      "ast": {
+        "javascript": "(statement_block (return_statement) . (_) @report)"
+      },
+      "notes": "Held out of the launch set until the query excludes `function_declaration` as the following sibling. The other nine languages have no hoisting rule and keep this rule on by default."
+    },
+    {
+      "id": "reliability.javascript.debugger-statement",
+      "profile": "reliability",
+      "language": "javascript",
+      "engine": "ast",
+      "severity": "error",
+      "concept_source": {
+        "project": "eslint",
+        "rule": "no-debugger",
+        "license": "MIT",
+        "use": "concept",
+        "text_taken": false
+      },
+      "expected_noise": {
+        "level": "low",
+        "reason": "`debugger` has exactly one meaning and never belongs in shipped code."
+      },
+      "positive_example": "function f() {\n  debugger;\n  return 1;\n}\n",
+      "negative_example": "function f() {\n  return 1;\n}\n",
+      "default": "yes",
+      "ast": {
+        "javascript": "(debugger_statement) @report"
+      }
+    },
+    {
+      "id": "reliability.javascript.constant-condition",
+      "profile": "reliability",
+      "language": "javascript",
+      "engine": "ast",
+      "severity": "warning",
+      "concept_source": {
+        "project": "eslint",
+        "rule": "no-constant-condition",
+        "license": "MIT",
+        "use": "concept",
+        "text_taken": false
+      },
+      "expected_noise": {
+        "level": "low",
+        "reason": "Only a literal `true`/`false` as the whole condition matches; the `while (true)` loop idiom is a different node and is not covered by this if-only query."
+      },
+      "positive_example": "function f() {\n  if (true) {\n    return 1;\n  }\n  return 0;\n}\n",
+      "negative_example": "function f(c) {\n  if (c) {\n    return 1;\n  }\n  return 0;\n}\n",
+      "default": "yes",
+      "ast": {
+        "javascript": "(if_statement condition: (parenthesized_expression [(true) (false)]) @report)"
+      }
+    },
+    {
+      "id": "reliability.javascript.loose-equality",
+      "profile": "reliability",
+      "language": "javascript",
+      "engine": "ast",
+      "severity": "warning",
+      "concept_source": {
+        "project": "eslint",
+        "rule": "eqeqeq",
+        "license": "MIT",
+        "use": "concept",
+        "text_taken": false
+      },
+      "expected_noise": {
+        "level": "medium",
+        "reason": "`x == null` as a combined null/undefined check is deliberate and common, and the query cannot separate it from an accidental coercion."
+      },
+      "positive_example": "function f(a, b) {\n  return a == b;\n}\n",
+      "negative_example": "function f(a, b) {\n  return a === b;\n}\n",
+      "default": "no",
+      "ast": {
+        "javascript": "(binary_expression operator: [\"==\" \"!=\"]) @report"
+      },
+      "notes": "Held out of the launch set; ships only with a `null`-operand exclusion and a corpus measurement."
+    },
+    {
+      "id": "maintainability.javascript.empty-function-body",
+      "profile": "maintainability",
+      "language": "javascript",
+      "engine": "ast",
+      "severity": "info",
+      "concept_source": {
+        "project": "eslint",
+        "rule": "no-empty-function",
+        "license": "MIT",
+        "use": "concept",
+        "text_taken": false
+      },
+      "expected_noise": {
+        "level": "medium",
+        "reason": "Empty callbacks and no-op default handlers are idiomatic, so a meaningful share of hits are intentional."
+      },
+      "positive_example": "function f() {}\n",
+      "negative_example": "function f() {\n  return 1;\n}\n",
+      "default": "no",
+      "ast": {
+        "javascript": "(function_declaration body: (statement_block \"{\" . \"}\") @report)"
+      }
+    },
+    {
+      "id": "reliability.typescript.self-comparison",
+      "profile": "reliability",
+      "language": "typescript",
+      "engine": "ast",
+      "severity": "error",
+      "concept_source": {
+        "project": "eslint",
+        "rule": "no-self-compare",
+        "license": "MIT",
+        "use": "concept",
+        "text_taken": false
+      },
+      "expected_noise": {
+        "level": "low",
+        "reason": "Both operands must be the same identifier; the NaN idiom is `Number.isNaN(x)` in any code new enough to have a linter."
+      },
+      "positive_example": "function f(a) {\n  return a === a;\n}\n",
+      "negative_example": "function f(a, b) {\n  return a === b;\n}\n",
+      "default": "yes",
+      "ast": {
+        "typescript": "((binary_expression left: (identifier) @l operator: [\"==\" \"===\"] right: (identifier) @r) @report (#eq? @l @r))"
+      }
+    },
+    {
+      "id": "reliability.typescript.self-assignment",
+      "profile": "reliability",
+      "language": "typescript",
+      "engine": "ast",
+      "severity": "error",
+      "concept_source": {
+        "project": "eslint",
+        "rule": "no-self-assign",
+        "license": "MIT",
+        "use": "concept",
+        "text_taken": false
+      },
+      "expected_noise": {
+        "level": "low",
+        "reason": "`a = a` is a no-op; the only near-miss, a property assignment such as `this.a = a`, is a different node shape and does not match."
+      },
+      "positive_example": "function f(a) {\n  a = a;\n  return a;\n}\n",
+      "negative_example": "function f(a, b) {\n  a = b;\n  return a;\n}\n",
+      "default": "yes",
+      "ast": {
+        "typescript": "((assignment_expression left: (identifier) @l right: (identifier) @r) @report (#eq? @l @r))"
+      }
+    },
+    {
+      "id": "reliability.typescript.empty-catch",
+      "profile": "reliability",
+      "language": "typescript",
+      "engine": "ast",
+      "severity": "warning",
+      "concept_source": {
+        "project": "eslint",
+        "rule": "no-empty",
+        "license": "MIT",
+        "use": "concept",
+        "text_taken": false
+      },
+      "expected_noise": {
+        "level": "low",
+        "reason": "The block must be literally `{}`; a handler containing only a comment keeps its comment node and does not match, which is the documented way to opt out."
+      },
+      "positive_example": "try {\n  g();\n} catch (e) {}\n",
+      "negative_example": "try {\n  g();\n} catch (e) {\n  log(e);\n}\n",
+      "default": "yes",
+      "ast": {
+        "typescript": "(catch_clause body: (statement_block \"{\" . \"}\") @report)"
+      }
+    },
+    {
+      "id": "reliability.typescript.identical-if-branches",
+      "profile": "reliability",
+      "language": "typescript",
+      "engine": "ast",
+      "severity": "warning",
+      "concept_source": {
+        "project": "concept: SonarSource S1871",
+        "rule": "identical branches",
+        "license": "SONAR Source-Available License v1.0 (non-OSI; upstream repo now private)",
+        "use": "concept",
+        "text_taken": false
+      },
+      "expected_noise": {
+        "level": "low",
+        "reason": "Byte-identical block text on both arms, which is a copy-paste error rather than a style choice."
+      },
+      "positive_example": "function f(c) {\n  if (c) {\n    return 1;\n  } else {\n    return 1;\n  }\n}\n",
+      "negative_example": "function f(c) {\n  if (c) {\n    return 1;\n  } else {\n    return 2;\n  }\n}\n",
+      "default": "yes",
+      "ast": {
+        "typescript": "((if_statement consequence: (statement_block) @a alternative: (else_clause (statement_block) @b)) @report (#eq? @a @b))"
+      }
+    },
+    {
+      "id": "reliability.typescript.unreachable-after-return",
+      "profile": "reliability",
+      "language": "typescript",
+      "engine": "ast",
+      "severity": "warning",
+      "concept_source": {
+        "project": "eslint",
+        "rule": "no-unreachable",
+        "license": "MIT",
+        "use": "concept",
+        "text_taken": false
+      },
+      "expected_noise": {
+        "level": "medium",
+        "reason": "A hoisted `function` declaration written after `return` is still reachable and is legal, idiomatic JavaScript; the candidate query does not exclude it, so every helper declared at the bottom of a function would report."
+      },
+      "positive_example": "function f() {\n  return 1;\n  const x = 2;\n}\n",
+      "negative_example": "function f() {\n  const x = 2;\n  return x;\n}\n",
+      "default": "no",
+      "ast": {
+        "typescript": "(statement_block (return_statement) . (_) @report)"
+      },
+      "notes": "Held out of the launch set until the query excludes `function_declaration` as the following sibling. The other nine languages have no hoisting rule and keep this rule on by default."
+    },
+    {
+      "id": "reliability.typescript.debugger-statement",
+      "profile": "reliability",
+      "language": "typescript",
+      "engine": "ast",
+      "severity": "error",
+      "concept_source": {
+        "project": "eslint",
+        "rule": "no-debugger",
+        "license": "MIT",
+        "use": "concept",
+        "text_taken": false
+      },
+      "expected_noise": {
+        "level": "low",
+        "reason": "`debugger` has exactly one meaning and never belongs in shipped code."
+      },
+      "positive_example": "function f() {\n  debugger;\n  return 1;\n}\n",
+      "negative_example": "function f() {\n  return 1;\n}\n",
+      "default": "yes",
+      "ast": {
+        "typescript": "(debugger_statement) @report"
+      }
+    },
+    {
+      "id": "reliability.typescript.constant-condition",
+      "profile": "reliability",
+      "language": "typescript",
+      "engine": "ast",
+      "severity": "warning",
+      "concept_source": {
+        "project": "eslint",
+        "rule": "no-constant-condition",
+        "license": "MIT",
+        "use": "concept",
+        "text_taken": false
+      },
+      "expected_noise": {
+        "level": "low",
+        "reason": "Only a literal `true`/`false` as the whole condition matches; the `while (true)` loop idiom is a different node and is not covered by this if-only query."
+      },
+      "positive_example": "function f() {\n  if (true) {\n    return 1;\n  }\n  return 0;\n}\n",
+      "negative_example": "function f(c) {\n  if (c) {\n    return 1;\n  }\n  return 0;\n}\n",
+      "default": "yes",
+      "ast": {
+        "typescript": "(if_statement condition: (parenthesized_expression [(true) (false)]) @report)"
+      }
+    },
+    {
+      "id": "reliability.typescript.loose-equality",
+      "profile": "reliability",
+      "language": "typescript",
+      "engine": "ast",
+      "severity": "warning",
+      "concept_source": {
+        "project": "eslint",
+        "rule": "eqeqeq",
+        "license": "MIT",
+        "use": "concept",
+        "text_taken": false
+      },
+      "expected_noise": {
+        "level": "medium",
+        "reason": "`x == null` as a combined null/undefined check is deliberate and common, and the query cannot separate it from an accidental coercion."
+      },
+      "positive_example": "function f(a, b) {\n  return a == b;\n}\n",
+      "negative_example": "function f(a, b) {\n  return a === b;\n}\n",
+      "default": "no",
+      "ast": {
+        "typescript": "(binary_expression operator: [\"==\" \"!=\"]) @report"
+      },
+      "notes": "Held out of the launch set; ships only with a `null`-operand exclusion and a corpus measurement."
+    },
+    {
+      "id": "maintainability.typescript.empty-function-body",
+      "profile": "maintainability",
+      "language": "typescript",
+      "engine": "ast",
+      "severity": "info",
+      "concept_source": {
+        "project": "eslint",
+        "rule": "no-empty-function",
+        "license": "MIT",
+        "use": "concept",
+        "text_taken": false
+      },
+      "expected_noise": {
+        "level": "medium",
+        "reason": "Empty callbacks and no-op default handlers are idiomatic, so a meaningful share of hits are intentional."
+      },
+      "positive_example": "function f() {}\n",
+      "negative_example": "function f() {\n  return 1;\n}\n",
+      "default": "no",
+      "ast": {
+        "typescript": "(function_declaration body: (statement_block \"{\" . \"}\") @report)"
+      }
+    },
+    {
+      "id": "reliability.typescript.any-assertion",
+      "profile": "reliability",
+      "language": "typescript",
+      "engine": "ast",
+      "severity": "warning",
+      "concept_source": {
+        "project": "typescript-eslint",
+        "rule": "no-explicit-any",
+        "license": "MIT",
+        "use": "concept",
+        "text_taken": false
+      },
+      "expected_noise": {
+        "level": "low",
+        "reason": "`as any` discards every type guarantee at that point; it is always a deliberate escape hatch and worth a finding even when intentional."
+      },
+      "positive_example": "function f(x: unknown) {\n  return (x as any).id;\n}\n",
+      "negative_example": "function f(x: unknown) {\n  return (x as { id: string }).id;\n}\n",
+      "default": "yes",
+      "ast": {
+        "typescript": "((as_expression (predefined_type) @t) @report (#eq? @t \"any\"))"
+      }
+    },
+    {
+      "id": "reliability.typescript.non-null-assertion",
+      "profile": "reliability",
+      "language": "typescript",
+      "engine": "ast",
+      "severity": "warning",
+      "concept_source": {
+        "project": "typescript-eslint",
+        "rule": "no-non-null-assertion",
+        "license": "MIT",
+        "use": "concept",
+        "text_taken": false
+      },
+      "expected_noise": {
+        "level": "medium",
+        "reason": "The `!` operator is the TypeScript analogue of `unwrap()`; it is frequent enough in well-typed code that a default-on rule would dominate the report."
+      },
+      "positive_example": "function f(x?: string) {\n  return x!.length;\n}\n",
+      "negative_example": "function f(x?: string) {\n  return x?.length ?? 0;\n}\n",
+      "default": "no",
+      "ast": {
+        "typescript": "(non_null_expression) @report"
+      }
+    },
+    {
+      "id": "reliability.typescript.ts-suppression-comment",
+      "profile": "reliability",
+      "language": "typescript",
+      "engine": "regex",
+      "severity": "warning",
+      "concept_source": {
+        "project": "typescript-eslint",
+        "rule": "ban-ts-comment",
+        "license": "MIT",
+        "use": "concept",
+        "text_taken": false
+      },
+      "expected_noise": {
+        "level": "low",
+        "reason": "`@ts-ignore` is an exact literal that appears only where a type error was silenced; `@ts-expect-error` is deliberately excluded because it fails when the error goes away."
+      },
+      "positive_example": "// @ts-ignore\nconst x: number = 'a';\n",
+      "negative_example": "// @ts-expect-error deliberate\nconst x: number = 'a';\n",
+      "default": "yes",
+      "regex": "@ts-ignore\\b",
+      "notes": "Regex rather than AST: tree-sitter keeps comments as opaque tokens, so a query cannot inspect their text without a `#match?` on a comment node, and the plain literal is cheaper and equally precise. Scoped with `languages: [typescript]`."
+    },
+    {
+      "id": "reliability.go.self-comparison",
+      "profile": "reliability",
+      "language": "go",
+      "engine": "ast",
+      "severity": "error",
+      "concept_source": {
+        "project": "go-tools (staticcheck)",
+        "rule": "SA4000",
+        "license": "MIT",
+        "use": "concept",
+        "text_taken": false
+      },
+      "expected_noise": {
+        "level": "low",
+        "reason": "Go has no NaN-comparison idiom that needs `x == x`; `math.IsNaN` is the spelling, so a hit is a mistake."
+      },
+      "positive_example": "package p\n\nfunc f(a int) bool {\n\treturn a == a\n}\n",
+      "negative_example": "package p\n\nfunc f(a, b int) bool {\n\treturn a == b\n}\n",
+      "default": "yes",
+      "ast": {
+        "go": "((binary_expression left: (identifier) @l operator: \"==\" right: (identifier) @r) @report (#eq? @l @r))"
+      }
+    },
+    {
+      "id": "reliability.go.self-assignment",
+      "profile": "reliability",
+      "language": "go",
+      "engine": "ast",
+      "severity": "error",
+      "concept_source": {
+        "project": "go-tools (staticcheck)",
+        "rule": "SA4018",
+        "license": "MIT",
+        "use": "concept",
+        "text_taken": false
+      },
+      "expected_noise": {
+        "level": "low",
+        "reason": "Requires exactly one identifier on each side of a plain `=`; multi-value assignments and struct-field writes are different node shapes."
+      },
+      "positive_example": "package p\n\nfunc f(a int) int {\n\ta = a\n\treturn a\n}\n",
+      "negative_example": "package p\n\nfunc f(a, b int) int {\n\ta = b\n\treturn a\n}\n",
+      "default": "yes",
+      "ast": {
+        "go": "((assignment_statement left: (expression_list . (identifier) @l .) operator: \"=\" right: (expression_list . (identifier) @r .)) @report (#eq? @l @r))"
+      }
+    },
+    {
+      "id": "reliability.go.append-result-discarded",
+      "profile": "reliability",
+      "language": "go",
+      "engine": "ast",
+      "severity": "error",
+      "concept_source": {
+        "project": "golang/go vet",
+        "rule": "unusedresult (with go-tools SA4010 as the second reference)",
+        "license": "BSD-3-Clause (go vet) / MIT (go-tools)",
+        "use": "concept",
+        "text_taken": false
+      },
+      "expected_noise": {
+        "level": "low",
+        "reason": "`append` returns a new slice header; calling it as a statement always loses the result, and there is no correct program that does it."
+      },
+      "positive_example": "package p\n\nfunc f(xs []int) []int {\n\tappend(xs, 1)\n\treturn xs\n}\n",
+      "negative_example": "package p\n\nfunc f(xs []int) []int {\n\txs = append(xs, 1)\n\treturn xs\n}\n",
+      "default": "yes",
+      "ast": {
+        "go": "((expression_statement (call_expression function: (identifier) @f) @report (#eq? @f \"append\")))"
+      }
+    },
+    {
+      "id": "reliability.go.defer-in-loop",
+      "profile": "reliability",
+      "language": "go",
+      "engine": "ast",
+      "severity": "warning",
+      "concept_source": {
+        "project": "concept: go-tools staticcheck SA9001-family and the Go review-comments guidance",
+        "rule": "defer inside a loop",
+        "license": "MIT / BSD-3-Clause",
+        "use": "concept",
+        "text_taken": false
+      },
+      "expected_noise": {
+        "level": "low",
+        "reason": "A `defer` in a loop body runs only when the enclosing function returns, so it accumulates handles; the rare deliberate case is written in a closure, which is a different node."
+      },
+      "positive_example": "package p\n\nfunc f(paths []string) {\n\tfor _, p := range paths {\n\t\tdefer close(p)\n\t}\n}\n",
+      "negative_example": "package p\n\nfunc f(paths []string) {\n\tfor _, p := range paths {\n\t\tclose(p)\n\t}\n}\n",
+      "default": "yes",
+      "ast": {
+        "go": "(for_statement body: (block (statement_list (defer_statement) @report)))"
+      }
+    },
+    {
+      "id": "reliability.go.identical-if-branches",
+      "profile": "reliability",
+      "language": "go",
+      "engine": "ast",
+      "severity": "warning",
+      "concept_source": {
+        "project": "concept: SonarSource S1871",
+        "rule": "identical branches",
+        "license": "SONAR Source-Available License v1.0 (non-OSI; upstream repo now private)",
+        "use": "concept",
+        "text_taken": false
+      },
+      "expected_noise": {
+        "level": "low",
+        "reason": "Byte-identical blocks on both arms."
+      },
+      "positive_example": "package p\n\nfunc f(c bool) int {\n\tif c {\n\t\treturn 1\n\t} else {\n\t\treturn 1\n\t}\n}\n",
+      "negative_example": "package p\n\nfunc f(c bool) int {\n\tif c {\n\t\treturn 1\n\t} else {\n\t\treturn 2\n\t}\n}\n",
+      "default": "yes",
+      "ast": {
+        "go": "((if_statement consequence: (block) @a alternative: (block) @b) @report (#eq? @a @b))"
+      }
+    },
+    {
+      "id": "reliability.go.unreachable-after-return",
+      "profile": "reliability",
+      "language": "go",
+      "engine": "ast",
+      "severity": "warning",
+      "concept_source": {
+        "project": "go-tools (staticcheck)",
+        "rule": "SA4006-family / unreachable",
+        "license": "MIT",
+        "use": "concept",
+        "text_taken": false
+      },
+      "expected_noise": {
+        "level": "low",
+        "reason": "The Go compiler rejects most of these already, so a surviving hit is in a branch the compiler could not see; either way it is dead."
+      },
+      "positive_example": "package p\n\nfunc f() int {\n\treturn 1\n\tprintln(2)\n}\n",
+      "negative_example": "package p\n\nfunc f() int {\n\tprintln(2)\n\treturn 1\n}\n",
+      "default": "yes",
+      "ast": {
+        "go": "(statement_list (return_statement) . (_) @report)"
+      }
+    },
+    {
+      "id": "reliability.go.unchecked-type-assertion",
+      "profile": "reliability",
+      "language": "go",
+      "engine": "ast",
+      "severity": "warning",
+      "concept_source": {
+        "project": "go-tools (staticcheck) / errcheck",
+        "rule": "unchecked type assertion",
+        "license": "MIT",
+        "use": "concept",
+        "text_taken": false
+      },
+      "expected_noise": {
+        "level": "medium",
+        "reason": "The single-value form panics on a wrong type, but it is idiomatic wherever the type is already known from a switch a few lines above, which the query cannot see."
+      },
+      "positive_example": "package p\n\nfunc f(x interface{}) int {\n\tv := x.(int)\n\treturn v\n}\n",
+      "negative_example": "package p\n\nfunc f(x interface{}) int {\n\tv, ok := x.(int)\n\tif !ok {\n\t\treturn 0\n\t}\n\treturn v\n}\n",
+      "default": "no",
+      "ast": {
+        "go": "(short_var_declaration left: (expression_list . (identifier) .) right: (expression_list . (type_assertion_expression) @report .))"
+      }
+    },
+    {
+      "id": "maintainability.go.empty-function-body",
+      "profile": "maintainability",
+      "language": "go",
+      "engine": "ast",
+      "severity": "info",
+      "concept_source": {
+        "project": "siloscan",
+        "rule": "original",
+        "license": "MIT (this repository)",
+        "use": "original",
+        "text_taken": false
+      },
+      "expected_noise": {
+        "level": "medium",
+        "reason": "Empty bodies are the normal way to satisfy an interface with a no-op implementation, which is common in Go test doubles and adapters."
+      },
+      "positive_example": "package p\n\nfunc f() {}\n",
+      "negative_example": "package p\n\nfunc f() {\n\tprintln(1)\n}\n",
+      "default": "no",
+      "ast": {
+        "go": "(function_declaration body: (block \"{\" . \"}\") @report)"
+      }
+    },
+    {
+      "id": "maintainability.go.panic-in-library",
+      "profile": "maintainability",
+      "language": "go",
+      "engine": "ast",
+      "severity": "info",
+      "concept_source": {
+        "project": "siloscan",
+        "rule": "original",
+        "license": "MIT (this repository)",
+        "use": "original",
+        "text_taken": false
+      },
+      "expected_noise": {
+        "level": "high",
+        "reason": "`panic` in `main` and in initialisation code is normal Go; the pack has no way to tell library code from a program entry point by path alone."
+      },
+      "positive_example": "package p\n\nfunc f() {\n\tpanic(\"boom\")\n}\n",
+      "negative_example": "package p\n\nimport \"errors\"\n\nfunc f() error {\n\treturn errors.New(\"boom\")\n}\n",
+      "default": "no",
+      "ast": {
+        "go": "((call_expression function: (identifier) @report (#eq? @report \"panic\")))"
+      },
+      "notes": "Rejected for the launch set on noise."
+    },
+    {
+      "id": "reliability.java.empty-catch",
+      "profile": "reliability",
+      "language": "java",
+      "engine": "ast",
+      "severity": "warning",
+      "concept_source": {
+        "project": "concept: PMD EmptyCatchBlock, SpotBugs DE_MIGHT_IGNORE",
+        "rule": "empty catch",
+        "license": "PMD BSD-style with DARPA acknowledgement (not SPDX BSD-3-Clause) / SpotBugs LGPL-2.1-or-later",
+        "use": "concept",
+        "text_taken": false
+      },
+      "expected_noise": {
+        "level": "low",
+        "reason": "The block must be literally `{}`; a handler holding only a comment keeps a comment node and is not reported, which is the documented opt-out."
+      },
+      "positive_example": "class C {\n  void m() {\n    try { g(); } catch (Exception e) {}\n  }\n}\n",
+      "negative_example": "class C {\n  void m() {\n    try { g(); } catch (Exception e) { log(e); }\n  }\n}\n",
+      "default": "yes",
+      "ast": {
+        "java": "(catch_clause body: (block \"{\" . \"}\") @report)"
+      }
+    },
+    {
+      "id": "reliability.java.self-comparison",
+      "profile": "reliability",
+      "language": "java",
+      "engine": "ast",
+      "severity": "error",
+      "concept_source": {
+        "project": "error-prone",
+        "rule": "SelfComparison / SelfEquals",
+        "license": "Apache-2.0",
+        "use": "concept",
+        "text_taken": false
+      },
+      "expected_noise": {
+        "level": "low",
+        "reason": "Both operands are the same identifier token; the NaN idiom in Java is `Double.isNaN`, so a hit is a mistake."
+      },
+      "positive_example": "class C {\n  boolean m(int a) {\n    return a == a;\n  }\n}\n",
+      "negative_example": "class C {\n  boolean m(int a, int b) {\n    return a == b;\n  }\n}\n",
+      "default": "yes",
+      "ast": {
+        "java": "((binary_expression left: (identifier) @l operator: \"==\" right: (identifier) @r) @report (#eq? @l @r))"
+      }
+    },
+    {
+      "id": "reliability.java.self-assignment",
+      "profile": "reliability",
+      "language": "java",
+      "engine": "ast",
+      "severity": "error",
+      "concept_source": {
+        "project": "error-prone",
+        "rule": "SelfAssignment",
+        "license": "Apache-2.0",
+        "use": "concept",
+        "text_taken": false
+      },
+      "expected_noise": {
+        "level": "low",
+        "reason": "`a = a` is a no-op; the field-shadowing shape `this.a = a` is a different node and is excluded."
+      },
+      "positive_example": "class C {\n  void m(int a) {\n    a = a;\n  }\n}\n",
+      "negative_example": "class C {\n  int a;\n  void m(int a) {\n    this.a = a;\n  }\n}\n",
+      "default": "yes",
+      "ast": {
+        "java": "((assignment_expression left: (identifier) @l right: (identifier) @r) @report (#eq? @l @r))"
+      }
+    },
+    {
+      "id": "reliability.java.string-literal-identity",
+      "profile": "reliability",
+      "language": "java",
+      "engine": "ast",
+      "severity": "error",
+      "concept_source": {
+        "project": "error-prone",
+        "rule": "ReferenceEquality / StringEquality",
+        "license": "Apache-2.0",
+        "use": "concept",
+        "text_taken": false
+      },
+      "expected_noise": {
+        "level": "low",
+        "reason": "Comparing to a string literal with `==` tests reference identity; interning makes it work by accident often enough that it is a real, hard bug, and there is no correct reason to write it."
+      },
+      "positive_example": "class C {\n  boolean m(String s) {\n    return s == \"x\";\n  }\n}\n",
+      "negative_example": "class C {\n  boolean m(String s) {\n    return \"x\".equals(s);\n  }\n}\n",
+      "default": "yes",
+      "ast": {
+        "java": "(binary_expression left: (_) operator: \"==\" right: (string_literal)) @report\n(binary_expression left: (string_literal) operator: \"==\") @report"
+      }
+    },
+    {
+      "id": "reliability.java.identical-if-branches",
+      "profile": "reliability",
+      "language": "java",
+      "engine": "ast",
+      "severity": "warning",
+      "concept_source": {
+        "project": "concept: SonarSource S1871",
+        "rule": "identical branches",
+        "license": "SONAR Source-Available License v1.0 (non-OSI; upstream repo now private)",
+        "use": "concept",
+        "text_taken": false
+      },
+      "expected_noise": {
+        "level": "low",
+        "reason": "Byte-identical block text on both arms."
+      },
+      "positive_example": "class C {\n  int m(boolean c) {\n    if (c) {\n      return 1;\n    } else {\n      return 1;\n    }\n  }\n}\n",
+      "negative_example": "class C {\n  int m(boolean c) {\n    if (c) {\n      return 1;\n    } else {\n      return 2;\n    }\n  }\n}\n",
+      "default": "yes",
+      "ast": {
+        "java": "((if_statement consequence: (block) @a alternative: (block) @b) @report (#eq? @a @b))"
+      }
+    },
+    {
+      "id": "reliability.java.unreachable-after-return",
+      "profile": "reliability",
+      "language": "java",
+      "engine": "ast",
+      "severity": "warning",
+      "concept_source": {
+        "project": "concept: SonarSource S1763",
+        "rule": "unreachable code",
+        "license": "SONAR Source-Available License v1.0 (non-OSI; upstream repo now private)",
+        "use": "concept",
+        "text_taken": false
+      },
+      "expected_noise": {
+        "level": "low",
+        "reason": "javac rejects this, so a hit means the file does not compile or the statement sits behind a construct the query flattened; either is worth a look."
+      },
+      "positive_example": "class C {\n  int m() {\n    return 1;\n    // trailing\n  }\n}\n",
+      "negative_example": "class C {\n  int m() {\n    int x = 1;\n    return x;\n  }\n}\n",
+      "default": "yes",
+      "ast": {
+        "java": "(block (return_statement) . (_) @report)"
+      }
+    },
+    {
+      "id": "reliability.java.print-stack-trace",
+      "profile": "reliability",
+      "language": "java",
+      "engine": "ast",
+      "severity": "warning",
+      "concept_source": {
+        "project": "concept: PMD AvoidPrintStackTrace",
+        "rule": "print stack trace",
+        "license": "PMD BSD-style with DARPA acknowledgement (not SPDX BSD-3-Clause)",
+        "use": "concept",
+        "text_taken": false
+      },
+      "expected_noise": {
+        "level": "medium",
+        "reason": "`printStackTrace()` is wrong in a service but correct in a sample, a test harness and a command-line tool, and the query cannot tell them apart."
+      },
+      "positive_example": "class C {\n  void m() {\n    try { g(); } catch (Exception e) { e.printStackTrace(); }\n  }\n}\n",
+      "negative_example": "class C {\n  void m() {\n    try { g(); } catch (Exception e) { log.error(\"g\", e); }\n  }\n}\n",
+      "default": "no",
+      "ast": {
+        "java": "((method_invocation name: (identifier) @report (#eq? @report \"printStackTrace\")))"
+      }
+    },
+    {
+      "id": "maintainability.java.empty-method-body",
+      "profile": "maintainability",
+      "language": "java",
+      "engine": "ast",
+      "severity": "info",
+      "concept_source": {
+        "project": "siloscan",
+        "rule": "original",
+        "license": "MIT (this repository)",
+        "use": "original",
+        "text_taken": false
+      },
+      "expected_noise": {
+        "level": "high",
+        "reason": "Empty bodies are the normal spelling of an adapter override, a no-arg constructor and a `@Override` no-op, all of which are correct."
+      },
+      "positive_example": "class C {\n  void m() {}\n}\n",
+      "negative_example": "class C {\n  void m() {\n    g();\n  }\n}\n",
+      "default": "no",
+      "ast": {
+        "java": "(method_declaration body: (block \"{\" . \"}\") @report)"
+      },
+      "notes": "Rejected for the launch set on noise."
+    },
+    {
+      "id": "maintainability.java.system-out-print",
+      "profile": "maintainability",
+      "language": "java",
+      "engine": "ast",
+      "severity": "info",
+      "concept_source": {
+        "project": "concept: PMD SystemPrintln",
+        "rule": "system println",
+        "license": "PMD BSD-style with DARPA acknowledgement (not SPDX BSD-3-Clause)",
+        "use": "concept",
+        "text_taken": false
+      },
+      "expected_noise": {
+        "level": "high",
+        "reason": "Fires on every command-line tool and every teaching example in a repository."
+      },
+      "positive_example": "class C {\n  void m() {\n    System.out.println(\"x\");\n  }\n}\n",
+      "negative_example": "class C {\n  void m() {\n    log.info(\"x\");\n  }\n}\n",
+      "default": "no",
+      "ast": {
+        "java": "((method_invocation object: (field_access object: (identifier) @o) name: (identifier) @report (#eq? @o \"System\") (#match? @report \"^print(ln)?$\")))"
+      },
+      "notes": "Rejected for the launch set on noise."
+    },
+    {
+      "id": "reliability.c.self-comparison",
+      "profile": "reliability",
+      "language": "c",
+      "engine": "ast",
+      "severity": "error",
+      "concept_source": {
+        "project": "clang-tidy",
+        "rule": "misc-redundant-expression",
+        "license": "Apache-2.0 WITH LLVM-exception",
+        "use": "concept",
+        "text_taken": false
+      },
+      "expected_noise": {
+        "level": "low",
+        "reason": "Both operands are the same identifier token; the float NaN idiom is written with `isnan()` in any code that has a build system."
+      },
+      "positive_example": "int f(int a) {\n  return a == a;\n}\n",
+      "negative_example": "int f(int a, int b) {\n  return a == b;\n}\n",
+      "default": "yes",
+      "ast": {
+        "c": "((binary_expression left: (identifier) @l operator: \"==\" right: (identifier) @r) @report (#eq? @l @r))"
+      }
+    },
+    {
+      "id": "reliability.c.self-assignment",
+      "profile": "reliability",
+      "language": "c",
+      "engine": "ast",
+      "severity": "error",
+      "concept_source": {
+        "project": "clang-tidy",
+        "rule": "misc-redundant-expression / bugprone-branch-clone family",
+        "license": "Apache-2.0 WITH LLVM-exception",
+        "use": "concept",
+        "text_taken": false
+      },
+      "expected_noise": {
+        "level": "low",
+        "reason": "`a = a` is a no-op; the copy-assignment-operator shape uses `this->a`, which is a different node."
+      },
+      "positive_example": "void f(int a) {\n  a = a;\n}\n",
+      "negative_example": "void f(int a, int b) {\n  a = b;\n}\n",
+      "default": "yes",
+      "ast": {
+        "c": "((assignment_expression left: (identifier) @l operator: \"=\" right: (identifier) @r) @report (#eq? @l @r))"
+      }
+    },
+    {
+      "id": "reliability.c.assignment-in-condition",
+      "profile": "reliability",
+      "language": "c",
+      "engine": "ast",
+      "severity": "warning",
+      "concept_source": {
+        "project": "clang / clang-tidy",
+        "rule": "-Wparentheses diagnostic",
+        "license": "Apache-2.0 WITH LLVM-exception",
+        "use": "concept",
+        "text_taken": false
+      },
+      "expected_noise": {
+        "level": "low",
+        "reason": "The deliberate form is written with a second pair of parentheses, which produces a nested parenthesized node the query does not match; that is the same escape hatch compilers use."
+      },
+      "positive_example": "int f(int a, int b) {\n  if (a = b) {\n    return 1;\n  }\n  return 0;\n}\n",
+      "negative_example": "int f(int a, int b) {\n  if ((a = b)) {\n    return 1;\n  }\n  return 0;\n}\n",
+      "default": "yes",
+      "ast": {
+        "c": "(if_statement condition: (parenthesized_expression (assignment_expression) @report))"
+      }
+    },
+    {
+      "id": "reliability.c.empty-if-body",
+      "profile": "reliability",
+      "language": "c",
+      "engine": "ast",
+      "severity": "warning",
+      "concept_source": {
+        "project": "clang / clang-tidy",
+        "rule": "-Wempty-body diagnostic",
+        "license": "Apache-2.0 WITH LLVM-exception",
+        "use": "concept",
+        "text_taken": false
+      },
+      "expected_noise": {
+        "level": "low",
+        "reason": "`if (x);` is a stray semicolon in every case; a genuinely empty branch is written `{}`, which is a different node."
+      },
+      "positive_example": "int f(int a) {\n  if (a);\n  return a;\n}\n",
+      "negative_example": "int f(int a) {\n  if (a) {}\n  return a;\n}\n",
+      "default": "yes",
+      "ast": {
+        "c": "(if_statement consequence: (expression_statement . \";\" .) @report)"
+      }
+    },
+    {
+      "id": "reliability.c.identical-if-branches",
+      "profile": "reliability",
+      "language": "c",
+      "engine": "ast",
+      "severity": "warning",
+      "concept_source": {
+        "project": "clang-tidy",
+        "rule": "bugprone-branch-clone",
+        "license": "Apache-2.0 WITH LLVM-exception",
+        "use": "concept",
+        "text_taken": false
+      },
+      "expected_noise": {
+        "level": "low",
+        "reason": "Byte-identical block text on both arms."
+      },
+      "positive_example": "int f(int c) {\n  if (c) {\n    return 1;\n  } else {\n    return 1;\n  }\n}\n",
+      "negative_example": "int f(int c) {\n  if (c) {\n    return 1;\n  } else {\n    return 2;\n  }\n}\n",
+      "default": "yes",
+      "ast": {
+        "c": "((if_statement consequence: (compound_statement) @a alternative: (else_clause (compound_statement) @b)) @report (#eq? @a @b))"
+      }
+    },
+    {
+      "id": "reliability.c.unreachable-after-return",
+      "profile": "reliability",
+      "language": "c",
+      "engine": "ast",
+      "severity": "warning",
+      "concept_source": {
+        "project": "clang / clang-tidy",
+        "rule": "-Wunreachable-code diagnostic",
+        "license": "Apache-2.0 WITH LLVM-exception",
+        "use": "concept",
+        "text_taken": false
+      },
+      "expected_noise": {
+        "level": "low",
+        "reason": "A statement directly after `return` in the same block is dead unless it carries a label, which is a distinct node and is excluded."
+      },
+      "positive_example": "int f(void) {\n  return 1;\n  g();\n}\n",
+      "negative_example": "int f(void) {\n  g();\n  return 1;\n}\n",
+      "default": "yes",
+      "ast": {
+        "c": "(compound_statement (return_statement) . (_) @report)"
+      },
+      "notes": "A `labeled_statement` after `return` is a legal goto target; the shipped query must exclude it."
+    },
+    {
+      "id": "maintainability.c.empty-function-body",
+      "profile": "maintainability",
+      "language": "c",
+      "engine": "ast",
+      "severity": "info",
+      "concept_source": {
+        "project": "siloscan",
+        "rule": "original",
+        "license": "MIT (this repository)",
+        "use": "original",
+        "text_taken": false
+      },
+      "expected_noise": {
+        "level": "medium",
+        "reason": "Empty bodies are used for weak-symbol stubs and for platform no-ops, both of which are correct."
+      },
+      "positive_example": "void f(void) {}\n",
+      "negative_example": "void f(void) {\n  g();\n}\n",
+      "default": "no",
+      "ast": {
+        "c": "(function_definition body: (compound_statement \"{\" . \"}\") @report)"
+      }
+    },
+    {
+      "id": "reliability.cpp.self-comparison",
+      "profile": "reliability",
+      "language": "cpp",
+      "engine": "ast",
+      "severity": "error",
+      "concept_source": {
+        "project": "clang-tidy",
+        "rule": "misc-redundant-expression",
+        "license": "Apache-2.0 WITH LLVM-exception",
+        "use": "concept",
+        "text_taken": false
+      },
+      "expected_noise": {
+        "level": "low",
+        "reason": "Both operands are the same identifier token; the float NaN idiom is written with `isnan()` in any code that has a build system."
+      },
+      "positive_example": "int f(int a) {\n  return a == a;\n}\n",
+      "negative_example": "int f(int a, int b) {\n  return a == b;\n}\n",
+      "default": "yes",
+      "ast": {
+        "cpp": "((binary_expression left: (identifier) @l operator: \"==\" right: (identifier) @r) @report (#eq? @l @r))"
+      }
+    },
+    {
+      "id": "reliability.cpp.self-assignment",
+      "profile": "reliability",
+      "language": "cpp",
+      "engine": "ast",
+      "severity": "error",
+      "concept_source": {
+        "project": "clang-tidy",
+        "rule": "misc-redundant-expression / bugprone-branch-clone family",
+        "license": "Apache-2.0 WITH LLVM-exception",
+        "use": "concept",
+        "text_taken": false
+      },
+      "expected_noise": {
+        "level": "low",
+        "reason": "`a = a` is a no-op; the copy-assignment-operator shape uses `this->a`, which is a different node."
+      },
+      "positive_example": "void f(int a) {\n  a = a;\n}\n",
+      "negative_example": "void f(int a, int b) {\n  a = b;\n}\n",
+      "default": "yes",
+      "ast": {
+        "cpp": "((assignment_expression left: (identifier) @l operator: \"=\" right: (identifier) @r) @report (#eq? @l @r))"
+      }
+    },
+    {
+      "id": "reliability.cpp.assignment-in-condition",
+      "profile": "reliability",
+      "language": "cpp",
+      "engine": "ast",
+      "severity": "warning",
+      "concept_source": {
+        "project": "clang / clang-tidy",
+        "rule": "-Wparentheses diagnostic",
+        "license": "Apache-2.0 WITH LLVM-exception",
+        "use": "concept",
+        "text_taken": false
+      },
+      "expected_noise": {
+        "level": "low",
+        "reason": "The deliberate form is written with a second pair of parentheses, which produces a nested parenthesized node the query does not match; that is the same escape hatch compilers use."
+      },
+      "positive_example": "int f(int a, int b) {\n  if (a = b) {\n    return 1;\n  }\n  return 0;\n}\n",
+      "negative_example": "int f(int a, int b) {\n  if ((a = b)) {\n    return 1;\n  }\n  return 0;\n}\n",
+      "default": "yes",
+      "ast": {
+        "cpp": "(if_statement condition: (condition_clause value: (assignment_expression) @report))"
+      }
+    },
+    {
+      "id": "reliability.cpp.empty-if-body",
+      "profile": "reliability",
+      "language": "cpp",
+      "engine": "ast",
+      "severity": "warning",
+      "concept_source": {
+        "project": "clang / clang-tidy",
+        "rule": "-Wempty-body diagnostic",
+        "license": "Apache-2.0 WITH LLVM-exception",
+        "use": "concept",
+        "text_taken": false
+      },
+      "expected_noise": {
+        "level": "low",
+        "reason": "`if (x);` is a stray semicolon in every case; a genuinely empty branch is written `{}`, which is a different node."
+      },
+      "positive_example": "int f(int a) {\n  if (a);\n  return a;\n}\n",
+      "negative_example": "int f(int a) {\n  if (a) {}\n  return a;\n}\n",
+      "default": "yes",
+      "ast": {
+        "cpp": "(if_statement consequence: (expression_statement . \";\" .) @report)"
+      }
+    },
+    {
+      "id": "reliability.cpp.identical-if-branches",
+      "profile": "reliability",
+      "language": "cpp",
+      "engine": "ast",
+      "severity": "warning",
+      "concept_source": {
+        "project": "clang-tidy",
+        "rule": "bugprone-branch-clone",
+        "license": "Apache-2.0 WITH LLVM-exception",
+        "use": "concept",
+        "text_taken": false
+      },
+      "expected_noise": {
+        "level": "low",
+        "reason": "Byte-identical block text on both arms."
+      },
+      "positive_example": "int f(int c) {\n  if (c) {\n    return 1;\n  } else {\n    return 1;\n  }\n}\n",
+      "negative_example": "int f(int c) {\n  if (c) {\n    return 1;\n  } else {\n    return 2;\n  }\n}\n",
+      "default": "yes",
+      "ast": {
+        "cpp": "((if_statement consequence: (compound_statement) @a alternative: (else_clause (compound_statement) @b)) @report (#eq? @a @b))"
+      }
+    },
+    {
+      "id": "reliability.cpp.unreachable-after-return",
+      "profile": "reliability",
+      "language": "cpp",
+      "engine": "ast",
+      "severity": "warning",
+      "concept_source": {
+        "project": "clang / clang-tidy",
+        "rule": "-Wunreachable-code diagnostic",
+        "license": "Apache-2.0 WITH LLVM-exception",
+        "use": "concept",
+        "text_taken": false
+      },
+      "expected_noise": {
+        "level": "low",
+        "reason": "A statement directly after `return` in the same block is dead unless it carries a label, which is a distinct node and is excluded."
+      },
+      "positive_example": "int f(void) {\n  return 1;\n  g();\n}\n",
+      "negative_example": "int f(void) {\n  g();\n  return 1;\n}\n",
+      "default": "yes",
+      "ast": {
+        "cpp": "(compound_statement (return_statement) . (_) @report)"
+      },
+      "notes": "A `labeled_statement` after `return` is a legal goto target; the shipped query must exclude it."
+    },
+    {
+      "id": "maintainability.cpp.empty-function-body",
+      "profile": "maintainability",
+      "language": "cpp",
+      "engine": "ast",
+      "severity": "info",
+      "concept_source": {
+        "project": "siloscan",
+        "rule": "original",
+        "license": "MIT (this repository)",
+        "use": "original",
+        "text_taken": false
+      },
+      "expected_noise": {
+        "level": "medium",
+        "reason": "Empty bodies are used for weak-symbol stubs and for platform no-ops, both of which are correct."
+      },
+      "positive_example": "void f(void) {}\n",
+      "negative_example": "void f(void) {\n  g();\n}\n",
+      "default": "no",
+      "ast": {
+        "cpp": "(function_definition body: (compound_statement \"{\" . \"}\") @report)"
+      }
+    },
+    {
+      "id": "reliability.c.string-literal-comparison",
+      "profile": "reliability",
+      "language": "c",
+      "engine": "ast",
+      "severity": "error",
+      "concept_source": {
+        "project": "clang-tidy",
+        "rule": "bugprone-suspicious-string-compare family",
+        "license": "Apache-2.0 WITH LLVM-exception",
+        "use": "concept",
+        "text_taken": false
+      },
+      "expected_noise": {
+        "level": "low",
+        "reason": "In C, `s == \"x\"` compares pointers and is never what the author meant; `strcmp` is the only correct spelling."
+      },
+      "positive_example": "int f(const char *s) {\n  return s == \"x\";\n}\n",
+      "negative_example": "#include <string.h>\nint f(const char *s) {\n  return strcmp(s, \"x\") == 0;\n}\n",
+      "default": "yes",
+      "ast": {
+        "c": "(binary_expression left: (_) operator: \"==\" right: (string_literal)) @report\n(binary_expression left: (string_literal) operator: \"==\") @report"
+      }
+    },
+    {
+      "id": "reliability.cpp.empty-catch",
+      "profile": "reliability",
+      "language": "cpp",
+      "engine": "ast",
+      "severity": "warning",
+      "concept_source": {
+        "project": "clang-tidy",
+        "rule": "bugprone-empty-catch",
+        "license": "Apache-2.0 WITH LLVM-exception",
+        "use": "concept",
+        "text_taken": false
+      },
+      "expected_noise": {
+        "level": "low",
+        "reason": "The handler must be literally `{}`; a comment inside keeps a comment node and opts out."
+      },
+      "positive_example": "void f() {\n  try { g(); } catch (...) {}\n}\n",
+      "negative_example": "void f() {\n  try { g(); } catch (...) { h(); }\n}\n",
+      "default": "yes",
+      "ast": {
+        "cpp": "(catch_clause body: (compound_statement \"{\" . \"}\") @report)"
+      }
+    },
+    {
+      "id": "maintainability.cpp.using-namespace-in-header",
+      "profile": "maintainability",
+      "language": "cpp",
+      "engine": "ast",
+      "severity": "info",
+      "concept_source": {
+        "project": "concept: C++ Core Guidelines SF.7",
+        "rule": "do not write using namespace at global scope in a header",
+        "license": "CC-BY-4.0 (guideline prose; not reused)",
+        "use": "concept",
+        "text_taken": false
+      },
+      "expected_noise": {
+        "level": "low",
+        "reason": "Scoped to header paths only, where a `using namespace` directive leaks into every translation unit that includes the file; in a .cpp file it is fine and is not scanned."
+      },
+      "positive_example": "namespace ns { int g(); }\nusing namespace ns;\nint f() { return g(); }\n",
+      "negative_example": "namespace ns { int g(); }\nint f() { return ns::g(); }\n",
+      "default": "yes",
+      "ast": {
+        "cpp": "(using_declaration \"namespace\" (identifier) @report)"
+      },
+      "paths": {
+        "include": [
+          "**/*.h",
+          "**/*.hpp",
+          "**/*.hh",
+          "**/*.hxx"
+        ]
+      }
+    },
+    {
+      "id": "reliability.csharp.empty-catch",
+      "profile": "reliability",
+      "language": "csharp",
+      "engine": "ast",
+      "severity": "warning",
+      "concept_source": {
+        "project": "roslyn-analyzers",
+        "rule": "CA1031-family (concept)",
+        "license": "MIT",
+        "use": "concept",
+        "text_taken": false
+      },
+      "expected_noise": {
+        "level": "low",
+        "reason": "The block must be literally `{}`; a handler containing a comment or a `// intentionally ignored` note keeps its comment node and does not match."
+      },
+      "positive_example": "class C { void M() { try { G(); } catch (System.Exception) {} } }\n",
+      "negative_example": "class C { void M() { try { G(); } catch (System.Exception e) { Log(e); } } }\n",
+      "default": "yes",
+      "ast": {
+        "csharp": "(catch_clause body: (block \"{\" . \"}\") @report)"
+      }
+    },
+    {
+      "id": "reliability.csharp.self-comparison",
+      "profile": "reliability",
+      "language": "csharp",
+      "engine": "ast",
+      "severity": "error",
+      "concept_source": {
+        "project": "roslyn-analyzers",
+        "rule": "CA2242-family (concept)",
+        "license": "MIT",
+        "use": "concept",
+        "text_taken": false
+      },
+      "expected_noise": {
+        "level": "low",
+        "reason": "Both operands are the same identifier token."
+      },
+      "positive_example": "class C { bool M(int a) { return a == a; } }\n",
+      "negative_example": "class C { bool M(int a, int b) { return a == b; } }\n",
+      "default": "yes",
+      "ast": {
+        "csharp": "((binary_expression left: (identifier) @l operator: \"==\" right: (identifier) @r) @report (#eq? @l @r))"
+      }
+    },
+    {
+      "id": "reliability.csharp.self-assignment",
+      "profile": "reliability",
+      "language": "csharp",
+      "engine": "ast",
+      "severity": "error",
+      "concept_source": {
+        "project": "roslyn",
+        "rule": "CS1717 compiler warning (concept)",
+        "license": "MIT",
+        "use": "concept",
+        "text_taken": false
+      },
+      "expected_noise": {
+        "level": "low",
+        "reason": "`a = a` is a no-op; `this.a = a` is a different node shape and is excluded."
+      },
+      "positive_example": "class C { void M(int a) { a = a; } }\n",
+      "negative_example": "class C { int a; void M(int a) { this.a = a; } }\n",
+      "default": "yes",
+      "ast": {
+        "csharp": "((assignment_expression left: (identifier) @l right: (identifier) @r) @report (#eq? @l @r))"
+      }
+    },
+    {
+      "id": "reliability.csharp.rethrow-loses-stack",
+      "profile": "reliability",
+      "language": "csharp",
+      "engine": "ast",
+      "severity": "error",
+      "concept_source": {
+        "project": "roslyn-analyzers",
+        "rule": "CA2200 rethrow to preserve stack details",
+        "license": "MIT",
+        "use": "concept",
+        "text_taken": false
+      },
+      "expected_noise": {
+        "level": "low",
+        "reason": "`catch (Exception e) { throw e; }` resets the stack trace; the correct spelling is a bare `throw;`, which is a different node and does not match."
+      },
+      "positive_example": "class C { void M() { try { G(); } catch (System.Exception e) { throw e; } } }\n",
+      "negative_example": "class C { void M() { try { G(); } catch (System.Exception e) { throw; } } }\n",
+      "default": "yes",
+      "ast": {
+        "csharp": "((catch_clause (catch_declaration name: (identifier) @n) body: (block (throw_statement (identifier) @t))) @report (#eq? @n @t))"
+      }
+    },
+    {
+      "id": "reliability.csharp.async-void",
+      "profile": "reliability",
+      "language": "csharp",
+      "engine": "ast",
+      "severity": "warning",
+      "concept_source": {
+        "project": "concept: microsoft/vs-threading VSTHRD100",
+        "rule": "avoid async void",
+        "license": "MIT (microsoft/vs-threading; not re-verified in this pass)",
+        "use": "concept",
+        "text_taken": false
+      },
+      "expected_noise": {
+        "level": "low",
+        "reason": "`async void` swallows exceptions outside event handlers; the handler case is a small, recognisable minority and is worth confirming anyway."
+      },
+      "positive_example": "class C { async void M() { await G(); } }\n",
+      "negative_example": "class C { async System.Threading.Tasks.Task M() { await G(); } }\n",
+      "default": "yes",
+      "ast": {
+        "csharp": "((method_declaration (modifier) @m returns: (predefined_type) @r) @report (#eq? @m \"async\") (#eq? @r \"void\"))"
+      }
+    },
+    {
+      "id": "reliability.csharp.identical-if-branches",
+      "profile": "reliability",
+      "language": "csharp",
+      "engine": "ast",
+      "severity": "warning",
+      "concept_source": {
+        "project": "concept: SonarSource S1871",
+        "rule": "identical branches",
+        "license": "SONAR Source-Available License v1.0 (non-OSI; upstream repo now private)",
+        "use": "concept",
+        "text_taken": false
+      },
+      "expected_noise": {
+        "level": "low",
+        "reason": "Byte-identical block text on both arms."
+      },
+      "positive_example": "class C { int M(bool c) { if (c) { return 1; } else { return 1; } } }\n",
+      "negative_example": "class C { int M(bool c) { if (c) { return 1; } else { return 2; } } }\n",
+      "default": "yes",
+      "ast": {
+        "csharp": "((if_statement consequence: (block) @a alternative: (block) @b) @report (#eq? @a @b))"
+      }
+    },
+    {
+      "id": "reliability.csharp.unreachable-after-return",
+      "profile": "reliability",
+      "language": "csharp",
+      "engine": "ast",
+      "severity": "warning",
+      "concept_source": {
+        "project": "roslyn",
+        "rule": "CS0162 unreachable code detected (concept)",
+        "license": "MIT",
+        "use": "concept",
+        "text_taken": false
+      },
+      "expected_noise": {
+        "level": "low",
+        "reason": "A statement directly after `return` in the same block is dead; Roslyn warns about it too."
+      },
+      "positive_example": "class C { int M() { return 1; G(); } }\n",
+      "negative_example": "class C { int M() { G(); return 1; } }\n",
+      "default": "yes",
+      "ast": {
+        "csharp": "(block (return_statement) . (_) @report)"
+      }
+    },
+    {
+      "id": "maintainability.csharp.empty-method-body",
+      "profile": "maintainability",
+      "language": "csharp",
+      "engine": "ast",
+      "severity": "info",
+      "concept_source": {
+        "project": "siloscan",
+        "rule": "original",
+        "license": "MIT (this repository)",
+        "use": "original",
+        "text_taken": false
+      },
+      "expected_noise": {
+        "level": "medium",
+        "reason": "Empty bodies are the normal spelling of a virtual hook and of an interface no-op implementation."
+      },
+      "positive_example": "class C { void M() {} }\n",
+      "negative_example": "class C { void M() { G(); } }\n",
+      "default": "no",
+      "ast": {
+        "csharp": "(method_declaration body: (block \"{\" . \"}\") @report)"
+      }
+    },
+    {
+      "id": "maintainability.csharp.console-write",
+      "profile": "maintainability",
+      "language": "csharp",
+      "engine": "ast",
+      "severity": "info",
+      "concept_source": {
+        "project": "siloscan",
+        "rule": "original",
+        "license": "MIT (this repository)",
+        "use": "original",
+        "text_taken": false
+      },
+      "expected_noise": {
+        "level": "high",
+        "reason": "Fires on every console application's own output."
+      },
+      "positive_example": "class C { void M() { System.Console.WriteLine(\"x\"); } }\n",
+      "negative_example": "class C { void M() { _log.Info(\"x\"); } }\n",
+      "default": "no",
+      "ast": {
+        "csharp": "((invocation_expression function: (member_access_expression name: (identifier) @report) (#match? @report \"^Write(Line)?$\")))"
+      },
+      "notes": "Rejected for the launch set on noise."
+    },
+    {
+      "id": "reliability.ruby.rescue-exception",
+      "profile": "reliability",
+      "language": "ruby",
+      "engine": "ast",
+      "severity": "warning",
+      "concept_source": {
+        "project": "rubocop",
+        "rule": "Lint/RescueException",
+        "license": "MIT (source tree; docs are CC BY-SA 4.0)",
+        "use": "concept",
+        "text_taken": false
+      },
+      "expected_noise": {
+        "level": "low",
+        "reason": "`rescue Exception` catches `SignalException` and `NoMemoryError`; the constant must be exactly `Exception`, so `rescue StandardError` does not match."
+      },
+      "positive_example": "def f\n  g\nrescue Exception => e\n  h(e)\nend\n",
+      "negative_example": "def f\n  g\nrescue StandardError => e\n  h(e)\nend\n",
+      "default": "yes",
+      "ast": {
+        "ruby": "((rescue exceptions: (exceptions (constant) @report) (#eq? @report \"Exception\")))"
+      }
+    },
+    {
+      "id": "reliability.ruby.rescue-modifier",
+      "profile": "reliability",
+      "language": "ruby",
+      "engine": "ast",
+      "severity": "warning",
+      "concept_source": {
+        "project": "rubocop",
+        "rule": "Style/RescueModifier",
+        "license": "MIT (source tree; docs are CC BY-SA 4.0)",
+        "use": "concept",
+        "text_taken": false
+      },
+      "expected_noise": {
+        "level": "low",
+        "reason": "The `expr rescue fallback` modifier swallows every StandardError with no way to see which; it has one syntactic form and no legitimate variant."
+      },
+      "positive_example": "def f\n  x = g rescue nil\n  x\nend\n",
+      "negative_example": "def f\n  begin\n    g\n  rescue StandardError\n    nil\n  end\nend\n",
+      "default": "yes",
+      "ast": {
+        "ruby": "(rescue_modifier) @report"
+      }
+    },
+    {
+      "id": "reliability.ruby.self-comparison",
+      "profile": "reliability",
+      "language": "ruby",
+      "engine": "ast",
+      "severity": "error",
+      "concept_source": {
+        "project": "rubocop",
+        "rule": "Lint/BinaryOperatorWithIdenticalOperands",
+        "license": "MIT (source tree; docs are CC BY-SA 4.0)",
+        "use": "concept",
+        "text_taken": false
+      },
+      "expected_noise": {
+        "level": "low",
+        "reason": "Both operands are the same identifier token."
+      },
+      "positive_example": "def f(a)\n  a == a\nend\n",
+      "negative_example": "def f(a, b)\n  a == b\nend\n",
+      "default": "yes",
+      "ast": {
+        "ruby": "((binary left: (identifier) @l operator: \"==\" right: (identifier) @r) @report (#eq? @l @r))"
+      }
+    },
+    {
+      "id": "reliability.ruby.self-assignment",
+      "profile": "reliability",
+      "language": "ruby",
+      "engine": "ast",
+      "severity": "error",
+      "concept_source": {
+        "project": "rubocop",
+        "rule": "Lint/SelfAssignment",
+        "license": "MIT (source tree; docs are CC BY-SA 4.0)",
+        "use": "concept",
+        "text_taken": false
+      },
+      "expected_noise": {
+        "level": "low",
+        "reason": "`a = a` is a no-op; `@a = a` is a different node and is excluded."
+      },
+      "positive_example": "def f(a)\n  a = a\n  a\nend\n",
+      "negative_example": "def f(a)\n  @a = a\n  @a\nend\n",
+      "default": "yes",
+      "ast": {
+        "ruby": "((assignment left: (identifier) @l right: (identifier) @r) @report (#eq? @l @r))"
+      }
+    },
+    {
+      "id": "reliability.ruby.assignment-in-condition",
+      "profile": "reliability",
+      "language": "ruby",
+      "engine": "ast",
+      "severity": "warning",
+      "concept_source": {
+        "project": "rubocop",
+        "rule": "Lint/AssignmentInCondition",
+        "license": "MIT (source tree; docs are CC BY-SA 4.0)",
+        "use": "concept",
+        "text_taken": false
+      },
+      "expected_noise": {
+        "level": "low",
+        "reason": "Ruby's own parser warns about this; the deliberate form is written with explicit parentheses around the assignment, which is a different node."
+      },
+      "positive_example": "def f(a, b)\n  if a = b\n    a\n  end\nend\n",
+      "negative_example": "def f(a, b)\n  if a == b\n    a\n  end\nend\n",
+      "default": "yes",
+      "ast": {
+        "ruby": "(if condition: (assignment) @report)"
+      }
+    },
+    {
+      "id": "reliability.ruby.identical-if-branches",
+      "profile": "reliability",
+      "language": "ruby",
+      "engine": "ast",
+      "severity": "warning",
+      "concept_source": {
+        "project": "rubocop",
+        "rule": "Lint/DuplicateBranch",
+        "license": "MIT (source tree; docs are CC BY-SA 4.0)",
+        "use": "concept",
+        "text_taken": false
+      },
+      "expected_noise": {
+        "level": "low",
+        "reason": "Compares the single statement of each arm byte for byte; multi-statement arms are not compared at all, which keeps the rule conservative."
+      },
+      "positive_example": "def f(c)\n  if c\n    1\n  else\n    1\n  end\nend\n",
+      "negative_example": "def f(c)\n  if c\n    1\n  else\n    2\n  end\nend\n",
+      "default": "yes",
+      "ast": {
+        "ruby": "((if consequence: (then . (_) @a .) alternative: (else . (_) @b .)) @report (#eq? @a @b))"
+      }
+    },
+    {
+      "id": "reliability.ruby.unreachable-after-return",
+      "profile": "reliability",
+      "language": "ruby",
+      "engine": "ast",
+      "severity": "warning",
+      "concept_source": {
+        "project": "rubocop",
+        "rule": "Lint/UnreachableCode",
+        "license": "MIT (source tree; docs are CC BY-SA 4.0)",
+        "use": "concept",
+        "text_taken": false
+      },
+      "expected_noise": {
+        "level": "low",
+        "reason": "A statement directly after `return` in the same body is dead."
+      },
+      "positive_example": "def f\n  return 1\n  g\nend\n",
+      "negative_example": "def f\n  g\n  return 1\nend\n",
+      "default": "yes",
+      "ast": {
+        "ruby": "(body_statement (return) . (_) @report)"
+      }
+    },
+    {
+      "id": "reliability.ruby.ensure-return",
+      "profile": "reliability",
+      "language": "ruby",
+      "engine": "ast",
+      "severity": "error",
+      "concept_source": {
+        "project": "rubocop",
+        "rule": "Lint/EnsureReturn",
+        "license": "MIT (source tree; docs are CC BY-SA 4.0)",
+        "use": "concept",
+        "text_taken": false
+      },
+      "expected_noise": {
+        "level": "low",
+        "reason": "A `return` inside `ensure` discards the pending exception; there is no correct program with this shape."
+      },
+      "positive_example": "def f\n  g\nensure\n  return 1\nend\n",
+      "negative_example": "def f\n  g\nensure\n  h\nend\n",
+      "default": "yes",
+      "ast": {
+        "ruby": "(ensure (return) @report)"
+      }
+    },
+    {
+      "id": "maintainability.ruby.puts-in-library",
+      "profile": "maintainability",
+      "language": "ruby",
+      "engine": "ast",
+      "severity": "info",
+      "concept_source": {
+        "project": "siloscan",
+        "rule": "original",
+        "license": "MIT (this repository)",
+        "use": "original",
+        "text_taken": false
+      },
+      "expected_noise": {
+        "level": "high",
+        "reason": "Fires on every rake task and script; Ruby CLI code is written with `puts`."
+      },
+      "positive_example": "def f\n  puts 'x'\nend\n",
+      "negative_example": "def f\n  logger.info('x')\nend\n",
+      "default": "no",
+      "ast": {
+        "ruby": "((call method: (identifier) @report (#match? @report \"^(puts|print|p)$\")))"
+      },
+      "notes": "Rejected for the launch set on noise."
+    }
+  ]
+}

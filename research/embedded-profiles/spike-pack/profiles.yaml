@@ -1,0 +1,71 @@
+# THROWAWAY SPIKE PACK for issue #78. Not a proposed rule matrix.
+#
+# Ten ast rules for the one language the frozen scale tree contains (Rust),
+# written to look like a reliability/maintainability profile so the per-file
+# cost measured with them is the cost a real profile would carry: one parse
+# per file plus ten query runs over the resulting tree.
+#
+# The rule matrix is somebody else's ticket. Nothing here is a recommendation.
+version: 1
+rules:
+  - id: spike.rust.unwrap-call
+    severity: warning
+    message: unwrap panics on the error path
+    ast:
+      rust: '(call_expression function: (field_expression field: (field_identifier) @report (#eq? @report "unwrap")))'
+
+  - id: spike.rust.expect-call
+    severity: info
+    message: expect panics on the error path
+    ast:
+      rust: '(call_expression function: (field_expression field: (field_identifier) @report (#eq? @report "expect")))'
+
+  - id: spike.rust.panic-macro
+    severity: warning
+    message: panic aborts the caller
+    ast:
+      rust: '(macro_invocation macro: (identifier) @report (#eq? @report "panic"))'
+
+  - id: spike.rust.todo-macro
+    severity: info
+    message: unfinished code path
+    ast:
+      rust: |
+        (macro_invocation macro: (identifier) @report (#eq? @report "todo"))
+        (macro_invocation macro: (identifier) @report (#eq? @report "unimplemented"))
+
+  - id: spike.rust.dbg-macro
+    severity: warning
+    message: leftover debugging macro
+    ast:
+      rust: '(macro_invocation macro: (identifier) @report (#eq? @report "dbg"))'
+
+  - id: spike.rust.numeric-cast
+    severity: info
+    message: unchecked numeric cast
+    ast:
+      rust: '(type_cast_expression) @report'
+
+  - id: spike.rust.allow-attribute
+    severity: info
+    message: a lint is switched off here
+    ast:
+      rust: '(attribute_item (attribute (identifier) @report (#eq? @report "allow")))'
+
+  - id: spike.rust.unsafe-block
+    severity: warning
+    message: unsafe block
+    ast:
+      rust: '(unsafe_block) @report'
+
+  - id: spike.rust.match-arm-count
+    severity: info
+    message: match arm
+    ast:
+      rust: '(match_arm) @report'
+
+  - id: spike.rust.parameter-list
+    severity: info
+    message: parameter list
+    ast:
+      rust: '(function_item parameters: (parameters) @report)'
