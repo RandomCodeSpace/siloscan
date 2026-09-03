@@ -35,21 +35,21 @@ reliability.java.self-comparison	0	0.000000	2026-09-03	#78 P4b: no finding on co
 reliability.java.string-literal-identity	0	0.000000	2026-09-03	#78 P4b: no finding on commons-lang, gson or guava
 maintainability.c.cyclomatic-complexity	0	0.775134	2026-09-03	#78 P4b: max of curl 0.7751, jq 0.7284, redis 0.7033
 maintainability.c.function-length	0	0.819428	2026-09-03	#78 P4b: max of curl 0.8194, jq 0.7867, redis 0.7365
-maintainability.c.nesting-depth	0	0.709973	2026-09-03	#78 P4b: max of curl 0.6699, jq 0.5245, redis 0.7100
-maintainability.c.parameter-count	0	0.272046	2026-09-03	#78 P4b: max of curl 0.1882, jq 0.1457, redis 0.2720
+maintainability.c.nesting-depth	0	0.710506	2026-09-03	#98 D1: max of curl 0.6699, jq 0.5245, redis 0.7105; re-measured after the .h fix moved two Qt C++ headers out of redis' own-language denominator
+maintainability.c.parameter-count	0	0.272250	2026-09-03	#98 D1: max of curl 0.1882, jq 0.1457, redis 0.2722; re-measured after the .h fix moved two Qt C++ headers out of redis' own-language denominator
 reliability.c.assignment-in-condition	0	0.495324	2026-09-03	#78 P4b: max of curl 0.0000, jq 0.4953, redis 0.0000
-reliability.c.identical-if-branches	0	0.006636	2026-09-03	#78 P4b: max of curl 0.0000, jq 0.0000, redis 0.0066
-reliability.c.self-assignment	0	0.006636	2026-09-03	#78 P4b: max of curl 0.0000, jq 0.0000, redis 0.0066
+reliability.c.identical-if-branches	0	0.006641	2026-09-03	#98 D1: max of curl 0.0000, jq 0.0000, redis 0.0066; re-measured after the .h fix moved two Qt C++ headers out of redis' own-language denominator
+reliability.c.self-assignment	0	0.006641	2026-09-03	#98 D1: max of curl 0.0000, jq 0.0000, redis 0.0066; re-measured after the .h fix moved two Qt C++ headers out of redis' own-language denominator
 reliability.c.self-comparison	0	0.000000	2026-09-03	#78 P4b: no finding on curl, jq or redis
 reliability.c.string-literal-comparison	0	0.000000	2026-09-03	#78 P4b: no finding on curl, jq or redis
-maintainability.cpp.cyclomatic-complexity	0	0.699092	2026-09-03	#78 P4b: max of abseil-cpp 0.1866, fmt 0.0562, nlohmann/json 0.6991
-maintainability.cpp.nesting-depth	0	0.224619	2026-09-03	#78 P4b: max of abseil-cpp 0.1054, fmt 0.2246, nlohmann/json 0.2197
-maintainability.cpp.parameter-count	0	0.056155	2026-09-03	#78 P4b: max of abseil-cpp 0.0243, fmt 0.0562, nlohmann/json 0.0399
-maintainability.cpp.using-namespace-in-header	0	0.000000	2026-09-03	#78 P4b: no finding on abseil-cpp, fmt or nlohmann/json
-reliability.cpp.assignment-in-condition	0	0.000000	2026-09-03	#78 P4b: no finding on abseil-cpp, fmt or nlohmann/json
-reliability.cpp.empty-if-body	0	0.000000	2026-09-03	#78 P4b: no finding on abseil-cpp, fmt or nlohmann/json
-reliability.cpp.identical-if-branches	0	0.000000	2026-09-03	#78 P4b: no finding on abseil-cpp, fmt or nlohmann/json
-reliability.cpp.self-assignment	0	0.000000	2026-09-03	#78 P4b: no finding on abseil-cpp, fmt or nlohmann/json
+maintainability.cpp.cyclomatic-complexity	0	0.694928	2026-09-03	#98 D1: max of fmt 0.2048, nlohmann/json 0.6949, abseil-cpp 0.1479; re-measured with C++ headers detected as C++; the landing measurement read every .h as C
+maintainability.cpp.nesting-depth	0	0.244164	2026-09-03	#98 D1: max of fmt 0.1820, nlohmann/json 0.2442, abseil-cpp 0.0828; re-measured with C++ headers detected as C++; the landing measurement read every .h as C
+maintainability.cpp.parameter-count	0	0.091009	2026-09-03	#98 D1: max of fmt 0.0910, nlohmann/json 0.0470, abseil-cpp 0.0710; re-measured with C++ headers detected as C++; the landing measurement read every .h as C
+maintainability.cpp.using-namespace-in-header	0	0.065737	2026-09-03	#98 D1: max of fmt 0.0455, nlohmann/json 0.0657, abseil-cpp 0.0000; re-measured with C++ headers detected as C++; the landing measurement read every .h as C
+reliability.cpp.assignment-in-condition	0	0.000000	2026-09-03	#98 D1: no finding on fmt, nlohmann/json or abseil-cpp; re-measured with C++ headers detected as C++; the landing measurement read every .h as C
+reliability.cpp.empty-if-body	0	0.011835	2026-09-03	#98 D1: max of fmt 0.0000, nlohmann/json 0.0000, abseil-cpp 0.0118; re-measured with C++ headers detected as C++; the landing measurement read every .h as C
+reliability.cpp.identical-if-branches	0	0.000000	2026-09-03	#98 D1: no finding on fmt, nlohmann/json or abseil-cpp; re-measured with C++ headers detected as C++; the landing measurement read every .h as C
+reliability.cpp.self-assignment	0	0.000000	2026-09-03	#98 D1: no finding on fmt, nlohmann/json or abseil-cpp; re-measured with C++ headers detected as C++; the landing measurement read every .h as C
 maintainability.csharp.cyclomatic-complexity	0	0.384109	2026-09-03	#78 P4b: max of AutoMapper 0.0208, Dapper 0.2483, Newtonsoft.Json 0.3841
 maintainability.csharp.function-length	0	0.361514	2026-09-03	#78 P4b: max of AutoMapper 0.0416, Dapper 0.3476, Newtonsoft.Json 0.3615
 maintainability.csharp.nesting-depth	0	0.248263	2026-09-03	#78 P4b: max of AutoMapper 0.0000, Dapper 0.2483, Newtonsoft.Json 0.1958
