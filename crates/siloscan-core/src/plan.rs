@@ -71,11 +71,16 @@ enum InvocationKind {
     Explicit,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum CacheRequest {
-    Default,
-    Disabled,
-    Directory(PathBuf),
+/// What the caller said about the cache.
+///
+/// Two independent answers, not one: `--no-cache` decides whether to cache and
+/// `--cache-dir` decides where. Collapsing them into one slot would make the
+/// pair order-dependent, so `--no-cache --cache-dir x` would open a cache while
+/// `--cache-dir x --no-cache` would not. v1 checks disabled first, always.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+struct CacheRequest {
+    disabled: bool,
+    dir: Option<PathBuf>,
 }
 
 /// The name each explicit option is recorded under in
@@ -141,7 +146,7 @@ impl ScanRequest {
             no_embedded_rules: false,
             baseline: None,
             coverage: None,
-            cache: CacheRequest::Default,
+            cache: CacheRequest::default(),
             ignore: IgnoreOptions::default(),
             follow_symlinks: false,
             explicit_overrides: BTreeSet::new(),
@@ -179,17 +184,17 @@ impl ScanRequest {
         self.record(OVERRIDE_COVERAGE_REPORT)
     }
 
-    /// Run without a cache.
+    /// Run without a cache. Wins over [`ScanRequest::with_cache_dir`] whichever
+    /// order the two are called in: disabling is a decision about whether to
+    /// cache, not about where.
     pub fn without_cache(mut self) -> Self {
-        self.cache = CacheRequest::Disabled;
+        self.cache.disabled = true;
         self.record(OVERRIDE_NO_CACHE)
     }
 
-    /// Keep cache entries in `path` instead of the default location. A later
-    /// [`ScanRequest::without_cache`] still wins: disabling is a decision about
-    /// whether to cache, not about where.
+    /// Keep cache entries in `path` instead of the default location.
     pub fn with_cache_dir(mut self, path: PathBuf) -> Self {
-        self.cache = CacheRequest::Directory(path);
+        self.cache.dir = Some(path);
         self.record(OVERRIDE_CACHE_DIR)
     }
 
@@ -341,7 +346,7 @@ impl ResolvedScanPlan {
                 config: config.is_some(),
                 baseline: baseline.is_some(),
                 coverage: coverage.is_some(),
-                cache: cache.is_some(),
+                cache: cache_state(&cache),
             },
         );
 
@@ -577,7 +582,29 @@ struct Loaded {
     config: bool,
     baseline: bool,
     coverage: bool,
-    cache: bool,
+    cache: CapabilityState,
+}
+
+/// The `cache` capability, which has three answers rather than two.
+///
+/// A cache the caller turned off is skipped. A cache that opened but has
+/// nowhere to live, or whose directory this crate refused, is unavailable: the
+/// scan is correct and permanently cold, and a report that called that
+/// `enabled` would be describing a warm run that never happens.
+fn cache_state(cache: &Option<Cache>) -> CapabilityState {
+    match cache {
+        None => CapabilityState::not_enabled(
+            "cache",
+            CapabilityStatus::Skipped,
+            "the cache is disabled for this scan",
+        ),
+        Some(cache) => match cache.inert_reason() {
+            Some(reason) => {
+                CapabilityState::not_enabled("cache", CapabilityStatus::Unavailable, reason)
+            }
+            None => CapabilityState::enabled("cache"),
+        },
+    }
 }
 
 impl ScanSetupReport {
@@ -590,12 +617,7 @@ impl ScanSetupReport {
         loaded: Loaded,
     ) -> Self {
         let mut capabilities = vec![
-            state(
-                "cache",
-                loaded.cache,
-                CapabilityStatus::Skipped,
-                "the cache is disabled for this scan",
-            ),
+            loaded.cache,
             state(
                 "coverage",
                 loaded.coverage,
@@ -684,19 +706,35 @@ fn rule_sources(root: &Path, rules: &RuleSet) -> Vec<RuleSource> {
 }
 
 /// A rule file's report identity: its path from the scan root when it is
-/// inside the tree being scanned, and its file name when it is not.
+/// inside the tree being scanned, and its last two path components when it is
+/// not.
 ///
 /// The loader records the path it opened, which on a `--rules /abs/dir` run is
 /// absolute and names the machine it ran on. Neither belongs in a report that
 /// has to compare equal across two checkouts.
+///
+/// Both sides are canonicalised before the strip, because the spelling of the
+/// root is the caller's and the report is not allowed to depend on it: `.` and
+/// `/abs/repo` name one tree and have to produce one document. The fallback
+/// keeps the directory as well as the file name, so two rule directories each
+/// holding a `rules.yaml` stay distinguishable.
 fn rule_source_id(root: &Path, origin: &str) -> String {
     let path = Path::new(origin);
-    let relative = path
-        .strip_prefix(root)
-        .ok()
-        .or_else(|| path.file_name().map(Path::new))
-        .unwrap_or(path);
-    join_slashes(relative)
+    let canonical = |path: &Path| path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let (root, absolute) = (canonical(root), canonical(path));
+
+    match absolute.strip_prefix(&root) {
+        Ok(relative) => join_slashes(relative),
+        Err(_) => {
+            let tail: Vec<String> = absolute
+                .components()
+                .rev()
+                .take(2)
+                .map(|component| component.as_os_str().to_string_lossy().into_owned())
+                .collect();
+            tail.into_iter().rev().collect::<Vec<String>>().join("/")
+        }
+    }
 }
 
 fn join_slashes(path: &Path) -> String {
@@ -985,14 +1023,16 @@ fn open_cache(
     request: &CacheRequest,
     anchoring: &Anchoring,
 ) -> Option<Cache> {
-    if matches!(request, CacheRequest::Disabled) {
+    // Disabled first and unconditionally, as v1 does: a request that names a
+    // directory and also asks for no cache gets no cache.
+    if request.disabled {
         return None;
     }
     let scope = PathScope::new(anchoring.anchor(), anchoring.prefix());
     let state = state_root(root);
-    Some(match request {
-        CacheRequest::Directory(dir) => Cache::open_in(dir, &state, rules, &scope),
-        _ => Cache::open(&state, rules, &scope),
+    Some(match &request.dir {
+        Some(dir) => Cache::open_in(dir, &state, rules, &scope),
+        None => Cache::open(&state, rules, &scope),
     })
 }
 

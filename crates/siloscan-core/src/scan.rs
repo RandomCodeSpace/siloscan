@@ -332,14 +332,7 @@ pub fn scan_opts(
     options: &ScanOptions,
     on_progress: &mut dyn FnMut(Progress),
 ) -> Result<ScanReport, String> {
-    let silo_sets = boundary_setup(root, rules, options.config)?;
-    duplication_setup(root, rules, options.config)?;
-    // A coverage rule with no report to read produces no findings, which is
-    // indistinguishable from a passing gate. Refused here rather than in the
-    // CLI so that every caller - the CLI, the TUI, a library consumer - gets
-    // the same refusal from the one place that knows both the rules and the
-    // report.
-    crate::coverage::require_report(&rules.rules, options.coverage)?;
+    let silo_sets = prepared_setup(root, rules, options.config, options.coverage)?;
     // Derived from the scan root and the config alone, so a caller that resolved
     // it separately - to key a cache, or to label a report - resolved the same
     // value. There is no way for the two to disagree.
@@ -526,6 +519,11 @@ pub(crate) fn prepared_setup(
 ) -> Result<Option<Vec<(String, GlobSet)>>, String> {
     let silo_sets = boundary_setup(root, rules, config)?;
     duplication_setup(root, rules, config)?;
+    // A coverage rule with no report to read produces no findings, which is
+    // indistinguishable from a passing gate. Refused here rather than in the
+    // CLI so that every caller - the CLI, the TUI, a library consumer - gets
+    // the same refusal from the one place that knows both the rules and the
+    // report.
     crate::coverage::require_report(&rules.rules, coverage)?;
     Ok(silo_sets)
 }

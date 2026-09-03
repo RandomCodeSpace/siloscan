@@ -18,6 +18,7 @@ pub enum DetectionStatus {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[non_exhaustive]
 pub struct Evidence {
     pub ecosystem: String,
     pub kind: String,
@@ -29,6 +30,7 @@ pub struct Evidence {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[non_exhaustive]
 pub struct ProjectUnit {
     pub ecosystem: String,
     pub kind: String,
@@ -37,6 +39,7 @@ pub struct ProjectUnit {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[non_exhaustive]
 pub struct WorkspaceRelation {
     pub ecosystem: String,
     pub kind: String,
@@ -49,6 +52,7 @@ pub struct WorkspaceRelation {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[non_exhaustive]
 pub struct SourceRootHint {
     pub ecosystem: String,
     pub kind: String,
@@ -360,7 +364,10 @@ fn parse_go_work(content: &str) -> Result<(String, Vec<String>), String> {
     let mut go_versions = Vec::new();
     let mut uses = Vec::new();
     let mut in_use_block = false;
-    for line in content.lines() {
+    // Positions, never the text. The line is manifest content, and a reason
+    // that quotes it puts that content in the setup report.
+    for (index, line) in content.lines().enumerate() {
+        let number = index + 1;
         let line = line.split_once("//").map(|(line, _)| line).unwrap_or(line);
         let line = line.trim();
         if line.is_empty() {
@@ -372,7 +379,7 @@ fn parse_go_work(content: &str) -> Result<(String, Vec<String>), String> {
                 continue;
             }
             if line == "(" || line.contains(char::is_whitespace) {
-                return Err(format!("invalid go.work use entry {line:?}"));
+                return Err(format!("invalid go.work use entry at line {number}"));
             }
             uses.push(unquote(line));
             continue;
@@ -391,7 +398,7 @@ fn parse_go_work(content: &str) -> Result<(String, Vec<String>), String> {
             Some("use") => match fields.next() {
                 Some("(") if fields.next().is_none() => in_use_block = true,
                 Some(path) if fields.next().is_none() => uses.push(unquote(path)),
-                _ => return Err(format!("invalid go.work use directive {line:?}")),
+                _ => return Err(format!("invalid go.work use directive at line {number}")),
             },
             Some("toolchain" | "replace") => {}
             Some(_) | None => {}
@@ -457,7 +464,7 @@ fn detect_javascript(inventory: &Inventory, facts: &mut ProjectFacts) {
                         path,
                         root,
                         object: None,
-                        problem: Some((DetectionStatus::Invalid, bounded(error.to_string()))),
+                        problem: Some((DetectionStatus::Invalid, json_reason(&error))),
                     },
                 },
             }
@@ -600,7 +607,7 @@ fn detect_python(inventory: &Inventory, facts: &mut ProjectFacts) {
                         path,
                         root,
                         value: None,
-                        problem: Some((DetectionStatus::Invalid, bounded(error.to_string()))),
+                        problem: Some((DetectionStatus::Invalid, toml_reason(&content, &error))),
                     },
                 },
             }
@@ -774,7 +781,7 @@ fn detect_maven(inventory: &Inventory, facts: &mut ProjectFacts) {
                         path,
                         root,
                         content: None,
-                        problem: Some((DetectionStatus::Invalid, bounded(error.to_string()))),
+                        problem: Some((DetectionStatus::Invalid, xml_reason(&error))),
                     },
                     Ok(document) if document.root_element().tag_name().name() != "project" => {
                         XmlDocument {
@@ -1237,7 +1244,7 @@ fn detect_dotnet(inventory: &Inventory, facts: &mut ProjectFacts) {
             Ok(content) => match roxmltree::Document::parse(&content) {
                 Err(error) => {
                     evidence.status = DetectionStatus::Invalid;
-                    evidence.reasons.push(bounded(error.to_string()));
+                    evidence.reasons.push(xml_reason(&error));
                 }
                 Ok(document) if document.root_element().tag_name().name() != "Project" => {
                     evidence.status = DetectionStatus::Invalid;
@@ -1349,13 +1356,17 @@ fn parse_sln(content: &str) -> Result<Vec<String>, String> {
         return Err("solution header is missing".into());
     }
     let mut projects = Vec::new();
-    for line in content.lines().filter(|line| line.starts_with("Project(")) {
+    for (index, line) in content.lines().enumerate() {
+        if !line.starts_with("Project(") {
+            continue;
+        }
+        let number = index + 1;
         let (_, fields) = line
             .split_once('=')
-            .ok_or_else(|| format!("invalid solution project line {line:?}"))?;
+            .ok_or_else(|| format!("invalid solution project line {number}"))?;
         let fields: Vec<&str> = fields.split(',').map(str::trim).collect();
         if fields.len() < 3 {
-            return Err(format!("invalid solution project line {line:?}"));
+            return Err(format!("invalid solution project line {number}"));
         }
         let path = fields[1].trim_matches('"');
         if path.to_ascii_lowercase().ends_with(".csproj") {
@@ -1366,8 +1377,7 @@ fn parse_sln(content: &str) -> Result<Vec<String>, String> {
 }
 
 fn parse_slnx(content: &str) -> Result<Vec<String>, String> {
-    let document =
-        roxmltree::Document::parse(content).map_err(|error| bounded(error.to_string()))?;
+    let document = roxmltree::Document::parse(content).map_err(|error| xml_reason(&error))?;
     if document.root_element().tag_name().name() != "Solution" {
         return Err(".slnx root element must be Solution".into());
     }
@@ -1546,7 +1556,7 @@ fn detect_cargo(inventory: &Inventory, facts: &mut ProjectFacts) {
                         path,
                         root,
                         value: None,
-                        problem: Some((DetectionStatus::Invalid, bounded(error.to_string()))),
+                        problem: Some((DetectionStatus::Invalid, toml_reason(&content, &error))),
                     },
                 },
             }
@@ -2199,12 +2209,54 @@ fn resolve_relative(base: &str, declared: &str) -> Result<String, &'static str> 
     })
 }
 
-fn bounded(mut message: String) -> String {
-    const LIMIT: usize = 240;
-    if message.len() > LIMIT {
-        message.truncate(LIMIT);
+/// Where a parser stopped, and nothing else.
+///
+/// A parser's own `Display` quotes the line it failed on, which would put
+/// manifest text into the setup report and into every saved report built from
+/// it. A position says as much about what to fix and carries none of the file.
+fn toml_reason(content: &str, error: &toml::de::Error) -> String {
+    match error.span() {
+        Some(span) => {
+            let (line, column) = line_column(content, span.start);
+            format!("invalid TOML at line {line}, column {column}")
+        }
+        None => "invalid TOML".to_string(),
     }
-    message
+}
+
+fn json_reason(error: &serde_json::Error) -> String {
+    format!(
+        "invalid JSON at line {}, column {}",
+        error.line(),
+        error.column()
+    )
+}
+
+fn xml_reason(error: &roxmltree::Error) -> String {
+    let position = error.pos();
+    format!(
+        "invalid XML at line {}, column {}",
+        position.row, position.col
+    )
+}
+
+/// One-based line and column of `offset` in `content`, counting characters
+/// rather than bytes so a non-ASCII line reports a usable column.
+fn line_column(content: &str, offset: usize) -> (usize, usize) {
+    let mut end = offset.min(content.len());
+    while end > 0 && !content.is_char_boundary(end) {
+        end -= 1;
+    }
+    let head = &content[..end];
+    let line = head.matches('\n').count() + 1;
+    let column = head
+        .rsplit_once('\n')
+        .map(|(_, tail)| tail)
+        .unwrap_or(head)
+        .chars()
+        .count()
+        + 1;
+    (line, column)
 }
 
 #[cfg(test)]
