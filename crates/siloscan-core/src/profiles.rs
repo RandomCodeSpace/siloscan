@@ -81,6 +81,11 @@ pub const REGISTRY: &[Profile] = &[
         include_str!("../rules/profiles/maintainability-java.yaml"),
     ),
     Profile::new(
+        "maintainability-ruby@1",
+        "ruby",
+        include_str!("../rules/profiles/maintainability-ruby.yaml"),
+    ),
+    Profile::new(
         "reliability-c@1",
         "c",
         include_str!("../rules/profiles/reliability-c.yaml"),
@@ -99,6 +104,11 @@ pub const REGISTRY: &[Profile] = &[
         "reliability-java@1",
         "java",
         include_str!("../rules/profiles/reliability-java.yaml"),
+    ),
+    Profile::new(
+        "reliability-ruby@1",
+        "ruby",
+        include_str!("../rules/profiles/reliability-ruby.yaml"),
     ),
 ];
 
@@ -213,7 +223,10 @@ mod tests {
         let identities: Vec<&str> = REGISTRY.iter().map(Profile::identity).collect();
         let mut sorted = identities.clone();
         sorted.sort_unstable();
-        assert_eq!(identities, sorted, "the registry is not ordered by identity");
+        assert_eq!(
+            identities, sorted,
+            "the registry is not ordered by identity"
+        );
     }
 
     #[test]

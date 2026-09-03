@@ -79,3 +79,19 @@ csharp/negative.cs	2	NONE	the operands are different identifiers, which is an or
 csharp/negative.cs	3	NONE	a bare throw rethrows and keeps the stack trace
 csharp/negative.cs	4	NONE	the method returns Task, so a fault reaches whoever awaits it
 csharp/negative.cs	5	NONE	the two arms return different values, so the condition decides something
+ruby/positive.rb	3	reliability.ruby.rescue-exception	rescuing Exception catches SignalException and NoMemoryError as well
+ruby/positive.rb	7	reliability.ruby.rescue-modifier	the modifier swallows every StandardError with no way to see which
+ruby/positive.rb	11	reliability.ruby.self-assignment	the assignment writes `a` to itself and has no effect
+ruby/positive.rb	15	reliability.ruby.identical-if-branches	both arms are the byte-identical single statement `1`
+ruby/positive.rb	24	reliability.ruby.ensure-return	the return in ensure discards the exception on its way out
+ruby/negative.rb	3	NONE	StandardError is the correct rescue and is a different constant
+ruby/negative.rb	9	NONE	an explicit begin/rescue is not the modifier form
+ruby/negative.rb	14	NONE	`@a = a` assigns the parameter to an instance variable, which is a different node
+ruby/negative.rb	18	NONE	the two arms evaluate to different values, so the condition decides something
+ruby/negative.rb	27	NONE	the ensure calls h rather than returning, so no exception is discarded
+ruby/metric-over.rb	1	maintainability.ruby.parameter-count	the method takes 8 parameters, one over the profile's 7
+ruby/metric-over.rb	4	maintainability.ruby.nesting-depth	six nested if expressions, one over the profile's 5
+ruby/metric-over.rb	19	maintainability.ruby.cyclomatic-complexity	25 branches plus the entry path is 26, one over the profile's 25
+ruby/metric-under.rb	1	NONE	seven parameters is exactly the profile's limit
+ruby/metric-under.rb	4	NONE	five nested if expressions is exactly the profile's limit
+ruby/metric-under.rb	17	NONE	24 branches plus the entry path is 25, exactly the profile's limit

@@ -59,3 +59,11 @@ reliability.csharp.empty-catch	0	0.347568	2026-09-03	#78 P4b: max of AutoMapper 
 reliability.csharp.identical-if-branches	0	0.000000	2026-09-03	#78 P4b: no finding on AutoMapper, Dapper or Newtonsoft.Json
 reliability.csharp.rethrow-loses-stack	0	0.000000	2026-09-03	#78 P4b: no finding on AutoMapper, Dapper or Newtonsoft.Json
 reliability.csharp.self-comparison	0	0.000000	2026-09-03	#78 P4b: no finding on AutoMapper, Dapper or Newtonsoft.Json
+maintainability.ruby.cyclomatic-complexity	0	0.338735	2026-09-03	#78 P4b: max of puma 0.3387, rails 0.0108, sinatra 0.0000
+maintainability.ruby.nesting-depth	0	0.112912	2026-09-03	#78 P4b: max of puma 0.1129, rails 0.0054, sinatra 0.0563
+maintainability.ruby.parameter-count	0	0.338735	2026-09-03	#78 P4b: max of puma 0.3387, rails 0.1454, sinatra 0.0000
+reliability.ruby.ensure-return	0	0.000000	2026-09-03	#78 P4b: no finding on puma, rails or sinatra
+reliability.ruby.identical-if-branches	0	0.000000	2026-09-03	#78 P4b: no finding on puma, rails or sinatra
+reliability.ruby.rescue-exception	0	0.846836	2026-09-03	#78 P4b: max of puma 0.8468, rails 0.1157, sinatra 0.2817
+reliability.ruby.rescue-modifier	0	0.846836	2026-09-03	#78 P4b: max of puma 0.8468, rails 0.3984, sinatra 0.1690
+reliability.ruby.self-assignment	0	0.010768	2026-09-03	#78 P4b: max of puma 0.0000, rails 0.0108, sinatra 0.0000
