@@ -492,10 +492,12 @@ fn an_empty_name_list_says_nothing_was_named() {
     );
 }
 
-/// The shipped registry holds no document, so `auto` on a tree the detector
-/// reads perfectly well still loads nothing.
+/// `auto` against the registry that actually ships loads the documents of the
+/// language the detector found, and nothing else. The in-test registry below
+/// proves the selection rule; this one proves the shipped documents load
+/// through the same path a user's scan takes.
 #[test]
-fn auto_against_the_shipped_registry_selects_nothing() {
+fn auto_against_the_shipped_registry_loads_the_detected_language() {
     let (tree, rules) = fixture();
     let setup = setup_of(
         &ScanRequest::explicit(tree.path())
@@ -504,6 +506,36 @@ fn auto_against_the_shipped_registry_selects_nothing() {
     );
 
     assert_eq!(setup.languages, ["rust"]);
+    assert_eq!(
+        source_ids(&setup),
+        [
+            EMBEDDED_PACK_ID,
+            "maintainability-rust@1",
+            "reliability-rust@1",
+            "rules/rules.yaml",
+        ]
+    );
+    assert_eq!(
+        capability(&setup, "profiles").status(),
+        &CapabilityStatus::Enabled
+    );
+}
+
+/// `auto` never loads a document for a language detection did not report, so a
+/// tree with no tier-1 source selects nothing however many documents ship, and
+/// says which of the two empty answers it is.
+#[test]
+fn auto_selects_nothing_when_the_tree_has_no_detected_language() {
+    let tree = tempfile::tempdir().unwrap();
+    write(tree.path(), "docs/notes.txt", "nothing to parse here\n");
+    let rules = rules_dir(tree.path(), "rules", NEEDLE_RULE);
+    let setup = setup_of(
+        &ScanRequest::explicit(tree.path())
+            .with_rule_dirs(vec![rules])
+            .with_profiles(ProfileSelection::Auto),
+    );
+
+    assert!(setup.languages.is_empty());
     assert_eq!(source_ids(&setup), [EMBEDDED_PACK_ID, "rules/rules.yaml"]);
     assert_eq!(
         capability(&setup, "profiles").status(),

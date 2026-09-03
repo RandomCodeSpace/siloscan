@@ -1,0 +1,35 @@
+# The reliability profile for typescript: one document per (profile, language)
+# pair, loaded whole or not at all. See research/embedded-profiles/design.md
+# section 1 for the packaging and the identity, and section 6 for the corpus
+# and noise gates every rule here had to pass.
+#
+# Every rule is a concept-only citation. No pattern text, query text or
+# message text is taken from any upstream project.
+#
+# There is no self-comparison rule here on purpose. `x === x` is the
+# canonical NaN test in typescript exactly as it is in javascript,
+# where the twin rule reported 215 of them on lodash and was dropped;
+# zod, rxjs and nest simply happen not to write it, which is not a
+# reason to ship a rule whose first real tree would breach it.
+version: 1
+rules:
+  - id: reliability.typescript.self-assignment
+    severity: warning
+    message: "this assignment writes a variable to itself and has no effect"
+    ast:
+      typescript: "((assignment_expression left: (identifier) @l right: (identifier) @r) @report (#eq? @l @r))"
+  - id: reliability.typescript.identical-if-branches
+    severity: warning
+    message: "both arms of this if have the same body, so the condition decides nothing"
+    ast:
+      typescript: "((if_statement consequence: (statement_block) @a alternative: (else_clause (statement_block) @b)) @report (#eq? @a @b))"
+  - id: reliability.typescript.debugger-statement
+    severity: warning
+    message: "a debugger statement halts a browser session and is not meant to be committed"
+    ast:
+      typescript: "(debugger_statement) @report"
+  - id: reliability.typescript.constant-condition
+    severity: warning
+    message: "this condition is a literal, so the branch is decided before the program runs"
+    ast:
+      typescript: "(if_statement condition: (parenthesized_expression [(true) (false)]) @report)"

@@ -1,0 +1,41 @@
+# The maintainability profile for typescript: one document per (profile, language)
+# pair, loaded whole or not at all. See research/embedded-profiles/design.md
+# section 1 for the packaging and the identity, and section 6 for the corpus
+# and noise gates every rule here had to pass.
+#
+# Every rule is a concept-only citation. No pattern text, query text or
+# message text is taken from any upstream project.
+#
+# There is no function-length rule here. It was measured at 150 lines
+# with the same test-tree exclusion the javascript document carries
+# (`**/test/**`, `**/tests/**`, `**/__tests__/**`, `**/*.test.*`,
+# `**/*.spec.*`, `**/*_test.*`) and still reported 152 findings over
+# rxjs's 73201 code lines, 2.0765 per kLOC. 150 of them sit under
+# `spec/` and `spec-dtslint/`, 148 named `*-spec.ts`, which none of
+# those globs reach; only 2 are in `src/`. Widening the exclusion until
+# one repository's naming convention fits is tuning a rule to its
+# corpus, so the rule is out. javascript keeps its own, which the same
+# exclusion brings to 0.3399 per kLOC.
+version: 1
+rules:
+  - id: maintainability.typescript.parameter-count
+    severity: info
+    message: "this function takes more parameters than the profile allows"
+    languages: [typescript]
+    metric:
+      measure: parameter-count
+      max: 7
+  - id: maintainability.typescript.nesting-depth
+    severity: info
+    message: "this function nests deeper than the profile allows"
+    languages: [typescript]
+    metric:
+      measure: nesting-depth
+      max: 5
+  - id: maintainability.typescript.cyclomatic-complexity
+    severity: info
+    message: "this function has more decision points than the profile allows"
+    languages: [typescript]
+    metric:
+      measure: cyclomatic-complexity
+      max: 25

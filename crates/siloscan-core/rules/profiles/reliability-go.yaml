@@ -1,0 +1,34 @@
+# The reliability profile for go: one document per (profile, language)
+# pair, loaded whole or not at all. See research/embedded-profiles/design.md
+# section 1 for the packaging and the identity, and section 6 for the corpus
+# and noise gates every rule here had to pass.
+#
+# Every rule is a concept-only citation. No pattern text, query text or
+# message text is taken from any upstream project.
+version: 1
+rules:
+  - id: reliability.go.self-comparison
+    severity: warning
+    message: "both operands of this comparison are the same identifier, so its result is fixed"
+    ast:
+      go: "((binary_expression left: (identifier) @l operator: \"==\" right: (identifier) @r) @report (#eq? @l @r))"
+  - id: reliability.go.self-assignment
+    severity: warning
+    message: "this assignment writes a variable to itself and has no effect"
+    ast:
+      go: "((assignment_statement left: (expression_list . (identifier) @l .) operator: \"=\" right: (expression_list . (identifier) @r .)) @report (#eq? @l @r))"
+  - id: reliability.go.append-result-discarded
+    severity: warning
+    message: "the result of append is discarded, so the appended element is lost"
+    ast:
+      go: "((expression_statement (call_expression function: (identifier) @f) @report (#eq? @f \"append\")))"
+  - id: reliability.go.defer-in-loop
+    severity: warning
+    message: "a defer inside a loop runs when the function returns, not at the end of the iteration"
+    ast:
+      go: "(for_statement body: (block (statement_list (defer_statement) @report)))"
+  - id: reliability.go.identical-if-branches
+    severity: warning
+    message: "both arms of this if have the same body, so the condition decides nothing"
+    ast:
+      go: "((if_statement consequence: (block) @a alternative: (block) @b) @report (#eq? @a @b))"

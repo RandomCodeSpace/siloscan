@@ -720,15 +720,56 @@ fn review_is_the_subcommand_when_no_such_path_exists() {
 // Embedded profiles
 // ---------------------------------------------------------------------------
 
-/// `--profiles auto` runs, and the setup report says what it found: nothing,
-/// because no profile document ships yet.
+/// `--profiles auto` runs on a tree with no detected language, and the setup
+/// report says what it found: nothing.
 ///
-/// The tree is Rust and the detector says so, so the empty answer is a fact
-/// about the registry and not about the walk. The reason has to be the one that
-/// says that; `not_configured` with no reason, or a reason blaming the request,
-/// would send a reader looking in the wrong place.
+/// `Auto` only ever loads a document for a language the detector reported, so a
+/// tree of plain text selects nothing however many documents ship. The reason
+/// has to be the one that says that; `not_configured` with no reason, or a
+/// reason blaming the request, would send a reader looking in the wrong place.
 #[test]
 fn profiles_auto_reports_a_capability_with_nothing_available_to_select() {
+    for (name, binary) in BINARIES {
+        let host = Host::new();
+        let tree = host.tree.join("prose");
+        fs::create_dir_all(&tree).expect("fixture directory");
+        fs::write(tree.join("notes.txt"), "nothing to parse here\n").expect("text file");
+
+        let output = host.run_in(
+            binary,
+            &tree,
+            &[".", "--profiles", "auto", "--format", "json"],
+        );
+
+        assert_eq!(output.status.code(), Some(0), "{name}: {}", stderr(&output));
+        let document: Value =
+            siloscan_core::serde_json::from_str(&stdout(&output)).expect("JSON stdout");
+        assert!(
+            document["setup"]["languages"]
+                .as_array()
+                .expect("languages")
+                .is_empty(),
+            "{name}: {}",
+            stdout(&output)
+        );
+        let profiles = document["setup"]["capabilities"]
+            .as_array()
+            .expect("capabilities")
+            .iter()
+            .find(|capability| capability["id"] == "profiles")
+            .unwrap_or_else(|| panic!("{name}: no profiles capability: {}", stdout(&output)));
+        assert_eq!(profiles["status"], "not_configured", "{name}");
+        assert_eq!(
+            profiles["reason"], "no detected language has an embedded profile",
+            "{name}"
+        );
+    }
+}
+
+/// `--profiles auto` on a tree whose language does ship documents enables the
+/// capability, which is the other half of the same switch.
+#[test]
+fn profiles_auto_enables_the_capability_for_a_language_that_ships_documents() {
     for (name, binary) in BINARIES {
         let host = Host::new();
 
@@ -744,11 +785,7 @@ fn profiles_auto_reports_a_capability_with_nothing_available_to_select() {
             .iter()
             .find(|capability| capability["id"] == "profiles")
             .unwrap_or_else(|| panic!("{name}: no profiles capability: {}", stdout(&output)));
-        assert_eq!(profiles["status"], "not_configured", "{name}");
-        assert_eq!(
-            profiles["reason"], "no detected language has an embedded profile",
-            "{name}"
-        );
+        assert_eq!(profiles["status"], "enabled", "{name}");
     }
 }
 
