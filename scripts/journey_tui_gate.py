@@ -62,6 +62,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--work", required=True, help="a directory this gate owns")
     parser.add_argument("--timeout", type=float, default=180.0)
     arguments = parser.parse_args(argv)
+    # Sessions run with the fixture as their working directory, so a
+    # relative binary path would stop resolving there.
+    for name in ("siloscan", "ss", "siloscan_tui"):
+        setattr(arguments, name, str(pathlib.Path(getattr(arguments, name)).resolve()))
 
     if os.name != "posix":
         print("skip: this lane needs a POSIX pseudo-terminal; the TUI gate runs on Linux")
