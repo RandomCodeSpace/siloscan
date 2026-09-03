@@ -42,3 +42,11 @@ reliability.c.identical-if-branches	0	0.006636	2026-09-03	#78 P4b: max of curl 0
 reliability.c.self-assignment	0	0.006636	2026-09-03	#78 P4b: max of curl 0.0000, jq 0.0000, redis 0.0066
 reliability.c.self-comparison	0	0.000000	2026-09-03	#78 P4b: no finding on curl, jq or redis
 reliability.c.string-literal-comparison	0	0.000000	2026-09-03	#78 P4b: no finding on curl, jq or redis
+maintainability.cpp.cyclomatic-complexity	0	0.699092	2026-09-03	#78 P4b: max of abseil-cpp 0.1866, fmt 0.0562, nlohmann/json 0.6991
+maintainability.cpp.nesting-depth	0	0.224619	2026-09-03	#78 P4b: max of abseil-cpp 0.1054, fmt 0.2246, nlohmann/json 0.2197
+maintainability.cpp.parameter-count	0	0.056155	2026-09-03	#78 P4b: max of abseil-cpp 0.0243, fmt 0.0562, nlohmann/json 0.0399
+maintainability.cpp.using-namespace-in-header	0	0.000000	2026-09-03	#78 P4b: no finding on abseil-cpp, fmt or nlohmann/json
+reliability.cpp.assignment-in-condition	0	0.000000	2026-09-03	#78 P4b: no finding on abseil-cpp, fmt or nlohmann/json
+reliability.cpp.empty-if-body	0	0.000000	2026-09-03	#78 P4b: no finding on abseil-cpp, fmt or nlohmann/json
+reliability.cpp.identical-if-branches	0	0.000000	2026-09-03	#78 P4b: no finding on abseil-cpp, fmt or nlohmann/json
+reliability.cpp.self-assignment	0	0.000000	2026-09-03	#78 P4b: no finding on abseil-cpp, fmt or nlohmann/json

@@ -1,0 +1,53 @@
+# C++ maintainability profile. Original work: the four measures are the
+# engine's own (crates/siloscan-core/src/engines/metric.rs), the thresholds are
+# this repository's, and the header rule was written against tree-sitter-cpp's
+# node-types.json from the C++ Core Guidelines' concept alone.
+#
+# Identity: maintainability-cpp@1. See crates/siloscan-core/src/profiles.rs.
+#
+# function-length is deliberately absent, unlike every other language's
+# maintainability document. Namespace-opening macros - ABSL_NAMESPACE_BEGIN,
+# NLOHMANN_JSON_NAMESPACE_BEGIN - make tree-sitter-cpp parse a whole namespace
+# body as one function_definition, so 121 of 166 findings on abseil and 31 of
+# 93 on nlohmann/json were reported on a `namespace` or `class` line. Raising
+# the threshold cannot help: the mis-parsed unit is thousands of lines long
+# whatever the limit. The other three measures are unaffected, because a
+# pseudo-function that wide is still shallow and unbranched.
+version: 1
+rules:
+  - id: maintainability.cpp.using-namespace-in-header
+    severity: info
+    message: 'A using-namespace directive in a header leaks into every translation unit that includes it.'
+    paths:
+      include:
+        - '**/*.h'
+        - '**/*.hpp'
+        - '**/*.hh'
+        - '**/*.hxx'
+    ast:
+      cpp: |
+        (using_declaration "namespace" (identifier) @report)
+
+  - id: maintainability.cpp.parameter-count
+    severity: info
+    message: 'This function takes more parameters than the profile allows.'
+    languages: [cpp]
+    metric:
+      measure: parameter-count
+      max: 7
+
+  - id: maintainability.cpp.nesting-depth
+    severity: info
+    message: 'This function nests more deeply than the profile allows.'
+    languages: [cpp]
+    metric:
+      measure: nesting-depth
+      max: 5
+
+  - id: maintainability.cpp.cyclomatic-complexity
+    severity: info
+    message: 'This function has more branches than the profile allows.'
+    languages: [cpp]
+    metric:
+      measure: cyclomatic-complexity
+      max: 25
