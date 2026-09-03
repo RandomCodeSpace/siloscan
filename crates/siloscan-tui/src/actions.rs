@@ -120,7 +120,9 @@ fn entry(finding: &Finding) -> BaselineEntry {
 ///
 /// The rewrite goes through `baseline::write_atomic`, so a write that fails part
 /// way through leaves the user's source file exactly as it was rather than
-/// truncated.
+/// truncated. That replaces the file rather than writing through it, so the
+/// mode is carried across by hand; the inode changes either way, and a
+/// suppression that breaks a hard link is accepted.
 ///
 /// A snapshot names paths that need not exist here, so the edit is refused with
 /// its reason rather than attempted against whatever happens to be on disk.
@@ -157,7 +159,12 @@ pub fn insert_suppression(state: &mut AppState, row_idx: usize) -> io::Result<()
             )
         })?;
     if edited != content {
+        // The atomic replacement is a new file carrying default permissions, so
+        // the source file's own mode is read first and put back afterwards.
+        // Without it a suppressed script loses its executable bit.
+        let mode = fs::metadata(&path)?.permissions();
         baseline::write_atomic(&path, edited.as_bytes()).map_err(io::Error::other)?;
+        fs::set_permissions(&path, mode)?;
     }
 
     state.rows[row_idx].status = Status::Suppressed;
@@ -470,6 +477,40 @@ mod tests {
             "let a = 1;\nlet needle = 2;  // siloscan-ignore-line: test.needle\nlet c = 3;\n"
         );
         assert_eq!(state.rows[0].status, Status::Suppressed);
+    }
+
+    /// The atomic write renames a new file into place, so the mode has to be
+    /// carried across: a suppressed script that loses its executable bit stops
+    /// running.
+    #[cfg(unix)]
+    #[test]
+    fn insert_suppression_preserves_the_file_mode() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("src")).unwrap();
+        let file = dir.path().join("src/hook.py");
+        fs::write(&file, "#!/usr/bin/env python3\nneedle = 1\n").unwrap();
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let mut state = state(
+            dir.path(),
+            vec![row(
+                finding("test.needle", "src/hook.py", 2, "aa"),
+                Status::New,
+            )],
+        );
+
+        insert_suppression(&mut state, 0).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(&file).unwrap(),
+            "#!/usr/bin/env python3\nneedle = 1  # siloscan-ignore-line: test.needle\n"
+        );
+        assert_eq!(
+            fs::metadata(&file).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
     }
 
     #[test]
