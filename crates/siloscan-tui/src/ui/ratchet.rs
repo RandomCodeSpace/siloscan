@@ -962,13 +962,16 @@ mod tests {
             SECRET,
             &format!("let key = \"{SECRET}\";\n"),
         );
+        assert!(!secret.contains(SECRET), "credential reached the screen");
         assert!(
-            !secret.contains(SECRET),
-            "credential reached the screen: {secret}"
+            secret.contains(REDACTED_MATCH),
+            "placeholder missing from the code pane"
         );
-        assert!(secret.contains(REDACTED_MATCH), "{secret}");
         // Only the match is withheld; the line it sits on is still readable.
-        assert!(secret.contains("let key = "), "{secret}");
+        assert!(
+            secret.contains("let key = "),
+            "the rest of the line was withheld"
+        );
 
         // Every other payload keeps its match text: it is not a credential and
         // showing it is the reason the pane exists.
