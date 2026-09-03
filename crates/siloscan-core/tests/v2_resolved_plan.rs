@@ -1,16 +1,14 @@
 //! The core resolved plan: what a request preserves, what resolution owns, and
 //! that the scope is walked exactly once.
 
-use std::fs;
-use std::path::{Path, PathBuf};
-use std::sync::{Mutex, MutexGuard, OnceLock};
-
 use siloscan_core::plan::{
     CapabilityState, CapabilityStatus, EMBEDDED_PACK_ID, ResolvedScanPlan, ResolvedScanReport,
     ScanRequest, ScanSetupReport,
 };
 use siloscan_core::project::DetectionStatus;
 use siloscan_core::walk::IgnoreOptions;
+use std::fs;
+use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 
 /// The pattern is written so that the rule document does not match itself: a
@@ -110,19 +108,13 @@ fn paths(report: &ResolvedScanReport) -> Vec<&str> {
         .collect()
 }
 
-/// Serializes the tests that resolve an automatic request, which is the one
-/// journey defined by the process working directory.
-fn cwd_lock() -> MutexGuard<'static, ()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-}
-
 // ---------------------------------------------------------------------------
 // Plan and provenance
 // ---------------------------------------------------------------------------
 
+/// The automatic journey is the one defined by the process working directory,
+/// so it is asserted on the request rather than by moving the test process:
+/// both requests name `.`, and only the provenance separates them.
 #[test]
 fn an_omitted_path_and_an_explicit_dot_are_different_requests() {
     let automatic = ScanRequest::automatic();
@@ -132,27 +124,6 @@ fn an_omitted_path_and_an_explicit_dot_are_different_requests() {
     assert_eq!(explicit.root(), Path::new("."));
     assert!(automatic.is_automatic());
     assert!(!explicit.is_automatic());
-}
-
-#[test]
-fn an_automatic_request_resolves_the_working_directory_and_records_no_override() {
-    let _guard = cwd_lock();
-    let (tree, rules) = fixture();
-    let previous = std::env::current_dir().unwrap();
-    std::env::set_current_dir(tree.path()).unwrap();
-
-    let plan = ResolvedScanPlan::resolve(&ScanRequest::automatic());
-
-    std::env::set_current_dir(previous).unwrap();
-    let report = plan
-        .expect("resolution")
-        .execute(&mut |_| {})
-        .expect("execution");
-
-    // The embedded pack is loaded because nothing asked for anything else, so
-    // the one recorded fact is that nothing was supplied at all.
-    assert!(report.setup.explicit_overrides.is_empty());
-    assert!(!rules.join("rules.yaml").as_os_str().is_empty());
 }
 
 #[test]
@@ -317,18 +288,46 @@ fn config_rule_directories_load_beside_the_command_line_ones() {
     assert_eq!(report.context().rules().rules.len(), 2);
 }
 
+/// Whichever order the two are supplied in. v1 checks `--no-cache` first and
+/// unconditionally, so a request carrying both has no cache either way.
 #[test]
-fn disabling_the_cache_beats_naming_a_cache_directory() {
+fn disabling_the_cache_beats_naming_a_cache_directory_in_either_order() {
     let (tree, rules) = fixture();
-    let request = request(tree.path(), &rules)
-        .with_cache_dir(tree.path().join("cache"))
-        .without_cache();
-    let report = run(&request);
+    let cache_dir = tree.path().join("cache");
+
+    let directory_first = run(&request(tree.path(), &rules)
+        .with_cache_dir(cache_dir.clone())
+        .without_cache());
+    let disabled_first = run(&request(tree.path(), &rules)
+        .without_cache()
+        .with_cache_dir(cache_dir.clone()));
+
+    for report in [&directory_first, &disabled_first] {
+        let cache = capability(&report.setup, "cache");
+        assert_eq!(cache.status(), &CapabilityStatus::Skipped);
+        assert_eq!(cache.reason(), Some("the cache is disabled for this scan"));
+    }
+    assert!(!cache_dir.exists());
+}
+
+/// A cache that opened but can never hold an entry is not an enabled cache.
+/// The scan is correct and permanently cold, and only the report can say so.
+#[cfg(unix)]
+#[test]
+fn an_unusable_cache_directory_is_unavailable_rather_than_enabled() {
+    let (tree, rules) = fixture();
+    // A regular file stands where the cache directory's parent would be, so
+    // every path below it is refused rather than created.
+    let blocked = write(tree.path(), "blocked", "not a directory\n");
+
+    let report = run(&request(tree.path(), &rules).with_cache_dir(blocked.join("nested")));
 
     let cache = capability(&report.setup, "cache");
-    assert_eq!(cache.status(), &CapabilityStatus::Skipped);
-    assert_eq!(cache.reason(), Some("the cache is disabled for this scan"));
-    assert!(!tree.path().join("cache").exists());
+    assert_eq!(cache.status(), &CapabilityStatus::Unavailable);
+    assert_eq!(
+        cache.reason(),
+        Some("the cache directory is not this user's or could not be secured")
+    );
 }
 
 #[test]
@@ -477,6 +476,89 @@ fn an_anchor_that_cannot_be_honoured_fails_resolution() {
     // contain the scan root.
     let error = resolve_err(&request(tree.path(), &rules).with_config(config));
     assert!(error.contains("anchor"), "{error}");
+}
+
+/// A manifest is arbitrary bytes from the scanned tree. Resolution must survive
+/// one that is malformed in the middle of a multi-byte character, and the setup
+/// report must say where the parser stopped without quoting what it read.
+#[test]
+fn a_malformed_non_ascii_manifest_neither_panics_nor_reaches_the_report() {
+    let (tree, rules) = fixture();
+    let secret_line = "描述 = \"クレデンシャル ‚‚‚ ünïcödé påyload\" this is not toml";
+    let manifest = format!(
+        "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\n# {}\n{secret_line}\n",
+        "é".repeat(300)
+    );
+    write(tree.path(), "Cargo.toml", &manifest);
+
+    let report = run(&request(tree.path(), &rules));
+    let setup = siloscan_core::serde_json::to_string(&report.setup).unwrap();
+
+    let invalid: Vec<&String> = report
+        .setup
+        .evidence
+        .iter()
+        .filter(|item| item.path == "Cargo.toml")
+        .flat_map(|item| item.reasons.iter())
+        .collect();
+    assert!(
+        invalid
+            .iter()
+            .any(|reason| reason.starts_with("invalid TOML at line")),
+        "{invalid:?}"
+    );
+    for fragment in ["描述", "クレデンシャル", "påyload", "ééé"] {
+        assert!(!setup.contains(fragment), "{fragment} reached the report");
+    }
+}
+
+/// The root's spelling belongs to the caller, not to the report: `siloscan .`
+/// and `siloscan /abs/repo` describe one tree and must produce one document.
+#[test]
+fn relative_and_absolute_root_spellings_produce_the_same_setup() {
+    let (tree, rules) = fixture();
+    let relative = pathdiff(tree.path());
+
+    let absolute = run(&request(tree.path(), &rules));
+    let spelled = run(&request(&relative, &rules));
+
+    let render = |setup: &ScanSetupReport| siloscan_core::serde_json::to_string(setup).unwrap();
+    assert_eq!(render(&absolute.setup), render(&spelled.setup));
+    assert_eq!(
+        absolute.setup.rule_sources[0].id,
+        "rules/rules.yaml".to_string()
+    );
+}
+
+/// The same tree named through a path that walks back out and in again. Not a
+/// relative path - the test process' working directory is not this test's to
+/// change - but a spelling `strip_prefix` cannot match textually.
+fn pathdiff(tree: &Path) -> PathBuf {
+    tree.join("src").join("..")
+}
+
+#[test]
+fn two_rule_directories_holding_one_file_name_stay_distinguishable() {
+    let (tree, first) = fixture();
+    let outside = tempfile::tempdir().unwrap();
+    let second = rules_dir(
+        outside.path(),
+        "extra",
+        &NEEDLE_RULE.replace("test.hit", "test.other"),
+    );
+
+    let report = run(&ScanRequest::explicit(tree.path())
+        .without_embedded_rules()
+        .with_rule_dirs(vec![first, second]));
+
+    let ids: Vec<&str> = report
+        .setup
+        .rule_sources
+        .iter()
+        .map(|source| source.id.as_str())
+        .collect();
+    assert!(ids.contains(&"rules/rules.yaml"), "{ids:?}");
+    assert!(ids.contains(&"extra/rules.yaml"), "{ids:?}");
 }
 
 // ---------------------------------------------------------------------------

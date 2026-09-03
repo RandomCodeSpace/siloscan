@@ -133,6 +133,22 @@ fn the_legacy_public_api_still_compiles_unchanged() {
         "{rendered}"
     );
 
+    // The one exhaustive public struct the design refuses to extend. A field
+    // added to it would break this literal, which is exactly why the v2
+    // metadata rides beside `ScanReport` and not inside it.
+    let scan_report = ScanReport {
+        findings: Vec::new(),
+        baselined: Vec::new(),
+        suppressed: Vec::new(),
+        skipped: Vec::new(),
+        ignored: siloscan_core::walk::Ignored::default(),
+        graph: siloscan_core::graph::Graph::default(),
+        boundary_edges: Vec::new(),
+        metrics: siloscan_core::metrics::Metrics::default(),
+        warnings: Vec::new(),
+    };
+    assert!(scan_report.findings.is_empty());
+
     let mut options = ScanOptions::default();
     options.ignore = Default::default();
     options.follow_symlinks = false;
@@ -378,7 +394,10 @@ fn the_writer_serializes_the_report_once_without_cloning_it() {
     )
     .expect("serialization");
 
-    assert!(counting.writes > 0);
+    // A pretty printer streams: it writes punctuation, keys and values as it
+    // reaches them. One write would mean a full document had been assembled
+    // somewhere else first and handed over whole.
+    assert!(counting.writes > 1, "{} writes", counting.writes);
     let document = String::from_utf8(counting.bytes).unwrap();
     assert_eq!(document.matches("\"report_kind\"").count(), 1);
     assert_eq!(document.matches("\"schema_version\"").count(), 1);
