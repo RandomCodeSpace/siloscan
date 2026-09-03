@@ -1,0 +1,15 @@
+# Profile corpus expectations. One row per measured line.
+# Fields, tab separated:
+#   path           path under tree/, forward slashes; the first segment is the
+#                  language directory and so the recall family
+#   line           1-based line number in that file
+#   expect         NONE, or one or more rule ids joined by |
+#   justification  why that line expects that outcome
+# A row naming rule ids is a positive: the profile must report one of them on
+# that line. A NONE row is a negative: anything reported there counts against
+# the reporting rule's row in noise/limits.tsv, which defaults to zero.
+# Unlike the detection corpus there are no credential markers here: profile
+# examples are ordinary code and are committed verbatim, so the snippet in
+# tree/ is byte-identical to the rule matrix's positive_example or
+# negative_example.
+path	line	expect	justification

@@ -1,0 +1,12 @@
+# Recall floor per language directory under tree/. Fields, tab separated:
+#   language      the directory name under tree/, which is also the family
+#   recall_floor  fraction of that language's positives the profiles must report
+#   measured_at   the value measured when the language landed, as a date
+#   ticket        what the number was measured for
+# Every floor is the MEASURED value at the time the language landed -
+# descriptive, not aspirational. A language whose positives contract a known
+# gap starts low on purpose; the ticket that closes the gap raises the floor in
+# the same commit that moves the number. What a floor forbids is regression.
+# A language directory carrying positives with no row here fails the harness by
+# name rather than being measured against a floor nobody wrote down.
+language	recall_floor	measured_at	ticket

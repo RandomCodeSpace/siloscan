@@ -1,0 +1,19 @@
+# Per-rule false-positive ceilings. One row per rule that has one; a rule with
+# no row here is held to zero on both columns. Fields, tab separated:
+#   rule_id       the rule the ceiling belongs to
+#   max_corpus    findings this rule may leave on NONE rows of manifest.tsv
+#   max_per_kloc  findings per thousand code lines this rule may leave on any
+#                 one repository of the pinned noise set
+#   measured_at   the value measured when the rule landed, as a date
+#   ticket        what the number was measured for
+# One file, two readers: tests/profile_corpus.rs enforces max_corpus, and
+# scripts/profile_noise.py enforces max_per_kloc against the pinned noise set
+# in research/embedded-profiles/noise-set.md. There is one source of truth for
+# a rule's noise budget and it is this file.
+# Each limit is the value measured when the rule landed, with a stated ticket,
+# never a hoped-for number. A rule that exceeds its limit is not widened,
+# re-tuned in place, or given a bigger limit: it is removed from the profile in
+# the release that measures the second consecutive breach, its manifest rows
+# and justifications stay in place, and the document's @N is bumped because a
+# rule id disappeared.
+rule_id	max_corpus	max_per_kloc	measured_at	ticket
