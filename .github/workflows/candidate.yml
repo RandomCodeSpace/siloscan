@@ -63,13 +63,141 @@ jobs:
     needs: identity
     uses: ./.github/workflows/qualify.yml
 
-  # Still to be added to this workflow by their owning work packages, each
-  # binding itself to the same GITHUB_SHA:
-  #
-  #   automatic-journey  - package 6, the bare and review journeys per ecosystem
-  #   persistence        - package 6, native Linux, macOS and Windows state paths
-  #   tui-pty            - package 5, fixed-size live and snapshot PTY flows
-  #   performance        - the 14 paired performance cells
-  #
-  # They are deliberately absent rather than stubbed: a job that passes without
-  # running its lane would qualify a candidate that was never tested.
+  # The plan's explicit compatibility gate. The harness builds the pinned
+  # v1.5.1 reference out of this repository's own object store, so the checkout
+  # needs full history, and it runs here as well as in ordinary CI so a
+  # candidate run names it among its own gates.
+  explicit-compatibility:
+    name: Explicit compatibility
+    needs: identity
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Record the candidate identity
+        run: |
+          set -euo pipefail
+          head="$(git rev-parse HEAD)"
+          if [ "$head" != "$GITHUB_SHA" ]; then
+            echo "checked out $head, candidate is $GITHUB_SHA" >&2
+            exit 1
+          fi
+          echo "explicit compatibility at $head" >> "$GITHUB_STEP_SUMMARY"
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master, 2026-07-16
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - name: Frozen oracle comparison and cross-version readers
+        run: cargo test --locked -p siloscan --test v2_oracle_harness
+
+  # The bare journey over every ecosystem fixture: the approved setup,
+  # capability, report and review lines, the unchanged 220-rule pack, and clean
+  # JSON and SARIF routing.
+  automatic-journey:
+    name: Automatic journey
+    needs: identity
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Record the candidate identity
+        run: |
+          set -euo pipefail
+          head="$(git rev-parse HEAD)"
+          if [ "$head" != "$GITHUB_SHA" ]; then
+            echo "checked out $head, candidate is $GITHUB_SHA" >&2
+            exit 1
+          fi
+          echo "automatic journey at $head" >> "$GITHUB_STEP_SUMMARY"
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master, 2026-07-16
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - name: Bare journey per ecosystem
+        run: cargo test --locked -p siloscan --test v2_journey
+
+  # The saved report on all three platforms, natively. The state root is a
+  # different platform call on each of them and the atomic replacement is a
+  # different system call, so this is the one lane that cannot be proved by
+  # cross-building.
+  persistence:
+    name: Platform persistence (${{ matrix.os }})
+    needs: identity
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Record the candidate identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          head="$(git rev-parse HEAD)"
+          if [ "$head" != "$GITHUB_SHA" ]; then
+            echo "checked out $head, candidate is $GITHUB_SHA" >&2
+            exit 1
+          fi
+          echo "persistence ${{ matrix.os }} at $head" >> "$GITHUB_STEP_SUMMARY"
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master, 2026-07-16
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - name: State paths, publication and review
+        run: cargo test --locked -p siloscan --test v2_persistence --test v2_cli
+
+  # Every session a user can open, driven through a fixed 120x40
+  # pseudo-terminal: both entry points, live and snapshot, the read-only
+  # refusal, and terminal restore on each exit. Linux only, which is where the
+  # plan puts this gate.
+  tui-pty:
+    name: TUI PTY sessions
+    needs: identity
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Record the candidate identity
+        run: |
+          set -euo pipefail
+          head="$(git rev-parse HEAD)"
+          if [ "$head" != "$GITHUB_SHA" ]; then
+            echo "checked out $head, candidate is $GITHUB_SHA" >&2
+            exit 1
+          fi
+          echo "TUI PTY sessions at $head" >> "$GITHUB_STEP_SUMMARY"
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master, 2026-07-16
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      # The driver's own parsing is unit-tested before it is trusted to judge a
+      # session: a driver that read the screen wrongly would pass this lane
+      # without proving anything.
+      - name: Driver unit tests
+        run: python3 -m unittest discover -s scripts -p 'test_tui_*.py'
+      - name: Build the session binaries
+        run: cargo build --locked -p siloscan -p siloscan-tui
+      - name: Drive every session
+        run: |
+          set -euo pipefail
+          python3 scripts/journey_tui_gate.py \
+            --siloscan target/debug/siloscan \
+            --ss target/debug/ss \
+            --siloscan-tui target/debug/siloscan-tui \
+            --oracle research/oracle-v1.5.1 \
+            --work "$RUNNER_TEMP/tui-gate"
+
+  # The 14 paired wall-time and peak-RSS cells. The lane is a reusable workflow
+  # so it runs the same way here and from any later caller.
+  performance:
+    name: Performance
+    needs: identity
+    uses: ./.github/workflows/performance.yml
