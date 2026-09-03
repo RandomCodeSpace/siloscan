@@ -717,6 +717,129 @@ fn review_is_the_subcommand_when_no_such_path_exists() {
 }
 
 // ---------------------------------------------------------------------------
+// Embedded profiles
+// ---------------------------------------------------------------------------
+
+/// `--profiles auto` runs, and the setup report says what it found: nothing,
+/// because no profile document ships yet.
+///
+/// The tree is Rust and the detector says so, so the empty answer is a fact
+/// about the registry and not about the walk. The reason has to be the one that
+/// says that; `not_configured` with no reason, or a reason blaming the request,
+/// would send a reader looking in the wrong place.
+#[test]
+fn profiles_auto_reports_a_capability_with_nothing_available_to_select() {
+    for (name, binary) in BINARIES {
+        let host = Host::new();
+
+        let output = host.run(binary, &[".", "--profiles", "auto", "--format", "json"]);
+
+        assert_eq!(output.status.code(), Some(0), "{name}: {}", stderr(&output));
+        let document: Value =
+            siloscan_core::serde_json::from_str(&stdout(&output)).expect("JSON stdout");
+        assert_eq!(document["setup"]["languages"][0], "rust", "{name}");
+        let profiles = document["setup"]["capabilities"]
+            .as_array()
+            .expect("capabilities")
+            .iter()
+            .find(|capability| capability["id"] == "profiles")
+            .unwrap_or_else(|| panic!("{name}: no profiles capability: {}", stdout(&output)));
+        assert_eq!(profiles["status"], "not_configured", "{name}");
+        assert_eq!(
+            profiles["reason"], "no detected language has an embedded profile",
+            "{name}"
+        );
+    }
+}
+
+/// `--profiles none` asks for what every scan already resolves, so it changes
+/// no byte of the report.
+///
+/// It is still a supplied scan option: the run is explicit either way here, and
+/// the setup report records `profiles` in `explicit_overrides`, which is what an
+/// override list is for. What must not move is the scan.
+#[test]
+fn profiles_none_scans_exactly_as_the_run_without_the_flag() {
+    for (name, binary) in BINARIES {
+        let host = Host::new();
+
+        let without = host.run(binary, &["."]);
+        let with = host.run(binary, &[".", "--profiles", "none"]);
+
+        assert_eq!(with.status.code(), Some(0), "{name}: {}", stderr(&with));
+        assert_eq!(with.status.code(), without.status.code(), "{name}");
+        assert_eq!(stdout(&with), stdout(&without), "{name}");
+        assert_eq!(stderr(&with), stderr(&without), "{name}");
+    }
+}
+
+/// A named profile with no document is a resolve error: exit 2, naming the
+/// identity that was asked for and what was available instead.
+///
+/// The second run is the `--no-default-rules` interaction. That flag disables
+/// every embedded document, profiles included, but the names are resolved
+/// before it suppresses them, so a misspelling is refused whether or not the
+/// documents were going to load. The alternative accepts it silently on one run
+/// and refuses it on the next.
+#[test]
+fn an_unknown_profile_identity_is_refused_with_the_resolve_exit_code() {
+    for (name, binary) in BINARIES {
+        let host = Host::new();
+        let rules = host.rules_arg();
+
+        for extra in [
+            vec![".", "--profiles", "reliability-elixir@1"],
+            vec![
+                ".",
+                "--profiles",
+                "reliability-elixir@1",
+                "--no-default-rules",
+                "--rules",
+                &rules,
+            ],
+        ] {
+            let output = host.run(binary, &extra);
+
+            assert_eq!(output.status.code(), Some(2), "{name} {extra:?}");
+            let text = stderr(&output);
+            assert!(
+                text.contains("unknown profile: reliability-elixir@1"),
+                "{name} {extra:?}: {text}"
+            );
+            assert!(text.contains("available: none"), "{name} {extra:?}: {text}");
+        }
+    }
+}
+
+/// A value that is neither word nor a usable list is refused by the parser, so
+/// the scan never starts and the message says what the value should have been.
+///
+/// `auto,none` is the case worth pinning: passed through as identities it would
+/// come back as "unknown profile: auto", which is true and sends the reader
+/// looking for a document instead of at the comma they typed.
+#[test]
+fn a_malformed_profiles_value_is_a_usage_error() {
+    for (name, binary) in BINARIES {
+        let host = Host::new();
+
+        for value in ["", "auto,none", "reliability-rust@1,"] {
+            let output = host.run(binary, &[".", "--profiles", value]);
+
+            assert_eq!(output.status.code(), Some(2), "{name} {value:?}");
+            let text = stderr(&output);
+            assert!(
+                text.contains(&format!("invalid value '{value}' for '--profiles")),
+                "{name} {value:?}: {text}"
+            );
+            assert!(
+                text.contains("comma-separated list of profile identities"),
+                "{name} {value:?}: {text}"
+            );
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Help and subcommand conflicts
 // ---------------------------------------------------------------------------
 
@@ -730,7 +853,13 @@ fn help_documents_the_new_forms_under_both_names() {
         let help = host.run(binary, &["--help"]);
         assert_eq!(help.status.code(), Some(0), "{name}");
         let text = stdout(&help);
-        for expected in ["review", "--save", "--no-save", "--output"] {
+        for expected in [
+            "review",
+            "--save",
+            "--no-save",
+            "--output",
+            "--profiles <auto|none|LIST>",
+        ] {
             assert!(
                 text.contains(expected),
                 "{name}: {expected} missing:\n{text}"

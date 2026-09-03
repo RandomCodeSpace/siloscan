@@ -25,6 +25,7 @@ use siloscan_core::plan::{
     CapabilityStatus, OutcomeMetadata, ResolvedScanPlan, ScanRequest, ScanSetupReport,
     ScopeMetadata, write_resolved_json,
 };
+use siloscan_core::profiles::ProfileSelection;
 use siloscan_core::rules::{self, CompiledPayload, CompiledRule, RuleSet, Severity};
 use siloscan_core::scan::{self, Anchoring};
 use siloscan_core::walk;
@@ -208,6 +209,18 @@ struct ScanArgs {
     #[arg(long)]
     no_default_rules: bool,
 
+    /// Which embedded bug-risk and maintainability profiles to load: `auto` for
+    /// every profile whose language this tree contains, `none` for no profile,
+    /// or a comma-separated list of profile identities such as
+    /// `reliability-rust@1` to load exactly those whatever was detected
+    ///
+    /// Supplying this option, `--profiles none` included, makes the run
+    /// explicit. An identity with no document is refused with exit 2 and the
+    /// list of available identities, even under --no-default-rules, which
+    /// suppresses every embedded document including profiles.
+    #[arg(long, value_name = "auto|none|LIST", value_parser = parse_profiles)]
+    profiles: Option<ProfileSelection>,
+
     /// Output format
     #[arg(long, value_enum, default_value = "human")]
     format: Format,
@@ -275,6 +288,39 @@ struct ScanArgs {
 
     #[command(flatten)]
     ignore: IgnoreArgs,
+}
+
+/// `--profiles` as a [`ProfileSelection`].
+///
+/// `auto` and `none` are the two words that name no profile, so they are
+/// rejected inside a list rather than passed on as identities: core would
+/// refuse `auto` as an unknown profile, which is true but sends the reader
+/// looking for a document instead of at the comma they typed. An empty entry is
+/// refused for the same reason, and that is what makes `--profiles ""` a usage
+/// error rather than a request for a profile called nothing.
+fn parse_profiles(value: &str) -> Result<ProfileSelection, String> {
+    const FORM: &str = "expected `auto`, `none`, or a comma-separated list of profile identities";
+
+    match value {
+        "auto" => Ok(ProfileSelection::Auto),
+        "none" => Ok(ProfileSelection::None),
+        _ => {
+            let names: Vec<&str> = value.split(',').collect();
+            for name in &names {
+                if name.is_empty() {
+                    return Err(format!("{FORM}; the list has an empty entry"));
+                }
+                if matches!(*name, "auto" | "none") {
+                    return Err(format!(
+                        "{FORM}; `{name}` names no profile and cannot appear in a list"
+                    ));
+                }
+            }
+            Ok(ProfileSelection::Named(
+                names.into_iter().map(str::to_owned).collect(),
+            ))
+        }
+    }
 }
 
 /// Where this scan's report is written, if anywhere.
@@ -1021,6 +1067,9 @@ fn scan_request(args: &ScanArgs, automatic: bool, provenance: &Provenance) -> Sc
     }
     if args.no_default_rules {
         request = request.without_embedded_rules();
+    }
+    if let Some(profiles) = &args.profiles {
+        request = request.with_profiles(profiles.clone());
     }
     if let Some(baseline) = &args.baseline {
         request = request.with_baseline(baseline.clone());
