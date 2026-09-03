@@ -19,6 +19,9 @@ const REPORT_CAPTURE: &str = "report";
 #[derive(Debug)]
 pub struct AstQueries {
     languages: Vec<CombinedQuery>,
+    /// Length of the `rules` slice `build` was given. `scan_file` indexes that
+    /// slice with the indices recorded here, so it must be handed the same one.
+    rules_len: usize,
 }
 
 #[derive(Debug)]
@@ -37,23 +40,25 @@ struct CombinedQuery {
 }
 
 /// A language's patterns as they are gathered, before the concatenation is
-/// compiled.
+/// compiled. `rules` and `sources` are parallel, one entry per contributing
+/// rule.
 struct Pending {
     language: String,
-    source: String,
     rules: Vec<usize>,
+    sources: Vec<String>,
     owners: Vec<usize>,
 }
 
 impl AstQueries {
     /// Build the combined query of every ast rule in `rules`, per language.
     ///
-    /// Compiling the concatenation cannot fail once each rule's own query has
-    /// compiled: tree-sitter parses a query as a sequence of top-level
-    /// patterns, predicates bind to the pattern they sit in, and capture names
-    /// are resolved per query, so a name two rules share simply shares an
-    /// index.
-    pub fn build(rules: &[CompiledRule]) -> AstQueries {
+    /// Compiling the concatenation is expected to succeed once each rule's own
+    /// query has compiled: tree-sitter parses a query as a sequence of
+    /// top-level patterns, predicates bind to the pattern they sit in, and
+    /// capture names are resolved per query, so a name two rules share simply
+    /// shares an index. The `Err` is the escape hatch for a rule pack that
+    /// proves that wrong, and names the language and the rule it broke on.
+    pub fn build(rules: &[CompiledRule]) -> Result<AstQueries, String> {
         let mut pending: Vec<Pending> = Vec::new();
 
         for (index, rule) in rules.iter().enumerate() {
@@ -67,8 +72,8 @@ impl AstQueries {
                     None => {
                         pending.push(Pending {
                             language: entry.language.clone(),
-                            source: String::new(),
                             rules: Vec::new(),
+                            sources: Vec::new(),
                             owners: Vec::new(),
                         });
                         pending.len() - 1
@@ -78,19 +83,21 @@ impl AstQueries {
                 let slot = &mut pending[slot];
                 let position = slot.rules.len();
                 slot.rules.push(index);
+                slot.sources.push(entry.source.clone());
                 slot.owners
                     .extend(std::iter::repeat_n(position, entry.query.pattern_count()));
-                if !slot.source.is_empty() {
-                    // A query source may end in a line comment, so the
-                    // separator has to be a newline.
-                    slot.source.push('\n');
-                }
-                slot.source.push_str(&entry.source);
             }
         }
 
-        let languages = pending.into_iter().map(compile_combined).collect();
-        AstQueries { languages }
+        let mut languages = Vec::with_capacity(pending.len());
+        for one in pending {
+            languages.push(compile_combined(one, rules)?);
+        }
+
+        Ok(AstQueries {
+            languages,
+            rules_len: rules.len(),
+        })
     }
 
     fn get(&self, language: &str) -> Option<&CombinedQuery> {
@@ -100,31 +107,70 @@ impl AstQueries {
     }
 }
 
-fn compile_combined(pending: Pending) -> CombinedQuery {
-    let language = crate::parsers::language(&pending.language)
-        .expect("an ast rule's language resolved at load time");
-    let query = Query::new(&language, &pending.source).unwrap_or_else(|error| {
-        panic!(
-            "the combined {} query failed to compile from per-rule queries that each compiled: \
-             {error}",
+/// A query source may end in a line comment, so the separator between two
+/// rules' patterns has to be a newline.
+fn concatenate(sources: &[String]) -> String {
+    sources.join("\n")
+}
+
+fn compile_combined(pending: Pending, rules: &[CompiledRule]) -> Result<CombinedQuery, String> {
+    let language = crate::parsers::language(&pending.language).ok_or_else(|| {
+        format!(
+            "the ast language {} no longer resolves to a parser",
             pending.language
         )
-    });
-    assert_eq!(
-        query.pattern_count(),
-        pending.owners.len(),
-        "the combined {} query lost patterns",
-        pending.language
-    );
+    })?;
+
+    let query = match Query::new(&language, &concatenate(&pending.sources)) {
+        Ok(query) => query,
+        Err(error) => return Err(attribute(&pending, rules, &language, &error.to_string())),
+    };
+    if query.pattern_count() != pending.owners.len() {
+        return Err(format!(
+            "the combined {} ast query holds {} patterns where its rules contribute {}",
+            pending.language,
+            query.pattern_count(),
+            pending.owners.len()
+        ));
+    }
     let report = query.capture_index_for_name(REPORT_CAPTURE);
 
-    CombinedQuery {
+    Ok(CombinedQuery {
         language: pending.language,
         query,
         rules: pending.rules,
         owners: pending.owners,
         report,
+    })
+}
+
+/// Name the rule the combined query broke on.
+///
+/// Tree-sitter reports a row and an offset into the concatenation, which is
+/// source no user wrote and no message can usefully quote. Every rule compiled
+/// alone, so the break is in the combination; recompiling growing prefixes
+/// finds the first rule whose patterns the combination does not survive. This
+/// runs on the error path only.
+fn attribute(
+    pending: &Pending,
+    rules: &[CompiledRule],
+    language: &tree_sitter::Language,
+    error: &str,
+) -> String {
+    for upto in 1..=pending.sources.len() {
+        if Query::new(language, &concatenate(&pending.sources[..upto])).is_err() {
+            return format!(
+                "the combined {} ast query failed to compile at rule {}: {error}",
+                pending.language,
+                rules[pending.rules[upto - 1]].id
+            );
+        }
     }
+
+    format!(
+        "the combined {} ast query failed to compile: {error}",
+        pending.language
+    )
 }
 
 /// Run every applicable ast rule over one file's pre-parsed tree, in a single
@@ -132,7 +178,10 @@ fn compile_combined(pending: Pending) -> CombinedQuery {
 /// findings. Findings are returned in node-start-offset order; the caller owns
 /// the global ordering.
 ///
-/// `queries` must have been built from `rules`.
+/// `queries` must have been built from `rules`: it holds indices into that
+/// slice, so a different one would attribute findings to the wrong rules. Only
+/// the length is checkable, and a mismatch yields no findings rather than
+/// wrong ones.
 pub fn scan_file(
     rules: &[CompiledRule],
     queries: &AstQueries,
@@ -141,6 +190,15 @@ pub fn scan_file(
     content: &str,
     tree: Option<&Tree>,
 ) -> Vec<Finding> {
+    debug_assert_eq!(
+        rules.len(),
+        queries.rules_len,
+        "ast queries were built from a different rule set"
+    );
+    if rules.len() != queries.rules_len {
+        return Vec::new();
+    }
+
     let (Some(language), Some(tree)) = (language, tree) else {
         return Vec::new();
     };
@@ -256,7 +314,7 @@ mod tests {
 
     fn scan(compiled: &[CompiledRule], path: &str, lang: &str, content: &str) -> Vec<Finding> {
         let tree = parsers::parse(lang, content).expect("tree");
-        let queries = AstQueries::build(compiled);
+        let queries = AstQueries::build(compiled).expect("queries should combine");
         scan_file(compiled, &queries, path, Some(lang), content, Some(&tree))
     }
 
@@ -425,7 +483,7 @@ rules:
         let content = "fn main() { dbg!(1); }\n";
         let tree = parsers::parse("rust", content).expect("tree");
 
-        let queries = AstQueries::build(&compiled);
+        let queries = AstQueries::build(&compiled).expect("queries should combine");
         assert!(
             scan_file(
                 &compiled,
@@ -593,7 +651,7 @@ rules:
 "#,
         );
 
-        let queries = AstQueries::build(&compiled);
+        let queries = AstQueries::build(&compiled).expect("queries should combine");
         let combined = queries.get("rust").expect("a combined rust query");
         assert_eq!(combined.query.pattern_count(), 3);
         assert_eq!(combined.owners, vec![0, 0, 1]);
@@ -610,6 +668,45 @@ rules:
                 ("rust.one", "unimplemented"),
                 ("rust.two", "todo"),
                 ("rust.two", "dbg"),
+            ]
+        );
+    }
+
+    /// Two rules whose reported nodes tie on the start offset: `foo` is both
+    /// an identifier and the function of a call. The engine used to run rule by
+    /// rule and stable-sort on the offset, so a tie broke in load order. The
+    /// combined query yields the call match first whatever the load order is,
+    /// so only the sort on the owning rule puts the tie back; without it this
+    /// reports `outer`/`foo` before `inner`/`foo`.
+    #[test]
+    fn a_tie_on_the_offset_breaks_in_load_order() {
+        let compiled = rules(
+            r#"
+version: 1
+rules:
+  - id: rust.inner
+    severity: info
+    message: m
+    ast:
+      rust: '(identifier) @report'
+  - id: rust.outer
+    severity: info
+    message: m
+    ast:
+      rust: '(call_expression function: (identifier) @report)'
+"#,
+        );
+        let found = scan(&compiled, "src/main.rs", "rust", "fn main() { foo(); }\n");
+
+        assert_eq!(
+            found
+                .iter()
+                .map(|finding| (finding.rule_id.as_str(), finding.matched.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("rust.inner", "main"),
+                ("rust.inner", "foo"),
+                ("rust.outer", "foo"),
             ]
         );
     }

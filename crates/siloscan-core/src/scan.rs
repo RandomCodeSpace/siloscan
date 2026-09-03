@@ -625,9 +625,14 @@ fn scan_prepared_with_workers(
         findings: 0,
     });
 
+    // Built from the rules once rather than once per file: one tree-sitter
+    // query per language carries every ast rule's patterns, so a file is
+    // walked once instead of once per rule.
+    let ast_queries = &crate::engines::ast::AstQueries::build(&rules.rules)?;
     let results = scan_files(
         root,
         rules,
+        ast_queries,
         options,
         anchoring,
         &files,
@@ -1251,9 +1256,11 @@ fn parse_decision(
 /// thread — the callback is `FnMut` and not required to be `Send` — and is
 /// driven by one message per completed file, which keeps `files_done` rising by
 /// exactly one per event and the event count at `files_total + 1`.
+#[allow(clippy::too_many_arguments)]
 fn scan_files(
     root: &Path,
     rules: &RuleSet,
+    ast_queries: &crate::engines::ast::AstQueries,
     options: &ScanOptions,
     anchoring: &Anchoring,
     files: &[PathBuf],
@@ -1263,10 +1270,6 @@ fn scan_files(
     // Read from the rules once rather than once per file: the answer is the
     // same for every file of a language, and it decides who reaches a parser.
     let needs = &ParseNeeds::of(rules);
-    // Built from the rules once rather than once per file: one tree-sitter
-    // query per language carries every ast rule's patterns, so a file is walked
-    // once instead of once per rule.
-    let ast_queries = &crate::engines::ast::AstQueries::build(&rules.rules);
     let files_total = files.len();
     let cursor = AtomicUsize::new(0);
     let (sender, receiver) = mpsc::channel::<usize>();

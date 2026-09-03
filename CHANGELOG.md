@@ -4,6 +4,21 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Changed
+
+- `siloscan-core`: `CompiledPayload::Ast` carries `Vec<AstQuery>` rather than
+  `Vec<(String, Arc<Query>)>`, so a rule's query source travels with its
+  compiled query; `engines::ast::AstQueries` is new, and
+  `engines::ast::scan_file` takes it as a second parameter.
+
+### Performance
+
+- The ast engine runs one tree-sitter query per language per file, holding
+  every applicable rule's patterns, instead of one query - one full tree
+  traversal - per rule.
+
 ## 2.0.0 - 2026-09-03
 
 ### Added
