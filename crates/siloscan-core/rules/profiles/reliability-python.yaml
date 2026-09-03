@@ -1,0 +1,29 @@
+# The reliability profile for python: one document per (profile, language)
+# pair, loaded whole or not at all. See research/embedded-profiles/design.md
+# section 1 for the packaging and the identity, and section 6 for the corpus
+# and noise gates every rule here had to pass.
+#
+# Every rule is a concept-only citation. No pattern text, query text or
+# message text is taken from any upstream project.
+version: 1
+rules:
+  - id: reliability.python.mutable-default-argument
+    severity: warning
+    message: "a mutable default argument is built once and shared by every call"
+    ast:
+      python: "(default_parameter value: [(list) (dictionary) (set)] @report)\n(typed_default_parameter value: [(list) (dictionary) (set)] @report)"
+  - id: reliability.python.self-comparison
+    severity: warning
+    message: "both operands of this comparison are the same identifier, so its result is fixed"
+    ast:
+      python: "((comparison_operator (identifier) @l \"==\" (identifier) @r) @report (#eq? @l @r))"
+  - id: reliability.python.bare-except
+    severity: warning
+    message: "a bare except also catches KeyboardInterrupt and SystemExit"
+    ast:
+      python: "(except_clause \"except\" . \":\") @report"
+  - id: reliability.python.identical-if-branches
+    severity: warning
+    message: "both arms of this if have the same body, so the condition decides nothing"
+    ast:
+      python: "((if_statement consequence: (block) @a alternative: (else_clause body: (block) @b)) @report (#eq? @a @b))"

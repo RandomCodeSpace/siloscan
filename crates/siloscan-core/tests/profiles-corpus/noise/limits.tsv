@@ -92,3 +92,12 @@ maintainability.go.function-length	0	0.9561	2026-09-03	#78 P4a
 maintainability.go.parameter-count	0	0.0000	2026-09-03	#78 P4a
 maintainability.go.nesting-depth	0	0.1408	2026-09-03	#78 P4a
 maintainability.go.cyclomatic-complexity	0	0.3518	2026-09-03	#78 P4a
+# python, measured against requests 2.34.2, flask 3.1.2 and black 26.5.1.
+reliability.python.mutable-default-argument	0	0.1752	2026-09-03	#78 P4a
+reliability.python.self-comparison	0	0.0000	2026-09-03	#78 P4a
+reliability.python.bare-except	0	0.0772	2026-09-03	#78 P4a
+reliability.python.identical-if-branches	0	0.1109	2026-09-03	#78 P4a
+maintainability.python.function-length	0	0.4631	2026-09-03	#78 P4a
+maintainability.python.parameter-count	0	0.5545	2026-09-03	#78 P4a
+maintainability.python.nesting-depth	0	0.0584	2026-09-03	#78 P4a
+maintainability.python.cyclomatic-complexity	0	0.1251	2026-09-03	#78 P4a

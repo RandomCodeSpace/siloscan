@@ -135,3 +135,20 @@ go/defer-in-loop-positive.go	5	reliability.go.defer-in-loop	the defer sits in a 
 go/defer-in-loop-negative.go	5	NONE	the call runs in the loop body rather than being deferred
 go/identical-if-branches-positive.go	4	reliability.go.identical-if-branches	both arms are byte-identical, which is the copy-paste shape the rule owns
 go/identical-if-branches-negative.go	4	NONE	the two arms differ, so the condition decides the value
+# python
+python/function-length-over.py	1	maintainability.python.function-length	the function is 121 lines, one over the profile's 120
+python/function-length-under.py	1	NONE	the function is 120 lines, which the profile allows
+python/parameter-count-over.py	1	maintainability.python.parameter-count	the function takes 8 parameters, one over the profile's 7
+python/parameter-count-under.py	1	NONE	the function takes 7 parameters, which the profile allows
+python/nesting-depth-over.py	1	maintainability.python.nesting-depth	the loops nest 6 deep, one over the profile's 5
+python/nesting-depth-under.py	1	NONE	the loops nest 5 deep, which the profile allows
+python/cyclomatic-complexity-over.py	1	maintainability.python.cyclomatic-complexity	the decision count is 26, one over the profile's 25
+python/cyclomatic-complexity-under.py	1	NONE	the decision count is 25, which the profile allows
+python/mutable-default-argument-positive.py	1	reliability.python.mutable-default-argument	the default is a list, built once and shared by every call
+python/mutable-default-argument-negative.py	1	NONE	the default is None and the list is built per call
+python/self-comparison-positive.py	2	reliability.python.self-comparison	both operands are the identical identifier, so the comparison cannot decide anything
+python/self-comparison-negative.py	2	NONE	the operands are two different identifiers, which is an ordinary comparison
+python/bare-except-positive.py	4	reliability.python.bare-except	the except clause names no exception type
+python/bare-except-negative.py	4	NONE	the except clause names an exception type
+python/identical-if-branches-positive.py	2	reliability.python.identical-if-branches	both arms are byte-identical, which is the copy-paste shape the rule owns
+python/identical-if-branches-negative.py	2	NONE	the two arms differ, so the condition decides the value
