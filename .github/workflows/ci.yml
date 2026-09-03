@@ -36,6 +36,31 @@ jobs:
         run: cargo build --locked --workspace
       - name: Test
         run: cargo test --locked --workspace
+      # The release gates run these helpers on three platforms; a broken helper
+      # must fail here rather than halfway through a tagged release.
+      - name: Release-gate helper tests
+        run: python3 -m unittest discover -s scripts -p 'test_*.py'
+      # Every crate has to be packageable from a clean checkout long before a
+      # tag exists. This has no release dependency, so it belongs in ordinary CI.
+      - name: Package the workspace
+        run: cargo package --locked --workspace
+
+  macos:
+    name: macOS (build, test)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master, 2026-07-16
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      # macOS ships in the release archives but was only ever cross-built, never
+      # tested. This runs the workspace natively on arm64, where the platform
+      # state paths and filesystem behaviour differ from Linux.
+      - name: Build
+        run: cargo build --locked --workspace
+      - name: Test
+        run: cargo test --locked --workspace
 
   windows:
     name: Windows (build, test, smoke)
