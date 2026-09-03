@@ -1281,7 +1281,10 @@ fn cross_version_readers() {
     )
     .expect("candidate report should be JSON");
     for marker in ["report_kind", "scope", "outcome", "setup"] {
-        assert!(!candidate[marker].is_null(), "candidate report lost {marker}");
+        assert!(
+            !candidate[marker].is_null(),
+            "candidate report lost {marker}"
+        );
     }
     let legacy: Value = serde_json::from_slice(
         &fs::read(&reference_report).expect("reference report should be readable"),

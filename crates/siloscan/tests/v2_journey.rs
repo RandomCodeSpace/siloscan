@@ -104,13 +104,22 @@ const GO: &[(&str, &str)] = &[
 ];
 
 const JAVASCRIPT: &[(&str, &str)] = &[
-    ("package.json", "{\"name\":\"demo\",\"version\":\"0.1.0\"}\n"),
+    (
+        "package.json",
+        "{\"name\":\"demo\",\"version\":\"0.1.0\"}\n",
+    ),
     ("src/index.js", "export const name = \"demo\";\n"),
-    ("src/client.ts", "export const token: string = \"@CREDENTIAL@\";\n"),
+    (
+        "src/client.ts",
+        "export const token: string = \"@CREDENTIAL@\";\n",
+    ),
 ];
 
 const PYTHON: &[(&str, &str)] = &[
-    ("pyproject.toml", "[project]\nname = \"demo\"\nversion = \"0.1.0\"\n"),
+    (
+        "pyproject.toml",
+        "[project]\nname = \"demo\"\nversion = \"0.1.0\"\n",
+    ),
     ("src/demo/__init__.py", "TOKEN = \"@CREDENTIAL@\"\n"),
 ];
 
@@ -188,7 +197,10 @@ const MIXED: &[(&str, &str)] = &[
         "[package]\nname = \"demo\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
     ),
     ("src/main.rs", "fn main() {}\n"),
-    ("web/package.json", "{\"name\":\"demo-web\",\"version\":\"0.1.0\"}\n"),
+    (
+        "web/package.json",
+        "{\"name\":\"demo-web\",\"version\":\"0.1.0\"}\n",
+    ),
     ("web/index.js", "export const token = \"@CREDENTIAL@\";\n"),
     ("service/go.mod", "module example.com/service\n\ngo 1.22\n"),
     ("service/main.go", "package main\n"),
@@ -459,16 +471,15 @@ fn the_bare_journey_detects_scans_saves_and_says_how_to_review() {
             let output = host.run(binary, &[]);
 
             // One planted credential of error severity, so the gate fails.
-            assert_eq!(
-                output.status.code(),
-                Some(1),
-                "{case}: {}",
-                stderr(&output)
-            );
+            assert_eq!(output.status.code(), Some(1), "{case}: {}", stderr(&output));
 
             let text = stdout(&output);
             let lines: Vec<&str> = text.lines().collect();
-            assert_eq!(lines.first().copied(), Some(setup_line(ecosystem).as_str()), "{case}");
+            assert_eq!(
+                lines.first().copied(),
+                Some(setup_line(ecosystem).as_str()),
+                "{case}"
+            );
             assert_eq!(
                 lines.get(1).copied(),
                 Some(capability_line(ecosystem).as_str()),
@@ -562,7 +573,11 @@ fn explicit_machine_formats_keep_stdout_to_one_document() {
             assert!(parsed.is_ok(), "{case}: {text}");
             for line in ["Report: ", "Review: ", "setup: ", "capabilities: "] {
                 assert!(!text.contains(line), "{case}: {text}");
-                assert!(!stderr(&output).contains(line), "{case}: {}", stderr(&output));
+                assert!(
+                    !stderr(&output).contains(line),
+                    "{case}: {}",
+                    stderr(&output)
+                );
             }
             assert_eq!(saved_line(&output), None, "{case}");
         }

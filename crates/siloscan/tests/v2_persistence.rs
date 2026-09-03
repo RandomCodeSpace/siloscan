@@ -724,7 +724,11 @@ fn an_interrupted_publication_is_ignored_by_review_and_replaced_by_the_next_save
 
     let second_run = host.run(&[]);
 
-    assert_eq!(saved(&second_run), report, "the next scan publishes normally");
+    assert_eq!(
+        saved(&second_run),
+        report,
+        "the next scan publishes normally"
+    );
     let document: Result<Value, _> =
         siloscan_core::serde_json::from_slice(&fs::read(&report).expect("report"));
     assert!(document.is_ok(), "the replacement is a whole document");
