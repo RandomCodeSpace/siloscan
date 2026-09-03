@@ -47,7 +47,6 @@ maintainability.cpp.nesting-depth	0	0.244164	2026-09-03	#98 D1: max of fmt 0.182
 maintainability.cpp.parameter-count	0	0.091009	2026-09-03	#98 D1: max of fmt 0.0910, nlohmann/json 0.0470, abseil-cpp 0.0710; re-measured with C++ headers detected as C++; the landing measurement read every .h as C
 maintainability.cpp.using-namespace-in-header	0	0.065737	2026-09-03	#98 D1: max of fmt 0.0455, nlohmann/json 0.0657, abseil-cpp 0.0000; re-measured with C++ headers detected as C++; the landing measurement read every .h as C
 reliability.cpp.assignment-in-condition	0	0.000000	2026-09-03	#98 D1: no finding on fmt, nlohmann/json or abseil-cpp; re-measured with C++ headers detected as C++; the landing measurement read every .h as C
-reliability.cpp.empty-if-body	0	0.011835	2026-09-03	#98 D1: max of fmt 0.0000, nlohmann/json 0.0000, abseil-cpp 0.0118; re-measured with C++ headers detected as C++; the landing measurement read every .h as C
 reliability.cpp.identical-if-branches	0	0.000000	2026-09-03	#98 D1: no finding on fmt, nlohmann/json or abseil-cpp; re-measured with C++ headers detected as C++; the landing measurement read every .h as C
 reliability.cpp.self-assignment	0	0.000000	2026-09-03	#98 D1: no finding on fmt, nlohmann/json or abseil-cpp; re-measured with C++ headers detected as C++; the landing measurement read every .h as C
 maintainability.csharp.cyclomatic-complexity	0	0.384109	2026-09-03	#78 P4b: max of AutoMapper 0.0208, Dapper 0.2483, Newtonsoft.Json 0.3841

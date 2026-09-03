@@ -7,10 +7,6 @@ int f(int a, int b) {
   }
   return 0;
 }
-int f(int a) {
-  if (a);
-  return a;
-}
 int f(int c) {
   if (c) {
     return 1;
