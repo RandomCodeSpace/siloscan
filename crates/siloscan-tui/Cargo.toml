@@ -13,7 +13,7 @@ description = "Interactive terminal UI for siloscan: triage board, ratchet conso
 [dependencies]
 crossterm = "0.29.0"
 ratatui = "0.30.2"
-siloscan-core = { path = "../siloscan-core", version = "1.5.1" }
+siloscan-core = { path = "../siloscan-core", version = "2.0.0" }
 
 [dev-dependencies]
 tempfile = "3.27.0"

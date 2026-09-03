@@ -13,8 +13,8 @@ description = "Universal offline rule-based static code scanner"
 [dependencies]
 clap = { version = "4.6.5", features = ["derive"] }
 sha2 = "0.11.0"
-siloscan-core = { path = "../siloscan-core", version = "1.5.1" }
-siloscan-tui = { path = "../siloscan-tui", version = "1.5.1" }
+siloscan-core = { path = "../siloscan-core", version = "2.0.0" }
+siloscan-tui = { path = "../siloscan-tui", version = "2.0.0" }
 
 # The saved report's state root and its atomic replacement are the only
 # platform-specific code in this crate, so both bindings are target-only: a

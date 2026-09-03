@@ -9,6 +9,9 @@ matrix, a filterable triage board with code context, a ratchet console for
 per-finding debt decisions, and a silo dependency matrix. Mouse and keyboard
 are both supported. Snapshot mode loads an existing JSON report read-only.
 
+The `siloscan` CLI links this crate, so `siloscan review` opens the same UI
+without installing it. Install it on its own to triage without the scanner.
+
 ## Install
 
 ```sh
@@ -21,6 +24,9 @@ cargo install siloscan-tui
 siloscan-tui .                      # scan a tree and triage interactively
 siloscan-tui --report report.json   # load a JSON report (read-only)
 ```
+
+A report whose `findings` key is missing or null is rejected rather than shown
+as an empty result.
 
 ## Documentation
 

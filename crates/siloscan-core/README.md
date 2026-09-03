@@ -10,6 +10,10 @@ strict YAML rule loader, the six rule engines (`regex`, `secret`, `ast`,
 cache, baselines, metrics, and the text, JSON and SARIF writers. It also embeds
 the default secrets rule pack.
 
+`project` detects a project from repository files alone, running no project
+tool and making no network call. `plan` resolves one scan's setup once over a
+single walk and writes the resolved report.
+
 Most users want the `siloscan` binary instead. Use this crate to embed scanning
 in your own tool.
 

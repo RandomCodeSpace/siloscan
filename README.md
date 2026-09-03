@@ -31,16 +31,33 @@ Install the command-line scanner:
 cargo install siloscan
 ```
 
-Then scan the current repository:
+Then run it in a repository, with no arguments:
+
+```sh
+siloscan
+```
+
+```text
+setup: 1 project unit; languages: rust; rules: default-secrets@1
+capabilities: cache enabled; coverage not configured; embedded-rules enabled; project-detection enabled; repository-config not configured; rule-directories not configured; scan-baseline not configured; symlink-following not configured
+metrics: 8 lines, 3 code lines, 0 duplicated lines, 0.0% duplication
+Report: /home/you/.local/state/siloscan/reports/<scope-key>/latest.json
+Review: siloscan review
+```
+
+That run detected the project, scanned it with the embedded secret rules, and
+saved the report it printed. Open that report in the terminal UI, without
+scanning again:
+
+```sh
+siloscan review
+```
+
+The scan itself is unchanged. Name a path, or give any scan option, and the
+run behaves exactly as it did in 1.x:
 
 ```sh
 siloscan .
-```
-
-That is enough to run the embedded secret rules. Add your own rules when you
-need project-specific checks:
-
-```sh
 siloscan . --rules ./rules
 ```
 
@@ -49,9 +66,49 @@ Prefer a prebuilt binary? Download one from
 Archives are published for Linux x86-64, macOS arm64, and Windows x86-64.
 
 > [!NOTE]
-> Installing `siloscan` also installs the short alias `ss`. On Linux, that
-> can shadow the iproute2 socket-statistics command when Cargo's bin directory
+> Installing `siloscan` also installs the short alias `ss`, which accepts every
+> command and flag `siloscan` does, `ss review` included. On Linux, `ss` can
+> shadow the iproute2 socket-statistics command when Cargo's bin directory
 > comes first in `PATH`.
+
+## What a bare run does
+
+`siloscan` with no path and no scan option:
+
+- detects the project from repository files alone, without running Cargo, npm,
+  Go, Maven, or any other project tool, and without touching the network;
+- scans the current directory with the embedded secret pack;
+- prints the resolved setup, then the usual findings and metrics;
+- saves one report for that scan scope and names the command that opens it.
+
+Each scan scope keeps exactly one report, replaced atomically, under this
+user's platform state directory. `<scope-key>` is a hash of the canonical path
+that was scanned, so two checkouts of the same project keep separate reports.
+
+| Platform | Saved report |
+| --- | --- |
+| Linux | `$XDG_STATE_HOME/siloscan/reports/<scope-key>/latest.json`, or `~/.local/state/siloscan/...` when `XDG_STATE_HOME` is unset |
+| macOS | `~/Library/Application Support/siloscan/reports/<scope-key>/latest.json` |
+| Windows | `%LOCALAPPDATA%\siloscan\reports\<scope-key>\latest.json` |
+
+Nothing is written into the scanned repository, and no report history is kept.
+
+Every other invocation stays stateless, as in 1.x. Naming a path, including
+`siloscan .`, or supplying any scan option means the run writes no report
+unless you ask for one:
+
+| Flag | Effect |
+| --- | --- |
+| `--save` | Save this scan to its scope's report slot, including on an explicit scan |
+| `--no-save` | Save nothing, including the report a bare run would have saved |
+| `--output FILE` | Write this scan's report to `FILE` and leave the saved slot as it was |
+
+The three conflict with one another, so a scan writes at most one report. The
+saved document is always canonical siloscan JSON, whatever `--format` prints,
+and a failed save exits `2` rather than claiming success.
+
+JSON reports now carry `report_kind`, `scope`, `outcome`, and `setup` fields,
+appended after the fields 1.x wrote. Nothing 1.x wrote has changed.
 
 ## What it finds
 
@@ -130,23 +187,33 @@ quietly disappearing.
 
 ## Review findings in the terminal
 
-Install and open the interactive UI:
+`siloscan review` opens the interactive UI. It ships with the scanner, so
+`cargo install siloscan` is the only install needed:
 
 ```sh
-cargo install siloscan-tui
-siloscan-tui .
+siloscan review                   # the saved report for the current directory
+siloscan review PATH              # the saved report for that scan scope
+siloscan review --report FILE     # one report file, wherever it came from
+siloscan review --live            # scan now and triage the result
 ```
 
-Use it to:
+`ss review` is the same command. `--live` also takes a `PATH`. A saved review
+never rescans; a live one resolves a fresh scan, including for every rescan
+started inside the UI.
+
+Use the UI to:
 
 - see repository-wide counts and severity at a glance;
 - filter findings and inspect nearby code;
 - review baseline and inline-suppression decisions;
 - explore duplication groups and dependencies between silos.
 
-You can also open a saved JSON report without rescanning:
+The UI is also published on its own, for people who triage reports produced
+elsewhere:
 
 ```sh
+cargo install siloscan-tui
+siloscan-tui .
 siloscan-tui --report siloscan.json
 ```
 
@@ -161,6 +228,9 @@ Write JSON for automation or SARIF for code-scanning tools:
 siloscan . --format json > siloscan.json
 siloscan . --format sarif > siloscan.sarif
 ```
+
+Both name a path, so neither saves a report. A bare `siloscan` in a script does
+save one; add `--no-save` to keep it stateless.
 
 Control what fails and what gets printed independently:
 

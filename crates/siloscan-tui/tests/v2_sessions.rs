@@ -280,9 +280,13 @@ fn standalone_surface_preserves_version() {
 
     assert!(output.status.success());
     assert!(output.stderr.is_empty());
+    // The golden was captured at 1.5.1; only the version number may differ.
+    let golden = include_str!("../../../research/oracle-v1.5.1/golden/siloscan-tui-version.stdout");
+    let expected = golden.replace("1.5.1", env!("CARGO_PKG_VERSION"));
+    assert_eq!(normalize_line_endings(&output.stdout), expected);
     assert_eq!(
-        normalize_line_endings(&output.stdout),
-        include_str!("../../../research/oracle-v1.5.1/golden/siloscan-tui-version.stdout")
+        expected,
+        format!("siloscan-tui {}\n", env!("CARGO_PKG_VERSION"))
     );
 }
 
