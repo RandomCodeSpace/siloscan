@@ -179,11 +179,12 @@ pub fn draw(frame: &mut Frame, state: &AppState) {
     let area = frame.area();
     let strip_height = strip_height(state.screen, area);
 
-    let [strip, content, status] = Layout::default()
+    let [strip, content, notes, status] = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(strip_height),
             Constraint::Min(0),
+            Constraint::Length(notes_height(state)),
             Constraint::Length(1),
         ])
         .areas(area);
@@ -196,9 +197,39 @@ pub fn draw(frame: &mut Frame, state: &AppState) {
     }
 
     draw_content(frame, content, state, &mut layout_map);
+    draw_notes(frame, notes, state);
     draw_status(frame, status, state, &mut layout_map);
 
     set_layout(layout_map);
+}
+
+/// The row a loaded report's notes are drawn on, or none when there are no
+/// notes - which is every live session.
+fn notes_height(state: &AppState) -> u16 {
+    u16::from(!state.snapshot_notes.is_empty())
+}
+
+/// What the session is not showing about the report it loaded: the outcome its
+/// run recorded, the threshold it was filtered at, whether match text is being
+/// withheld.
+///
+/// A row of its own, and not part of the status bar, because the status bar
+/// shares its width with the tabs, the bindings and the read-only banner. At
+/// 120 columns that leaves the message about forty columns and clips the rest,
+/// which is how a filtered report whose gate failed came to be drawn as a board
+/// reading `0 new` with nothing on screen contradicting it. These notes are the
+/// contradiction; they do not get to be the part that is dropped.
+fn draw_notes(frame: &mut Frame, area: Rect, state: &AppState) {
+    if area.height == 0 {
+        return;
+    }
+    // The threshold and the file name reach this from the report, which is
+    // scanned input like any other.
+    let text = sanitize_for_terminal(&state.snapshot_notes).into_owned();
+    frame.render_widget(
+        Paragraph::new(Line::styled(text, Style::default().fg(theme::WARNING))),
+        area,
+    );
 }
 
 /// The dashboard screen renders the charts as its content, so it needs no

@@ -1028,13 +1028,60 @@ mod tests {
 
     /// Every marker but `dropped`, as a JSON fragment.
     fn drop_marker(markers: &str, dropped: &str) -> String {
+        let mut object = marker_object(markers);
+        object.remove(dropped);
+        fragment(object)
+    }
+
+    /// Only the named markers, as a JSON fragment.
+    fn keep_markers(markers: &str, kept: &[&str]) -> String {
+        let object = marker_object(markers);
+        fragment(
+            object
+                .into_iter()
+                .filter(|(key, _)| kept.contains(&key.as_str()))
+                .collect(),
+        )
+    }
+
+    fn marker_object(markers: &str) -> Map<String, Value> {
         let value: Value =
             serde_json::from_str(&format!("{{{markers}}}")).expect("the markers parse");
-        let mut object = value.as_object().expect("an object").clone();
-        object.remove(dropped);
+        value.as_object().expect("an object").clone()
+    }
+
+    fn fragment(object: Map<String, Value>) -> String {
         let text = serde_json::to_string(&Value::Object(object)).expect("re-serializes");
         // Exactly one brace off each end: the markers themselves end in braces.
         text[1..text.len() - 1].to_string()
+    }
+
+    /// Three of four is the easy case to get right. One and two are the ones a
+    /// reader that counted markers instead of checking each of them would let
+    /// through, so every count below four is refused and every marker that is
+    /// missing is named.
+    #[test]
+    fn every_incomplete_marker_count_is_rejected() {
+        let complete = RESOLVED_MARKERS.trim();
+        let cases: [&[&str]; 6] = [
+            &["report_kind"],
+            &["scope"],
+            &["setup"],
+            &["report_kind", "scope"],
+            &["outcome", "setup"],
+            &["report_kind", "outcome", "setup"],
+        ];
+
+        for kept in cases {
+            let text = with_markers(&keep_markers(complete, kept));
+            let err = load_str(&text).unwrap_err();
+            let SnapshotError::IncompleteMarkers { problem, .. } = &err else {
+                panic!("{kept:?}: {err:?}");
+            };
+            for missing in MARKERS.iter().filter(|marker| !kept.contains(marker)) {
+                assert!(problem.contains(missing), "{kept:?}: {problem}");
+            }
+        }
     }
 
     /// `report_kind` is the discriminator, so a document that claims to be

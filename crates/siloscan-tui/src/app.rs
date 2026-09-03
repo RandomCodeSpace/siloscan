@@ -160,15 +160,19 @@ pub fn apply_snapshot(state: &mut AppState, data: SnapshotData, config: Option<&
     reset_cursors(state);
     refresh_silos(state, config);
     report_debt(state);
+
     // The gate first: it is the one claim about the run as a whole, and the two
-    // notes after it are about what this screen is not showing.
-    state.status = format!("{} | {}", state.status, outcome_note(state.saved_outcome));
+    // notes after it are about what this screen is not showing. They go on
+    // their own row rather than into the status line, which shares its width
+    // with the tabs, the bindings and the read-only banner and would clip them.
+    let mut notes = vec![outcome_note(state.saved_outcome)];
     if let Some(threshold) = data.min_severity {
-        state.status = format!("{} | {}", state.status, filtered_note(threshold));
+        notes.push(filtered_note(threshold));
     }
     if hidden {
-        state.status = format!("{} | {HIDDEN_MATCH_NOTE}", state.status);
+        notes.push(HIDDEN_MATCH_NOTE.to_string());
     }
+    state.snapshot_notes = notes.join(" | ");
 }
 
 /// What the footer says about the gate the saved run was judged against.
@@ -760,8 +764,12 @@ mod tests {
                 "the credential reached the screen at {width}x{height}:\n{text}"
             );
         }
-        // And the footer still says match text is being withheld.
-        assert!(state.status.contains(HIDDEN_MATCH_NOTE), "{}", state.status);
+        // And the notes row still says match text is being withheld.
+        assert!(
+            state.snapshot_notes.contains(HIDDEN_MATCH_NOTE),
+            "{}",
+            state.snapshot_notes
+        );
     }
 
     /// Redaction that is not announced is indistinguishable from a report that
@@ -772,22 +780,23 @@ mod tests {
         apply_snapshot(&mut state, pre_redaction_data(), None);
 
         assert!(
-            state.status.contains(HIDDEN_MATCH_NOTE),
-            "status: {}",
-            state.status
+            state.snapshot_notes.contains(HIDDEN_MATCH_NOTE),
+            "notes: {}",
+            state.snapshot_notes
         );
-        assert!(
-            state.status.starts_with("1 new, 1 baselined"),
-            "the debt counts are still reported: {}",
-            state.status
+        assert_eq!(
+            state.status, "1 new, 1 baselined, 0 suppressed",
+            "the debt counts keep the status line to themselves"
         );
 
         state.screen = crate::state::Screen::Triage;
-        let text = render_text(&state, 200, 50);
-        assert!(
-            text.contains(HIDDEN_MATCH_NOTE),
-            "not in the footer:\n{text}"
-        );
+        for (width, height) in [(200, 50), (120, 40), (80, 24)] {
+            let text = render_text(&state, width, height);
+            assert!(
+                text.contains(HIDDEN_MATCH_NOTE),
+                "not on screen at {width}x{height}:\n{text}"
+            );
+        }
     }
 
     /// A 1.2 report was redacted by the writer, so the UI has no reason to
@@ -805,11 +814,8 @@ mod tests {
             .iter()
             .any(|row| row.finding.matched == "20 duplicated lines (block 0123456789ab)");
         assert!(kept, "a 1.2 report's match text must be left alone");
-        assert_eq!(
-            state.status,
-            "1 new, 1 baselined, 0 suppressed | saved outcome unavailable"
-        );
-        assert!(!state.status.contains(HIDDEN_MATCH_NOTE));
+        assert_eq!(state.status, "1 new, 1 baselined, 0 suppressed");
+        assert_eq!(state.snapshot_notes, "saved outcome unavailable");
     }
 
     // -- filtered reports ------------------------------------------------
@@ -829,25 +835,26 @@ mod tests {
 
         assert!(
             state
-                .status
+                .snapshot_notes
                 .contains("filtered report: findings below error hidden"),
-            "status: {}",
-            state.status
+            "notes: {}",
+            state.snapshot_notes
         );
-        assert!(
-            state.status.starts_with("1 new, 1 baselined"),
-            "the debt counts are still reported: {}",
-            state.status
+        assert_eq!(
+            state.status, "1 new, 1 baselined, 0 suppressed",
+            "the debt counts are still reported"
         );
 
-        // The footer is where it has to land, at the sizes the board lays out
-        // for; the status line is drawn from `state.status` at all of them.
+        // The notes row is where it has to land, at every size the board lays
+        // out for - including the one the status line would clip it at.
         state.screen = crate::state::Screen::Triage;
-        let text = render_text(&state, 200, 50);
-        assert!(
-            text.contains("filtered report"),
-            "not in the footer:\n{text}"
-        );
+        for (width, height) in [(200, 50), (120, 40), (80, 24)] {
+            let text = render_text(&state, width, height);
+            assert!(
+                text.contains("filtered report"),
+                "not on screen at {width}x{height}:\n{text}"
+            );
+        }
     }
 
     /// An unfiltered report says nothing about filtering. It still says its
@@ -858,10 +865,8 @@ mod tests {
         let mut state = state();
         apply_snapshot(&mut state, snapshot_data(), None);
 
-        assert_eq!(
-            state.status,
-            "1 new, 1 baselined, 0 suppressed | saved outcome unavailable"
-        );
+        assert_eq!(state.status, "1 new, 1 baselined, 0 suppressed");
+        assert_eq!(state.snapshot_notes, "saved outcome unavailable");
     }
 
     /// Three notices about the same report, in a fixed order: the gate, then
@@ -875,10 +880,10 @@ mod tests {
         apply_snapshot(&mut state, data, None);
 
         assert_eq!(
-            state.status,
+            state.snapshot_notes,
             format!(
-                "1 new, 1 baselined, 0 suppressed | saved outcome unavailable | \
-                 filtered report: findings below warning hidden | {HIDDEN_MATCH_NOTE}"
+                "saved outcome unavailable | filtered report: findings below \
+                 warning hidden | {HIDDEN_MATCH_NOTE}"
             )
         );
     }
@@ -930,10 +935,11 @@ mod tests {
                 threshold_reached: true
             })
         );
+        assert_eq!(state.status, "0 new, 0 baselined, 0 suppressed");
         assert_eq!(
-            state.status,
-            "0 new, 0 baselined, 0 suppressed | saved outcome: fail-on error \
-             reached | filtered report: findings below error hidden"
+            state.snapshot_notes,
+            "saved outcome: fail-on error reached | filtered report: findings \
+             below error hidden"
         );
     }
 
@@ -946,9 +952,10 @@ mod tests {
 
         apply_snapshot(&mut state, data, None);
 
+        assert_eq!(state.status, "1 new, 1 baselined, 0 suppressed");
         assert_eq!(
-            state.status,
-            "1 new, 1 baselined, 0 suppressed | saved outcome: fail-on error not reached"
+            state.snapshot_notes,
+            "saved outcome: fail-on error not reached"
         );
     }
 

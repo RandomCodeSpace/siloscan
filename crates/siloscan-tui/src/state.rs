@@ -257,8 +257,12 @@ pub struct AppState {
     pub snapshot_anchor: Anchor,
     /// The gate the loaded report's run was judged against. `None` for a live
     /// session and for a report that records no outcome, which is not the same
-    /// as a run that passed. The footer says which of the two it is.
+    /// as a run that passed. `snapshot_notes` says which of the two it is.
     pub saved_outcome: Option<SavedOutcome>,
+    /// What this session is not showing about the report it loaded, drawn on a
+    /// row of its own. Empty for a live session, which is not showing anything
+    /// but the tree in front of it.
+    pub snapshot_notes: String,
     /// True while the filter text box owns the keyboard.
     pub input_mode: bool,
     /// Status bar message.
@@ -296,6 +300,7 @@ impl AppState {
             snapshot: None,
             snapshot_anchor: Anchor::default(),
             saved_outcome: None,
+            snapshot_notes: String::new(),
             input_mode: false,
             status: String::new(),
             should_quit: false,
