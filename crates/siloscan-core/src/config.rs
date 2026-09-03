@@ -1587,4 +1587,12 @@ api = ["src/a\\[0\\].rs"]
         let err = load(&path).unwrap_err();
         assert!(err.contains("unknown field"), "{err}");
     }
+
+    #[test]
+    fn an_unknown_language_name_in_a_mapping_is_accepted() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write(dir.path(), CONFIG_NAME, "[languages]\nfoo = \"cobol\"\n");
+        let config = load(&path).expect("should load");
+        assert_eq!(config.languages["foo"], "cobol");
+    }
 }

@@ -3016,4 +3016,71 @@ rules:
         assert_eq!(old.metrics.files["mapped.tmpl"].code_lines, None);
         assert_eq!(new.metrics.files["mapped.tmpl"].code_lines, Some(1));
     }
+
+    #[test]
+    fn an_unknown_language_name_in_a_mapping_matches_nothing() {
+        const RULES: &str = r#"
+version: 1
+rules:
+  - id: test.all
+    severity: warning
+    message: "needle all"
+    regex:
+      pattern: "needle"
+  - id: test.rust
+    severity: warning
+    message: "needle rust"
+    languages: [rust]
+    regex:
+      pattern: "needle"
+"#;
+        let repository = tempfile::tempdir().unwrap();
+        write(repository.path(), "mapped.cobol", "needle\n");
+        write(repository.path(), "target.rs", "needle\n");
+        let rules = crate::rules::RuleSet {
+            rules: crate::rules::load_str(RULES, "unknown-language").unwrap(),
+            sources: vec![("unknown-language".into(), RULES.into())],
+        };
+        let mapped_config: crate::config::Config =
+            toml::from_str("[languages]\ncobol = \"cobol\"\n").unwrap();
+        let cache_root = tempfile::tempdir().unwrap();
+        let cache = crate::cache::Cache::open_in(
+            cache_root.path(),
+            repository.path(),
+            &rules,
+            &crate::cache::PathScope::ScanRoot,
+        );
+
+        let report = crate::scan::scan_opts(
+            repository.path(),
+            &rules,
+            &crate::scan::ScanOptions {
+                config: Some(&mapped_config),
+                cache: Some(&cache),
+                ..crate::scan::ScanOptions::default()
+            },
+            &mut |_| {},
+        )
+        .unwrap();
+
+        // The file mapped to "cobol" produces the regex finding (all languages),
+        // not the rust-specific finding, because "cobol" is not a known language.
+        let mapped_findings: Vec<_> = report
+            .findings
+            .iter()
+            .filter(|f| f.path == "mapped.cobol")
+            .collect();
+        assert_eq!(mapped_findings.len(), 1);
+        assert_eq!(mapped_findings[0].rule_id, "test.all");
+
+        // The rust file produces both findings: the all-languages and the rust-specific.
+        let rust_findings: Vec<_> = report
+            .findings
+            .iter()
+            .filter(|f| f.path == "target.rs")
+            .collect();
+        assert_eq!(rust_findings.len(), 2);
+        assert!(rust_findings.iter().any(|f| f.rule_id == "test.all"));
+        assert!(rust_findings.iter().any(|f| f.rule_id == "test.rust"));
+    }
 }
