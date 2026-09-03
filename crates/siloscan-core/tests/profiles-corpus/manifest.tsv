@@ -176,8 +176,6 @@ typescript/nesting-depth-over.ts	1	maintainability.typescript.nesting-depth	the 
 typescript/nesting-depth-under.ts	1	NONE	the loops nest 5 deep, which the profile allows
 typescript/cyclomatic-complexity-over.ts	1	maintainability.typescript.cyclomatic-complexity	the decision count is 26, one over the profile's 25
 typescript/cyclomatic-complexity-under.ts	1	NONE	the decision count is 25, which the profile allows
-typescript/self-comparison-positive.ts	2	reliability.typescript.self-comparison	both operands are the identical identifier, so the comparison cannot decide anything
-typescript/self-comparison-negative.ts	2	NONE	the operands are two different identifiers, which is an ordinary comparison
 typescript/self-assignment-positive.ts	2	reliability.typescript.self-assignment	the assignment writes the variable back to itself and has no effect
 typescript/self-assignment-negative.ts	2	NONE	the assignment reads a different variable, so it has an effect
 typescript/identical-if-branches-positive.ts	2	reliability.typescript.identical-if-branches	both arms are byte-identical, which is the copy-paste shape the rule owns
