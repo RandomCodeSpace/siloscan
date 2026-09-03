@@ -26,3 +26,44 @@
 # and justifications stay in place, and the document's @N is bumped because a
 # rule id disappeared.
 rule_id	max_corpus	max_per_kloc	measured_at	ticket
+maintainability.java.cyclomatic-complexity	0	0.131858	2026-09-03	#78 P4b: max of commons-lang 0.1319, gson 0.1070, guava 0.0195
+maintainability.java.function-length	0	0.213002	2026-09-03	#78 P4b: max of commons-lang 0.2130, gson 0.0803, guava 0.0995
+maintainability.java.nesting-depth	0	0.347845	2026-09-03	#78 P4b: max of commons-lang 0.1319, gson 0.3478, guava 0.1132
+maintainability.java.parameter-count	0	0.226361	2026-09-03	#78 P4b: max of commons-lang 0.0203, gson 0.0000, guava 0.2264
+reliability.java.identical-if-branches	0	0.003903	2026-09-03	#78 P4b: max of commons-lang 0.0000, gson 0.0000, guava 0.0039
+reliability.java.self-comparison	0	0.000000	2026-09-03	#78 P4b: no finding on commons-lang, gson or guava
+reliability.java.string-literal-identity	0	0.000000	2026-09-03	#78 P4b: no finding on commons-lang, gson or guava
+maintainability.c.cyclomatic-complexity	0	0.775134	2026-09-03	#78 P4b: max of curl 0.7751, jq 0.7284, redis 0.7033
+maintainability.c.function-length	0	0.819428	2026-09-03	#78 P4b: max of curl 0.8194, jq 0.7867, redis 0.7365
+maintainability.c.nesting-depth	0	0.709973	2026-09-03	#78 P4b: max of curl 0.6699, jq 0.5245, redis 0.7100
+maintainability.c.parameter-count	0	0.272046	2026-09-03	#78 P4b: max of curl 0.1882, jq 0.1457, redis 0.2720
+reliability.c.assignment-in-condition	0	0.495324	2026-09-03	#78 P4b: max of curl 0.0000, jq 0.4953, redis 0.0000
+reliability.c.identical-if-branches	0	0.006636	2026-09-03	#78 P4b: max of curl 0.0000, jq 0.0000, redis 0.0066
+reliability.c.self-assignment	0	0.006636	2026-09-03	#78 P4b: max of curl 0.0000, jq 0.0000, redis 0.0066
+reliability.c.self-comparison	0	0.000000	2026-09-03	#78 P4b: no finding on curl, jq or redis
+reliability.c.string-literal-comparison	0	0.000000	2026-09-03	#78 P4b: no finding on curl, jq or redis
+maintainability.cpp.cyclomatic-complexity	0	0.699092	2026-09-03	#78 P4b: max of abseil-cpp 0.1866, fmt 0.0562, nlohmann/json 0.6991
+maintainability.cpp.nesting-depth	0	0.224619	2026-09-03	#78 P4b: max of abseil-cpp 0.1054, fmt 0.2246, nlohmann/json 0.2197
+maintainability.cpp.parameter-count	0	0.056155	2026-09-03	#78 P4b: max of abseil-cpp 0.0243, fmt 0.0562, nlohmann/json 0.0399
+maintainability.cpp.using-namespace-in-header	0	0.000000	2026-09-03	#78 P4b: no finding on abseil-cpp, fmt or nlohmann/json
+reliability.cpp.assignment-in-condition	0	0.000000	2026-09-03	#78 P4b: no finding on abseil-cpp, fmt or nlohmann/json
+reliability.cpp.empty-if-body	0	0.000000	2026-09-03	#78 P4b: no finding on abseil-cpp, fmt or nlohmann/json
+reliability.cpp.identical-if-branches	0	0.000000	2026-09-03	#78 P4b: no finding on abseil-cpp, fmt or nlohmann/json
+reliability.cpp.self-assignment	0	0.000000	2026-09-03	#78 P4b: no finding on abseil-cpp, fmt or nlohmann/json
+maintainability.csharp.cyclomatic-complexity	0	0.384109	2026-09-03	#78 P4b: max of AutoMapper 0.0208, Dapper 0.2483, Newtonsoft.Json 0.3841
+maintainability.csharp.function-length	0	0.361514	2026-09-03	#78 P4b: max of AutoMapper 0.0416, Dapper 0.3476, Newtonsoft.Json 0.3615
+maintainability.csharp.nesting-depth	0	0.248263	2026-09-03	#78 P4b: max of AutoMapper 0.0000, Dapper 0.2483, Newtonsoft.Json 0.1958
+maintainability.csharp.parameter-count	0	0.893744	2026-09-03	#78 P4b: max of AutoMapper 0.0000, Dapper 0.8937, Newtonsoft.Json 0.0678
+reliability.csharp.async-void	0	0.148958	2026-09-03	#78 P4b: max of AutoMapper 0.0000, Dapper 0.1490, Newtonsoft.Json 0.0000
+reliability.csharp.empty-catch	0	0.347568	2026-09-03	#78 P4b: max of AutoMapper 0.0416, Dapper 0.3476, Newtonsoft.Json 0.0527
+reliability.csharp.identical-if-branches	0	0.000000	2026-09-03	#78 P4b: no finding on AutoMapper, Dapper or Newtonsoft.Json
+reliability.csharp.rethrow-loses-stack	0	0.000000	2026-09-03	#78 P4b: no finding on AutoMapper, Dapper or Newtonsoft.Json
+reliability.csharp.self-comparison	0	0.000000	2026-09-03	#78 P4b: no finding on AutoMapper, Dapper or Newtonsoft.Json
+maintainability.ruby.cyclomatic-complexity	0	0.338735	2026-09-03	#78 P4b: max of puma 0.3387, rails 0.0108, sinatra 0.0000
+maintainability.ruby.nesting-depth	0	0.112912	2026-09-03	#78 P4b: max of puma 0.1129, rails 0.0054, sinatra 0.0563
+maintainability.ruby.parameter-count	0	0.338735	2026-09-03	#78 P4b: max of puma 0.3387, rails 0.1454, sinatra 0.0000
+reliability.ruby.ensure-return	0	0.000000	2026-09-03	#78 P4b: no finding on puma, rails or sinatra
+reliability.ruby.identical-if-branches	0	0.000000	2026-09-03	#78 P4b: no finding on puma, rails or sinatra
+reliability.ruby.rescue-exception	0	0.846836	2026-09-03	#78 P4b: max of puma 0.8468, rails 0.1157, sinatra 0.2817
+reliability.ruby.rescue-modifier	0	0.846836	2026-09-03	#78 P4b: max of puma 0.8468, rails 0.3984, sinatra 0.1690
+reliability.ruby.self-assignment	0	0.010768	2026-09-03	#78 P4b: max of puma 0.0000, rails 0.0108, sinatra 0.0000

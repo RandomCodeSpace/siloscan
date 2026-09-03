@@ -1,0 +1,39 @@
+# Java maintainability profile. Original work: the four measures are the
+# engine's own (crates/siloscan-core/src/engines/metric.rs) and the thresholds
+# are this repository's, chosen conservatively so the first run of a real tree
+# stays readable.
+#
+# Identity: maintainability-java@1. See crates/siloscan-core/src/profiles.rs.
+version: 1
+rules:
+  - id: maintainability.java.function-length
+    severity: info
+    message: 'This method is longer than the profile allows.'
+    languages: [java]
+    metric:
+      measure: function-length
+      max: 120
+
+  - id: maintainability.java.parameter-count
+    severity: info
+    message: 'This method takes more parameters than the profile allows.'
+    languages: [java]
+    metric:
+      measure: parameter-count
+      max: 7
+
+  - id: maintainability.java.nesting-depth
+    severity: info
+    message: 'This method nests more deeply than the profile allows.'
+    languages: [java]
+    metric:
+      measure: nesting-depth
+      max: 5
+
+  - id: maintainability.java.cyclomatic-complexity
+    severity: info
+    message: 'This method has more branches than the profile allows.'
+    languages: [java]
+    metric:
+      measure: cyclomatic-complexity
+      max: 25

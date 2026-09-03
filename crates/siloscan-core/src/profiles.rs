@@ -4,11 +4,11 @@
 //! in the binary the way the secrets pack is. [`REGISTRY`] is the whole list;
 //! [`select`] is the one place that decides which of them a scan loads.
 //!
-//! The registry is empty. The seam is real - selection, loading, the report
-//! entries and the capability all run - so shipping a document is adding a file
-//! under `crates/siloscan-core/rules/profiles/` and one [`Profile`] here, and
-//! nothing else. Until then every scan selects nothing and every byte of every
-//! report is what it was.
+//! Shipping a document is adding a file under
+//! `crates/siloscan-core/rules/profiles/` and one [`Profile`] here, and nothing
+//! else. Selection still defaults to [`ProfileSelection::None`], so a scan that
+//! does not ask for a profile loads none of these and every byte of its report
+//! is what it was.
 
 /// One embedded profile document.
 ///
@@ -59,10 +59,58 @@ impl Profile {
 }
 
 /// Every embedded profile document, ordered by identity.
-///
-/// Empty on purpose; see the module docs. Entries look like
-/// `Profile::new("reliability-rust@1", "rust", include_str!("../rules/profiles/reliability/rust.yaml"))`.
-pub const REGISTRY: &[Profile] = &[];
+pub const REGISTRY: &[Profile] = &[
+    Profile::new(
+        "maintainability-c@1",
+        "c",
+        include_str!("../rules/profiles/maintainability-c.yaml"),
+    ),
+    Profile::new(
+        "maintainability-cpp@1",
+        "cpp",
+        include_str!("../rules/profiles/maintainability-cpp.yaml"),
+    ),
+    Profile::new(
+        "maintainability-csharp@1",
+        "csharp",
+        include_str!("../rules/profiles/maintainability-csharp.yaml"),
+    ),
+    Profile::new(
+        "maintainability-java@1",
+        "java",
+        include_str!("../rules/profiles/maintainability-java.yaml"),
+    ),
+    Profile::new(
+        "maintainability-ruby@1",
+        "ruby",
+        include_str!("../rules/profiles/maintainability-ruby.yaml"),
+    ),
+    Profile::new(
+        "reliability-c@1",
+        "c",
+        include_str!("../rules/profiles/reliability-c.yaml"),
+    ),
+    Profile::new(
+        "reliability-cpp@1",
+        "cpp",
+        include_str!("../rules/profiles/reliability-cpp.yaml"),
+    ),
+    Profile::new(
+        "reliability-csharp@1",
+        "csharp",
+        include_str!("../rules/profiles/reliability-csharp.yaml"),
+    ),
+    Profile::new(
+        "reliability-java@1",
+        "java",
+        include_str!("../rules/profiles/reliability-java.yaml"),
+    ),
+    Profile::new(
+        "reliability-ruby@1",
+        "ruby",
+        include_str!("../rules/profiles/reliability-ruby.yaml"),
+    ),
+];
 
 /// Which embedded profiles a scan loads.
 ///
@@ -152,12 +200,33 @@ mod tests {
         selected.iter().map(|profile| profile.identity()).collect()
     }
 
-    /// The shipped registry is empty, and that is the whole reason every
-    /// existing report is byte-identical. A document arriving without the
-    /// gates in place fails here first.
+    /// Every shipped entry is a `<profile>-<language>@<n>` identity whose
+    /// language is the entry's own, and the list is ordered by identity so a
+    /// reader and `select` agree on what "first" means. What the documents
+    /// themselves contain is held by `tests/profile_corpus.rs`.
     #[test]
-    fn nothing_is_shipped_yet() {
-        assert!(REGISTRY.is_empty());
+    fn the_shipped_registry_is_ordered_and_self_consistent() {
+        for profile in REGISTRY {
+            let stem = profile
+                .identity()
+                .strip_suffix("@1")
+                .unwrap_or_else(|| panic!("{} has no @1 suffix", profile.identity()));
+            let (family, language) = stem
+                .rsplit_once('-')
+                .unwrap_or_else(|| panic!("{stem} is not <profile>-<language>"));
+            assert!(
+                family == "reliability" || family == "maintainability",
+                "{family} is not a profile family"
+            );
+            assert_eq!(language, profile.language(), "{stem} disagrees with itself");
+        }
+        let identities: Vec<&str> = REGISTRY.iter().map(Profile::identity).collect();
+        let mut sorted = identities.clone();
+        sorted.sort_unstable();
+        assert_eq!(
+            identities, sorted,
+            "the registry is not ordered by identity"
+        );
     }
 
     #[test]
@@ -239,7 +308,7 @@ mod tests {
     #[test]
     fn an_unknown_identity_against_an_empty_registry_says_so() {
         let error = select(
-            REGISTRY,
+            &[],
             &ProfileSelection::Named(vec!["reliability-rust@1".to_string()]),
             &[],
         )

@@ -1,0 +1,52 @@
+# Java reliability profile. Original work: every query below was written
+# against tree-sitter-java's own node-types.json. Rule names such as "identical
+# branches" are not ownable and no pattern, query or message text is taken from
+# another analyser.
+#
+# Identity: reliability-java@1. See crates/siloscan-core/src/profiles.rs.
+#
+# Three candidates from the rule matrix are deliberately absent, each removed
+# on the measurement recorded in tests/profiles-corpus/noise/limits.tsv rather
+# than re-tuned:
+#   empty-catch              4.67 per kLOC on guava, and the findings are the
+#                            pre-JUnit5 `catch (X expected) {}` assertion idiom.
+#   unreachable-after-return every finding on gson, commons-lang and guava is a
+#                            trailing comment on the return line, not code.
+#   self-assignment          the query does not constrain the `operator` field,
+#                            so `b *= b` and `n += n` match; all 22 findings on
+#                            guava are compound assignments.
+version: 1
+rules:
+  - id: reliability.java.self-comparison
+    severity: warning
+    message: 'Both operands of this comparison are the same identifier, so the result is constant.'
+    ast:
+      java: |
+        ((binary_expression
+           left: (identifier) @l
+           operator: "=="
+           right: (identifier) @r) @report
+         (#eq? @l @r))
+
+  - id: reliability.java.string-literal-identity
+    severity: warning
+    message: 'Comparing to a string literal with == tests reference identity, not contents. Use equals.'
+    ast:
+      java: |
+        (binary_expression
+          left: (_)
+          operator: "=="
+          right: (string_literal)) @report
+        (binary_expression
+          left: (string_literal)
+          operator: "==") @report
+
+  - id: reliability.java.identical-if-branches
+    severity: warning
+    message: 'Both branches of this if statement have the same body, so the condition decides nothing.'
+    ast:
+      java: |
+        ((if_statement
+           consequence: (block) @a
+           alternative: (block) @b) @report
+         (#eq? @a @b))

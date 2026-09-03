@@ -1,0 +1,39 @@
+# Ruby maintainability profile. Original work: the four measures are the
+# engine's own (crates/siloscan-core/src/engines/metric.rs) and the thresholds
+# are this repository's, chosen conservatively so the first run of a real tree
+# stays readable.
+#
+# Identity: maintainability-ruby@1. See crates/siloscan-core/src/profiles.rs.
+#
+# function-length is deliberately absent. The engine counts Ruby's `do_block`
+# as a function on purpose - in Ruby a block is where the code is - so a long
+# RSpec `describe ... do` is a unit, and sinatra's spec suite put the rule at
+# 1.3520 per kLOC at the profile's starting 120. Its one permitted raise, to
+# 150, left it at 1.0140, still over the gate, so the rule is removed rather
+# than raised a second time. The other three measures are unaffected: a spec
+# block that long is still shallow and unbranched.
+version: 1
+rules:
+  - id: maintainability.ruby.parameter-count
+    severity: info
+    message: 'This method takes more parameters than the profile allows.'
+    languages: [ruby]
+    metric:
+      measure: parameter-count
+      max: 7
+
+  - id: maintainability.ruby.nesting-depth
+    severity: info
+    message: 'This method nests more deeply than the profile allows.'
+    languages: [ruby]
+    metric:
+      measure: nesting-depth
+      max: 5
+
+  - id: maintainability.ruby.cyclomatic-complexity
+    severity: info
+    message: 'This method has more branches than the profile allows.'
+    languages: [ruby]
+    metric:
+      measure: cyclomatic-complexity
+      max: 25

@@ -1,0 +1,60 @@
+# C++ reliability profile. Original work: every query below was written
+# against tree-sitter-cpp's own node-types.json. Rule names such as
+# "assignment in condition" are not ownable and no pattern, query or message
+# text is taken from another analyser.
+#
+# Identity: reliability-cpp@1. See crates/siloscan-core/src/profiles.rs.
+#
+# Three candidates from the rule matrix are deliberately absent, each removed
+# on the measurement recorded in tests/profiles-corpus/noise/limits.tsv rather
+# than re-tuned:
+#   self-comparison           every finding read on nlohmann/json and abseil is
+#                             a deliberate reflexivity assertion over an
+#                             overloaded operator== - `CHECK(it1 == it1)`,
+#                             `static_assert(t1 == t1, "")` - where the result
+#                             is not constant and nothing is wrong.
+#   unreachable-after-return  0.5093 per kLOC on nlohmann/json, and every
+#                             finding read on all three repositories is a
+#                             trailing comment on the return line, not code.
+#   empty-catch               every finding read on fmt and abseil is the
+#                             `try { f(); FAIL(); } catch (const E&) {}`
+#                             assertion idiom or a fuzz entry point, not an
+#                             error dropped by accident.
+version: 1
+rules:
+  - id: reliability.cpp.self-assignment
+    severity: warning
+    message: 'This assignment writes a variable to itself and has no effect.'
+    ast:
+      cpp: |
+        ((assignment_expression
+           left: (identifier) @l
+           operator: "="
+           right: (identifier) @r) @report
+         (#eq? @l @r))
+
+  - id: reliability.cpp.assignment-in-condition
+    severity: warning
+    message: 'This condition assigns rather than compares. Wrap it in a second pair of parentheses if that is deliberate.'
+    ast:
+      cpp: |
+        (if_statement
+          condition: (condition_clause
+            value: (assignment_expression) @report))
+
+  - id: reliability.cpp.empty-if-body
+    severity: warning
+    message: 'The body of this if is a stray semicolon, so the branch does nothing.'
+    ast:
+      cpp: |
+        (if_statement consequence: (expression_statement . ";" .) @report)
+
+  - id: reliability.cpp.identical-if-branches
+    severity: warning
+    message: 'Both branches of this if statement have the same body, so the condition decides nothing.'
+    ast:
+      cpp: |
+        ((if_statement
+           consequence: (compound_statement) @a
+           alternative: (else_clause (compound_statement) @b)) @report
+         (#eq? @a @b))

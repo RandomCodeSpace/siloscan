@@ -13,3 +13,85 @@
 # tree/ is byte-identical to the rule matrix's positive_example or
 # negative_example.
 path	line	expect	justification
+java/positive.java	3	reliability.java.self-comparison	both operands are the identical identifier, so the comparison is constant
+java/positive.java	8	reliability.java.string-literal-identity	`==` against a string literal compares references, not contents
+java/positive.java	13	reliability.java.identical-if-branches	both arms are the byte-identical block `{ return 1; }`
+java/negative.java	3	NONE	the operands are different identifiers, which is an ordinary comparison
+java/negative.java	8	NONE	`equals` compares contents, which is the correct spelling
+java/negative.java	13	NONE	the two arms return different values, so the condition decides something
+java/metric-over.java	2	maintainability.java.function-length	the method spans 121 lines, one over the profile's 120
+java/metric-over.java	125	maintainability.java.parameter-count	the method takes 8 parameters, one over the profile's 7
+java/metric-over.java	130	maintainability.java.nesting-depth	six nested if statements, one over the profile's 5
+java/metric-over.java	147	maintainability.java.cyclomatic-complexity	25 branches plus the entry path is 26, one over the profile's 25
+java/metric-under.java	2	NONE	the method spans exactly 120 lines, which is the profile's limit and not over it
+java/metric-under.java	124	NONE	seven parameters is exactly the profile's limit
+java/metric-under.java	129	NONE	five nested if statements is exactly the profile's limit
+java/metric-under.java	144	NONE	24 branches plus the entry path is 25, exactly the profile's limit
+c/positive.c	2	reliability.c.self-comparison	both operands are the identical identifier, so the comparison is constant
+c/positive.c	5	reliability.c.self-assignment	the assignment writes `a` to itself and has no effect
+c/positive.c	8	reliability.c.assignment-in-condition	the condition assigns rather than compares, with no second pair of parentheses
+c/positive.c	14	reliability.c.identical-if-branches	both arms are the byte-identical block `{ return 1; }`
+c/positive.c	21	reliability.c.string-literal-comparison	`==` against a string literal compares addresses, not contents
+c/negative.c	2	NONE	the operands are different identifiers, which is an ordinary comparison
+c/negative.c	5	NONE	the operands are different identifiers, which is an ordinary assignment
+c/negative.c	8	NONE	the second pair of parentheses is the compilers' own deliberate-assignment form
+c/negative.c	14	NONE	the two arms return different values, so the condition decides something
+c/negative.c	22	NONE	strcmp compares contents, which is the correct spelling
+c/metric-over.c	1	maintainability.c.function-length	the function spans 151 lines, one over this document's raised 150
+c/metric-over.c	152	maintainability.c.parameter-count	the function takes 8 parameters, one over the profile's 7
+c/metric-over.c	155	maintainability.c.nesting-depth	six nested if statements, one over the profile's 5
+c/metric-over.c	170	maintainability.c.cyclomatic-complexity	30 branches plus the entry path is 31, one over this document's raised 30
+c/metric-under.c	1	NONE	the function spans exactly 150 lines, which is this document's limit and not over it
+c/metric-under.c	151	NONE	seven parameters is exactly the profile's limit
+c/metric-under.c	154	NONE	five nested if statements is exactly the profile's limit
+c/metric-under.c	167	NONE	29 branches plus the entry path is 30, exactly this document's limit
+cpp/positive.cpp	2	reliability.cpp.self-assignment	the assignment writes `a` to itself and has no effect
+cpp/positive.cpp	5	reliability.cpp.assignment-in-condition	the condition assigns rather than compares, with no second pair of parentheses
+cpp/positive.cpp	11	reliability.cpp.empty-if-body	the branch body is a stray semicolon
+cpp/positive.cpp	15	reliability.cpp.identical-if-branches	both arms are the byte-identical block `{ return 1; }`
+cpp/positive.hpp	2	maintainability.cpp.using-namespace-in-header	the directive is at global scope in a header, so it leaks into every includer
+cpp/negative.cpp	2	NONE	the operands are different identifiers, which is an ordinary assignment
+cpp/negative.cpp	5	NONE	the second pair of parentheses is the compilers' own deliberate-assignment form
+cpp/negative.cpp	11	NONE	an empty block is a different node from a stray semicolon
+cpp/negative.cpp	15	NONE	the two arms return different values, so the condition decides something
+cpp/negative.hpp	2	NONE	the call is qualified, so the header imports no namespace
+cpp/metric-over.cpp	1	maintainability.cpp.parameter-count	the function takes 8 parameters, one over the profile's 7
+cpp/metric-over.cpp	4	maintainability.cpp.nesting-depth	six nested if statements, one over the profile's 5
+cpp/metric-over.cpp	19	maintainability.cpp.cyclomatic-complexity	25 branches plus the entry path is 26, one over the profile's 25
+cpp/metric-under.cpp	1	NONE	seven parameters is exactly the profile's limit
+cpp/metric-under.cpp	4	NONE	five nested if statements is exactly the profile's limit
+cpp/metric-under.cpp	17	NONE	24 branches plus the entry path is 25, exactly the profile's limit
+csharp/metric-over.cs	2	maintainability.csharp.function-length	the method spans 121 lines, one over the profile's 120
+csharp/metric-over.cs	125	maintainability.csharp.parameter-count	the method takes 8 parameters, one over the profile's 7
+csharp/metric-over.cs	130	maintainability.csharp.nesting-depth	six nested if statements, one over the profile's 5
+csharp/metric-over.cs	147	maintainability.csharp.cyclomatic-complexity	25 branches plus the entry path is 26, one over the profile's 25
+csharp/metric-under.cs	2	NONE	the method spans exactly 120 lines, which is the profile's limit and not over it
+csharp/metric-under.cs	124	NONE	seven parameters is exactly the profile's limit
+csharp/metric-under.cs	129	NONE	five nested if statements is exactly the profile's limit
+csharp/metric-under.cs	144	NONE	24 branches plus the entry path is 25, exactly the profile's limit
+csharp/positive.cs	1	reliability.csharp.empty-catch	the catch body is literally `{}`, so the exception is dropped without a record
+csharp/positive.cs	2	reliability.csharp.self-comparison	both operands are the identical identifier, so the comparison is constant
+csharp/positive.cs	3	reliability.csharp.rethrow-loses-stack	throwing the caught identifier resets the stack trace a bare throw would keep
+csharp/positive.cs	4	reliability.csharp.async-void	the method is async and returns void, so a fault escapes to the thread pool
+csharp/positive.cs	5	reliability.csharp.identical-if-branches	both arms are the byte-identical block `{ return 1; }`
+csharp/negative.cs	1	NONE	the handler logs the exception, so the block is not empty
+csharp/negative.cs	2	NONE	the operands are different identifiers, which is an ordinary comparison
+csharp/negative.cs	3	NONE	a bare throw rethrows and keeps the stack trace
+csharp/negative.cs	4	NONE	the method returns Task, so a fault reaches whoever awaits it
+csharp/negative.cs	5	NONE	the two arms return different values, so the condition decides something
+ruby/positive.rb	3	reliability.ruby.rescue-exception	rescuing Exception catches SignalException and NoMemoryError as well
+ruby/positive.rb	7	reliability.ruby.rescue-modifier	the modifier swallows every StandardError with no way to see which
+ruby/positive.rb	11	reliability.ruby.self-assignment	the assignment writes `a` to itself and has no effect
+ruby/positive.rb	15	reliability.ruby.identical-if-branches	both arms are the byte-identical single statement `1`
+ruby/positive.rb	24	reliability.ruby.ensure-return	the return in ensure discards the exception on its way out
+ruby/negative.rb	3	NONE	StandardError is the correct rescue and is a different constant
+ruby/negative.rb	9	NONE	an explicit begin/rescue is not the modifier form
+ruby/negative.rb	14	NONE	`@a = a` assigns the parameter to an instance variable, which is a different node
+ruby/negative.rb	18	NONE	the two arms evaluate to different values, so the condition decides something
+ruby/negative.rb	27	NONE	the ensure calls h rather than returning, so no exception is discarded
+ruby/metric-over.rb	1	maintainability.ruby.parameter-count	the method takes 8 parameters, one over the profile's 7
+ruby/metric-over.rb	4	maintainability.ruby.nesting-depth	six nested if expressions, one over the profile's 5
+ruby/metric-over.rb	19	maintainability.ruby.cyclomatic-complexity	25 branches plus the entry path is 26, one over the profile's 25
+ruby/metric-under.rb	1	NONE	seven parameters is exactly the profile's limit
+ruby/metric-under.rb	4	NONE	five nested if expressions is exactly the profile's limit
+ruby/metric-under.rb	17	NONE	24 branches plus the entry path is 25, exactly the profile's limit

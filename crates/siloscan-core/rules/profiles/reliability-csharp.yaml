@@ -1,0 +1,69 @@
+# C# reliability profile. Original work: every query below was written against
+# tree-sitter-c-sharp's own node-types.json. Rule names such as "async void"
+# are not ownable and no pattern, query or message text is taken from another
+# analyser.
+#
+# Identity: reliability-csharp@1. See crates/siloscan-core/src/profiles.rs.
+#
+# Two candidates from the rule matrix are deliberately absent, each removed on
+# the measurement recorded in tests/profiles-corpus/noise/limits.tsv rather
+# than re-tuned:
+#   self-assignment           the query does not constrain the `operator`
+#                             field and cannot tell an object initializer from
+#                             an assignment, so all four findings across the
+#                             three repositories are `new Source { Id = Id }`
+#                             or `s += s`, and none is a self-assignment.
+#   unreachable-after-return  every finding read is a comment, a `#pragma
+#                             warning restore` line, or a C# local function
+#                             declared after the return - and a local function
+#                             is hoisted, so it is reachable.
+version: 1
+rules:
+  - id: reliability.csharp.empty-catch
+    severity: warning
+    message: 'This catch block is empty, so the exception is discarded with no record that it happened. A handler that holds only a comment is not reported.'
+    ast:
+      csharp: |
+        (catch_clause body: (block "{" . "}") @report)
+
+  - id: reliability.csharp.self-comparison
+    severity: warning
+    message: 'Both operands of this comparison are the same identifier, so the result is constant.'
+    ast:
+      csharp: |
+        ((binary_expression
+           left: (identifier) @l
+           operator: "=="
+           right: (identifier) @r) @report
+         (#eq? @l @r))
+
+  - id: reliability.csharp.rethrow-loses-stack
+    severity: warning
+    message: 'Throwing the caught exception resets its stack trace. Write a bare throw to rethrow it.'
+    ast:
+      csharp: |
+        ((catch_clause
+           (catch_declaration name: (identifier) @n)
+           body: (block (throw_statement (identifier) @t))) @report
+         (#eq? @n @t))
+
+  - id: reliability.csharp.async-void
+    severity: warning
+    message: 'An async void method cannot be awaited, so a fault inside it is raised on the thread pool rather than at the caller.'
+    ast:
+      csharp: |
+        ((method_declaration
+           (modifier) @m
+           returns: (predefined_type) @r) @report
+         (#eq? @m "async")
+         (#eq? @r "void"))
+
+  - id: reliability.csharp.identical-if-branches
+    severity: warning
+    message: 'Both branches of this if statement have the same body, so the condition decides nothing.'
+    ast:
+      csharp: |
+        ((if_statement
+           consequence: (block) @a
+           alternative: (block) @b) @report
+         (#eq? @a @b))
