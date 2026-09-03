@@ -96,6 +96,8 @@
 6. **Ripgrep**: Pinned latest stable `15.2.0` rather than the design's unspecified version.
 7. **Dapper**: Original design excluded sidekiq (LGPL 6.x); puma substituted as designed, and Dapper's Apache-2.0 license verified (`2.1.79`).
 
-All other repositories match design selections. Every license determined by reading the LICENSE file at the pinned commit. No exclusions required; all 30 repositories qualify under the permissive list (MIT, Apache-2.0, BSD-2/3-Clause, ISC, MPL-2.0, Unlicense, 0BSD, PSF-2.0, Ruby).
+All other repositories match design selections. Every license determined by reading the LICENSE file at the pinned commit. No exclusions required; all 29 repositories qualify under the permissive list (MIT, Apache-2.0, BSD-2/3-Clause, ISC, MPL-2.0, Unlicense, 0BSD, PSF-2.0, Ruby).
+
+**Count**: 29 rows, not the 30 the design's table lists. The Go section has two, because the design's third Go entry is the local in-house `otelcontext` repository: it has no URL to clone and no upstream commit to pin, so it is not a row here. `scripts/profile_noise.py` reads exactly these 29 rows.
 
 **Note**: Rails measurement shows 3,334 files; the design stated "activesupport/ only" (~50k LoC). This count includes the full Rails repository at tag `v8.1.3.1`. If strict adherence to "activesupport/ only" is required, a separate measurement isolating that subdirectory should be performed.
