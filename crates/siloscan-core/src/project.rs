@@ -10,7 +10,7 @@ use crate::walk::{FileKind, WalkResult};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum DetectionStatus {
+pub enum DetectionStatus {
     Generic,
     Complete,
     Partial,
@@ -18,59 +18,59 @@ pub(crate) enum DetectionStatus {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
-pub(crate) struct Evidence {
-    pub(crate) ecosystem: String,
-    pub(crate) kind: String,
-    pub(crate) path: String,
-    pub(crate) status: DetectionStatus,
-    pub(crate) parser: String,
-    pub(crate) facts: Vec<String>,
-    pub(crate) reasons: Vec<String>,
+pub struct Evidence {
+    pub ecosystem: String,
+    pub kind: String,
+    pub path: String,
+    pub status: DetectionStatus,
+    pub parser: String,
+    pub facts: Vec<String>,
+    pub reasons: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
-pub(crate) struct ProjectUnit {
-    pub(crate) ecosystem: String,
-    pub(crate) kind: String,
-    pub(crate) root: String,
-    pub(crate) evidence: String,
+pub struct ProjectUnit {
+    pub ecosystem: String,
+    pub kind: String,
+    pub root: String,
+    pub evidence: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
-pub(crate) struct WorkspaceRelation {
-    pub(crate) ecosystem: String,
-    pub(crate) kind: String,
-    pub(crate) workspace: String,
-    pub(crate) member: String,
-    pub(crate) evidence: String,
-    pub(crate) declaration_index: Option<usize>,
-    pub(crate) status: String,
-    pub(crate) reason: Option<String>,
+pub struct WorkspaceRelation {
+    pub ecosystem: String,
+    pub kind: String,
+    pub workspace: String,
+    pub member: String,
+    pub evidence: String,
+    pub declaration_index: Option<usize>,
+    pub status: String,
+    pub reason: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
-pub(crate) struct SourceRootHint {
-    pub(crate) ecosystem: String,
-    pub(crate) kind: String,
-    pub(crate) path: String,
-    pub(crate) evidence: String,
+pub struct SourceRootHint {
+    pub ecosystem: String,
+    pub kind: String,
+    pub path: String,
+    pub evidence: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub(crate) struct ProjectFacts {
-    pub(crate) status: DetectionStatus,
-    pub(crate) generic_fallback: bool,
-    pub(crate) evidence: Vec<Evidence>,
-    pub(crate) units: Vec<ProjectUnit>,
-    pub(crate) workspace_relations: Vec<WorkspaceRelation>,
-    pub(crate) languages: Vec<String>,
-    pub(crate) source_roots: Vec<SourceRootHint>,
+pub struct ProjectFacts {
+    pub status: DetectionStatus,
+    pub generic_fallback: bool,
+    pub evidence: Vec<Evidence>,
+    pub units: Vec<ProjectUnit>,
+    pub workspace_relations: Vec<WorkspaceRelation>,
+    pub languages: Vec<String>,
+    pub source_roots: Vec<SourceRootHint>,
 }
 
 /// Derive normalized project facts from the exact inventory admitted by the
 /// scan. This function never traverses `root`; package 4 will retain the same
 /// `WalkResult` and pass it to the prepared scanner after resolution.
-pub(crate) fn detect(root: &Path, inventory: &WalkResult, config: Option<&Config>) -> ProjectFacts {
+pub fn detect(root: &Path, inventory: &WalkResult, config: Option<&Config>) -> ProjectFacts {
     let inventory = Inventory::new(root, inventory, config);
     let mut facts = ProjectFacts {
         status: DetectionStatus::Generic,

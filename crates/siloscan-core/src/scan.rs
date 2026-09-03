@@ -513,6 +513,46 @@ fn run_with_workers(
     )
 }
 
+/// The setup [`scan_opts`] performs before it walks: silo globs for boundary
+/// rules, the duplication scope check, and the coverage report a coverage rule
+/// needs. Split out so a caller that resolves setup ahead of the walk - see
+/// [`crate::plan`] - fails on a bad config before it pays for the traversal,
+/// and then hands the silo globs straight to [`scan_prepared`].
+pub(crate) fn prepared_setup(
+    root: &Path,
+    rules: &RuleSet,
+    config: Option<&crate::config::Config>,
+    coverage: Option<&crate::coverage::CoverageReport>,
+) -> Result<Option<Vec<(String, GlobSet)>>, String> {
+    let silo_sets = boundary_setup(root, rules, config)?;
+    duplication_setup(root, rules, config)?;
+    crate::coverage::require_report(&rules.rules, coverage)?;
+    Ok(silo_sets)
+}
+
+/// Scan one already admitted inventory, with the same worker count the public
+/// entry points use. The setup above has already run.
+pub(crate) fn scan_prepared(
+    root: &Path,
+    rules: &RuleSet,
+    options: &ScanOptions,
+    silo_sets: Option<Vec<(String, GlobSet)>>,
+    anchoring: &Anchoring,
+    inventory: walk::WalkResult,
+    on_progress: &mut dyn FnMut(Progress),
+) -> Result<ScanReport, String> {
+    scan_prepared_with_workers(
+        root,
+        rules,
+        options,
+        silo_sets,
+        anchoring,
+        inventory,
+        on_progress,
+        workers(),
+    )
+}
+
 /// Scan one owned inventory without traversing the root again.
 #[allow(clippy::too_many_arguments)]
 fn scan_prepared_with_workers(
