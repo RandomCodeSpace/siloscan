@@ -155,8 +155,23 @@ pub fn to_json(
     anchor: Anchor,
     min_severity: Option<Severity>,
 ) -> String {
+    let json_report = json_report(report, rules, anchor, min_severity);
+    serde_json::to_string_pretty(&json_report).unwrap() // serialization cannot fail
+}
+
+/// The projection [`to_json`] serializes, borrowed from `report`.
+///
+/// The resolved writer in [`crate::plan`] flattens exactly this value and
+/// appends its four trailing fields to it, so the two documents cannot drift:
+/// there is one projection and one redaction decision, not a copy of each.
+pub(crate) fn json_report<'a>(
+    report: &'a crate::scan::ScanReport,
+    rules: &'a RuleSet,
+    anchor: Anchor,
+    min_severity: Option<Severity>,
+) -> JsonReport<'a> {
     let redacted_rules = redacted_rule_ids(rules);
-    let json_report = JsonReport {
+    JsonReport {
         version: env!("CARGO_PKG_VERSION"),
         findings: report_findings(&report.findings, &redacted_rules),
         baselined: report_findings(&report.baselined, &redacted_rules),
@@ -168,8 +183,7 @@ pub fn to_json(
         ignored: report.ignored,
         warnings: &report.warnings,
         min_severity,
-    };
-    serde_json::to_string_pretty(&json_report).unwrap() // serialization cannot fail
+    }
 }
 
 /// Whether `rule_id` names a rule whose findings must not show their match

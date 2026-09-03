@@ -600,6 +600,29 @@ impl Cache {
         self.root.as_deref()
     }
 
+    /// Why this cache will never serve or store an entry, or `None` when it is
+    /// usable.
+    ///
+    /// A cache with nowhere to live, and one whose directory this crate refused
+    /// on sight, both behave as a permanently cold cache. That is a correct
+    /// scan and not an error, which is exactly why it has to be reportable: a
+    /// run that silently caches nothing looks identical to a warm one until
+    /// someone measures it.
+    ///
+    /// Read after [`Cache::open`] or [`Cache::open_in`], before any file is
+    /// scanned. A directory refused later - it was tightened or replaced
+    /// mid-run - is not visible here, because at that point the answer would
+    /// depend on how far the scan had got.
+    pub fn inert_reason(&self) -> Option<&'static str> {
+        if self.root.is_none() {
+            return Some("no cache directory could be determined for this scan root");
+        }
+        if self.dir_rejected.load(Ordering::Relaxed) {
+            return Some("the cache directory is not this user's or could not be secured");
+        }
+        None
+    }
+
     /// Where this cache's own files sit inside `scan_root`, spelled as a prefix
     /// of `scan_root` as it was given, or `None` when the cache is not under the
     /// scan root at all.
