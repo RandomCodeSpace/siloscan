@@ -15,6 +15,7 @@ pub mod output;
 pub mod output_sarif;
 pub mod parsers;
 pub mod plan;
+pub mod profiles;
 pub mod project;
 pub mod rules;
 pub mod scan;
