@@ -625,9 +625,14 @@ fn scan_prepared_with_workers(
         findings: 0,
     });
 
+    // Built from the rules once rather than once per file: one tree-sitter
+    // query per language carries every ast rule's patterns, so a file is
+    // walked once instead of once per rule.
+    let ast_queries = &crate::engines::ast::AstQueries::build(&rules.rules)?;
     let results = scan_files(
         root,
         rules,
+        ast_queries,
         options,
         anchoring,
         &files,
@@ -1126,7 +1131,7 @@ impl ParseNeeds {
                 CompiledPayload::Ast { queries } => {
                     needs
                         .ast_languages
-                        .extend(queries.iter().map(|(lang, _)| lang.clone()));
+                        .extend(queries.iter().map(|q| q.language.clone()));
                 }
                 _ => {}
             }
@@ -1251,9 +1256,11 @@ fn parse_decision(
 /// thread — the callback is `FnMut` and not required to be `Send` — and is
 /// driven by one message per completed file, which keeps `files_done` rising by
 /// exactly one per event and the event count at `files_total + 1`.
+#[allow(clippy::too_many_arguments)]
 fn scan_files(
     root: &Path,
     rules: &RuleSet,
+    ast_queries: &crate::engines::ast::AstQueries,
     options: &ScanOptions,
     anchoring: &Anchoring,
     files: &[PathBuf],
@@ -1279,8 +1286,16 @@ fn scan_files(
                     let Some(path) = files.get(index) else {
                         break;
                     };
-                    let (result, raw) =
-                        scan_one(root, rules, options, anchoring, needs, index, path);
+                    let (result, raw) = scan_one(
+                        root,
+                        rules,
+                        ast_queries,
+                        options,
+                        anchoring,
+                        needs,
+                        index,
+                        path,
+                    );
                     produced.push(result);
                     // The receiver outlives every worker, so this cannot fail.
                     let _ = sender.send(raw);
@@ -1318,9 +1333,11 @@ fn scan_files(
 
 /// Everything one file contributes, plus its raw match count for progress.
 /// Raw means as the engines produced it, before inline suppression.
+#[allow(clippy::too_many_arguments)]
 fn scan_one(
     root: &Path,
     rules: &RuleSet,
+    ast_queries: &crate::engines::ast::AstQueries,
     options: &ScanOptions,
     anchoring: &Anchoring,
     needs: &ParseNeeds,
@@ -1347,7 +1364,15 @@ fn scan_one(
             // the engine work below, and a decision taken inside it would move
             // with the cache state.
             let plan = parse_decision(needs, options.config, language, content.len()).plan();
-            match scan_text(rules, options, &path_rel, &content, language, plan.parse) {
+            match scan_text(
+                rules,
+                ast_queries,
+                options,
+                &path_rel,
+                &content,
+                language,
+                plan.parse,
+            ) {
                 Err(error) => (Outcome::Failed(error.to_string()), 0),
                 Ok(entry) => {
                     let raw = entry.findings.len();
@@ -1452,6 +1477,7 @@ fn suppress_whole_tree(
 /// correctness and keeps the stored payload engine-pure.
 fn scan_text(
     rules: &RuleSet,
+    ast_queries: &crate::engines::ast::AstQueries,
     options: &ScanOptions,
     path_rel: &str,
     content: &str,
@@ -1486,6 +1512,7 @@ fn scan_text(
     )?);
     file_findings.extend(crate::engines::ast::scan_file(
         &rules.rules,
+        ast_queries,
         path_rel,
         language,
         content,

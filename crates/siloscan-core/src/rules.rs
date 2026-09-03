@@ -409,6 +409,18 @@ impl fmt::Display for DuplicationScope {
     }
 }
 
+/// One language's tree-sitter query for an ast rule.
+///
+/// The `source` is kept next to the compiled query because the engine builds
+/// one combined query per language out of every applicable rule's patterns, and
+/// tree-sitter has no way to merge two compiled queries.
+#[derive(Debug, Clone)]
+pub struct AstQuery {
+    pub language: String,
+    pub source: String,
+    pub query: Arc<Query>,
+}
+
 #[derive(Debug, Clone)]
 pub enum CompiledPayload {
     Regex {
@@ -431,7 +443,7 @@ pub enum CompiledPayload {
     },
     Ast {
         /// Sorted by language; queries are shared, never mutated.
-        queries: Vec<(String, Arc<Query>)>,
+        queries: Vec<AstQuery>,
     },
     Boundary {
         /// Silo names are format-checked at load; whether they exist is
@@ -697,7 +709,7 @@ fn compile_rule(raw: RawRule, origin: &str) -> Result<CompiledRule, LoadError> {
     } else if let Some(spec) = raw.ast {
         let queries = compile_ast(&raw.id, spec, origin)?;
         // An ast rule's language coverage is exactly its query map keys.
-        languages = Some(queries.iter().map(|(lang, _)| lang.clone()).collect());
+        languages = Some(queries.iter().map(|q| q.language.clone()).collect());
         CompiledPayload::Ast { queries }
     } else if let Some(spec) = raw.boundary {
         compile_boundary(&raw.id, spec, origin)?
@@ -852,7 +864,7 @@ fn compile_ast(
     id: &str,
     spec: BTreeMap<String, String>,
     origin: &str,
-) -> Result<Vec<(String, Arc<Query>)>, LoadError> {
+) -> Result<Vec<AstQuery>, LoadError> {
     if spec.is_empty() {
         return Err(LoadError::NoPayload {
             origin: origin.to_string(),
@@ -871,7 +883,11 @@ fn compile_ast(
             origin: origin.to_string(),
             detail: format!("{id}: {lang}: {e}"),
         })?;
-        queries.push((lang, Arc::new(query)));
+        queries.push(AstQuery {
+            language: lang,
+            source,
+            query: Arc::new(query),
+        });
     }
 
     Ok(queries)
@@ -1854,8 +1870,8 @@ rules:
         match &rules[0].payload {
             CompiledPayload::Ast { queries } => {
                 assert_eq!(queries.len(), 1);
-                assert_eq!(queries[0].0, "rust");
-                assert_eq!(queries[0].1.pattern_count(), 1);
+                assert_eq!(queries[0].language, "rust");
+                assert_eq!(queries[0].query.pattern_count(), 1);
             }
             other => panic!("expected an ast payload, got {other:?}"),
         }
@@ -1877,7 +1893,7 @@ rules:
         let rules = load_str(src, "test").expect("should load");
         match &rules[0].payload {
             CompiledPayload::Ast { queries } => {
-                let langs: Vec<&str> = queries.iter().map(|(l, _)| l.as_str()).collect();
+                let langs: Vec<&str> = queries.iter().map(|q| q.language.as_str()).collect();
                 assert_eq!(langs, vec!["python", "rust"]);
             }
             other => panic!("expected an ast payload, got {other:?}"),
