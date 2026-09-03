@@ -539,9 +539,8 @@ impl Cache {
     /// one `read` on the steady path and leaves the full pass for the run after
     /// an upgrade, which is the only run that can find anything.
     pub fn open(scan_root: &Path, rules: &RuleSet, scope: &PathScope) -> Cache {
-        let base = default_cache_base();
-        let root = base.as_deref().and_then(|base| root_dir(base, scan_root));
-        Cache::bind(base, root, rules, scope)
+        let (owned, root) = locations(scan_root, None);
+        Cache::bind(owned, root, rules, scope)
     }
 
     /// Bind a cache the way [`Cache::open`] does, but under a directory the user
@@ -559,8 +558,8 @@ impl Cache {
         rules: &RuleSet,
         scope: &PathScope,
     ) -> Cache {
-        let root = root_dir(cache_dir, scan_root);
-        Cache::bind(root.clone(), root, rules, scope)
+        let (owned, root) = locations(scan_root, Some(cache_dir));
+        Cache::bind(owned, root, rules, scope)
     }
 
     fn bind(
@@ -653,19 +652,7 @@ impl Cache {
     /// resolves through its nearest existing ancestor, so the exclusion holds
     /// from the first run, not the one after the directory appears.
     pub fn exclusion_under(&self, scan_root: &Path) -> Option<PathBuf> {
-        let base = resolved(scan_root);
-        [self.owned.as_deref(), self.root.as_deref()]
-            .into_iter()
-            .flatten()
-            .find_map(|candidate| {
-                let rel = resolved(candidate).strip_prefix(&base).ok()?.to_path_buf();
-                // The candidate is the scan root itself. Not an exclusion, and
-                // not this candidate's turn to answer.
-                if rel.as_os_str().is_empty() {
-                    return None;
-                }
-                Some(scan_root.join(rel))
-            })
+        exclusion(self.owned.as_deref(), self.root.as_deref(), scan_root)
     }
 
     pub fn rules_hash(&self) -> &str {
@@ -1229,6 +1216,65 @@ fn root_dir(base: &Path, scan_root: &Path) -> Option<PathBuf> {
     hasher.update(canonical.as_os_str().as_encoded_bytes());
     let digest = hex(&hasher.finalize());
     Some(base.join(digest.get(..ROOT_HASH_PREFIX).unwrap_or(&digest)))
+}
+
+/// The `(owned, root)` pair a cache for `state_root` binds to, with
+/// `cache_dir` naming a directory the user chose over the default base.
+///
+/// Depends on the scan root and the requested directory and on nothing else -
+/// in particular not on the rule set - which is what lets
+/// [`exclusion_dir`] answer before the rules are final.
+fn locations(state_root: &Path, cache_dir: Option<&Path>) -> (Option<PathBuf>, Option<PathBuf>) {
+    match cache_dir {
+        Some(dir) => {
+            let root = root_dir(dir, state_root);
+            (root.clone(), root)
+        }
+        None => {
+            let base = default_cache_base();
+            let root = base.as_deref().and_then(|base| root_dir(base, state_root));
+            (base, root)
+        }
+    }
+}
+
+/// [`Cache::exclusion_under`] without a bound cache.
+///
+/// The walk has to drop the cache's own files before it is walked, and the
+/// cache cannot be bound until the rule set is final - profile documents are
+/// selected from what the walk found, and binding earlier would key every
+/// entry on a rule set that is not the one that produced it. This answers the
+/// one question the walk needed the cache for, from the two inputs that decide
+/// it.
+///
+/// `state_root` is the directory whose cache is being located and `scan_root`
+/// is the path the walk spells its entries against; they differ only when the
+/// scan root is a single file. `cache_dir` is `--cache-dir`, or `None` for the
+/// default base. A caller that turned the cache off has no exclusion and must
+/// not call this: there are no cache files to keep out of the walk.
+pub fn exclusion_dir(
+    scan_root: &Path,
+    state_root: &Path,
+    cache_dir: Option<&Path>,
+) -> Option<PathBuf> {
+    let (owned, root) = locations(state_root, cache_dir);
+    exclusion(owned.as_deref(), root.as_deref(), scan_root)
+}
+
+/// Where `owned` or `root` sits inside `scan_root`, spelled as `scan_root` was
+/// given. The rules are on [`Cache::exclusion_under`], which is the documented
+/// entry point.
+fn exclusion(owned: Option<&Path>, root: Option<&Path>, scan_root: &Path) -> Option<PathBuf> {
+    let base = resolved(scan_root);
+    [owned, root].into_iter().flatten().find_map(|candidate| {
+        let rel = resolved(candidate).strip_prefix(&base).ok()?.to_path_buf();
+        // The candidate is the scan root itself. Not an exclusion, and not this
+        // candidate's turn to answer.
+        if rel.as_os_str().is_empty() {
+            return None;
+        }
+        Some(scan_root.join(rel))
+    })
 }
 
 /// Drop every cache entry of `scan_root`'s cache that a different build wrote,

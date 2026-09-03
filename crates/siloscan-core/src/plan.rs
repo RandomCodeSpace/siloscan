@@ -35,10 +35,11 @@ use globset::GlobSet;
 use serde::Serialize;
 
 use crate::baseline::{self, Baseline};
-use crate::cache::{Cache, PathScope};
+use crate::cache::{self, Cache, PathScope};
 use crate::config::{self, Anchor, Config};
 use crate::coverage::CoverageReport;
 use crate::default_pack;
+use crate::profiles::{self, Profile, ProfileSelection};
 use crate::project::{
     self, DetectionStatus, Evidence, ProjectUnit, SourceRootHint, WorkspaceRelation,
 };
@@ -96,6 +97,7 @@ const OVERRIDE_NO_CACHE: &str = "no-cache";
 const OVERRIDE_CACHE_DIR: &str = "cache-dir";
 const OVERRIDE_IGNORE: &str = "ignore";
 const OVERRIDE_FOLLOW_SYMLINKS: &str = "follow-symlinks";
+const OVERRIDE_PROFILES: &str = "profiles";
 
 /// What the caller asked to scan, and what it asked for explicitly.
 ///
@@ -117,6 +119,23 @@ pub struct ScanRequest {
     cache: CacheRequest,
     ignore: IgnoreOptions,
     follow_symlinks: bool,
+    /// Which embedded profiles to load.
+    ///
+    /// [`ProfileSelection::None`] for **both** [`ScanRequest::automatic`] and
+    /// [`ScanRequest::explicit`]. The design has the automatic default at
+    /// [`ProfileSelection::Auto`], and it is deliberately not that yet: the flip
+    /// changes the bare `setup:`/`capabilities:` lines and the paired
+    /// performance budget, and both need their own gate. It happens in the
+    /// package that ships the profile documents, not in the one that builds the
+    /// seam.
+    profiles: ProfileSelection,
+    /// The documents [`ProfileSelection`] picks from.
+    ///
+    /// [`profiles::REGISTRY`] in every real scan. It is a field so the tests
+    /// can drive the whole selection, load and report path against documents of
+    /// their own while the shipped registry is still empty; see
+    /// [`ScanRequest::with_profile_registry`].
+    profile_registry: &'static [Profile],
     explicit_overrides: BTreeSet<String>,
 }
 
@@ -149,6 +168,8 @@ impl ScanRequest {
             cache: CacheRequest::default(),
             ignore: IgnoreOptions::default(),
             follow_symlinks: false,
+            profiles: ProfileSelection::None,
+            profile_registry: profiles::REGISTRY,
             explicit_overrides: BTreeSet::new(),
         }
     }
@@ -208,6 +229,26 @@ impl ScanRequest {
     pub fn following_symlinks(mut self) -> Self {
         self.follow_symlinks = true;
         self.record(OVERRIDE_FOLLOW_SYMLINKS)
+    }
+
+    /// Which embedded profiles to load. `--no-default-rules` overrides this:
+    /// it disables every embedded document, profiles included.
+    pub fn with_profiles(mut self, selection: ProfileSelection) -> Self {
+        self.profiles = selection;
+        self.record(OVERRIDE_PROFILES)
+    }
+
+    /// The registry [`ScanRequest::with_profiles`] selects from.
+    ///
+    /// This is the test seam and not a contract: it is public because the plan
+    /// tests are a separate crate, it is hidden because the only registry a
+    /// front end has any business selecting from is the shipped one, and it may
+    /// change with the tests that drive it. It records no override, because the
+    /// caller did not ask for a different scan.
+    #[doc(hidden)]
+    pub fn with_profile_registry(mut self, registry: &'static [Profile]) -> Self {
+        self.profile_registry = registry;
+        self
     }
 
     fn record(mut self, option: &str) -> Self {
@@ -281,9 +322,27 @@ impl ResolvedScanPlan {
     /// Perform the whole setup and the one walk.
     ///
     /// The steps run in the order the CLI ran them, so the first failure a
-    /// caller sees is the one it saw before: root, config, rules, silos,
-    /// coverage, anchor, baseline, cache, then the rule/config consistency
-    /// checks the scanner used to make on its way in.
+    /// caller sees is the one it saw before: root, config, rules, coverage,
+    /// anchor, baseline.
+    ///
+    /// Three steps run after the walk instead, because all three need a rule
+    /// set that is not final until the profile documents the detected languages
+    /// selected have been appended:
+    ///
+    /// - The precondition gates - [`require_silos`] and
+    ///   [`scan::prepared_setup`], which is `coverage::require_report`,
+    ///   `boundary_setup`, `require_config_root` and `duplication_setup`. A
+    ///   boundary, coverage or silo-scoped duplication rule that arrived in a
+    ///   profile document has to be refused exactly like the same rule in a
+    ///   `--rules` directory; a gate that ran before the append would let it
+    ///   through and report nothing.
+    /// - The cache. [`Cache`] folds `RuleSet::source_hash` into every entry
+    ///   key, so a cache bound before the rule set is final would key entries
+    ///   on a rule set that is not the one that produced them.
+    ///
+    /// A tree with no profile selected - which is every tree until the
+    /// documents ship - reaches every one of them with the rule set it reached
+    /// them with before, and fails identically.
     pub fn resolve(request: &ScanRequest) -> Result<Self, ResolveError> {
         let root = request.root.clone();
         validate_root(&root)?;
@@ -291,8 +350,7 @@ impl ResolvedScanPlan {
         let (config, config_rule_dirs) = load_config(&root, request.config.as_deref())?;
         let mut rule_dirs = request.rule_dirs.clone();
         rule_dirs.extend(config_rule_dirs);
-        let rules = load_rules(&rule_dirs, request.no_embedded_rules)?;
-        require_silos(&rules, config.as_ref())?;
+        let mut rules = load_rules(&rule_dirs, request.no_embedded_rules)?;
 
         let coverage = match &request.coverage {
             Some(path) => Some(crate::coverage::parse(path).map_err(ResolveError::new)?),
@@ -305,10 +363,6 @@ impl ResolvedScanPlan {
         let anchoring = Anchoring::resolve(&root, config.as_ref()).map_err(ResolveError::new)?;
         let baseline_root = baseline_root(&root, &anchoring, config.as_ref());
         let baseline = load_baseline(&baseline_root, request.baseline.as_deref())?;
-        let cache = open_cache(&root, &rules, &request.cache, &anchoring);
-
-        let silo_sets = scan::prepared_setup(&root, &rules, config.as_ref(), coverage.as_ref())
-            .map_err(ResolveError::new)?;
 
         let project_dirs = config
             .as_ref()
@@ -325,10 +379,12 @@ impl ResolvedScanPlan {
         // drops them too, so doing it here is idempotent for the scan; what it
         // buys is that detection reads the same inventory the engines do,
         // rather than one containing files a previous run wrote.
-        if let Some(excluded) = cache
-            .as_ref()
-            .and_then(|cache| cache.exclusion_under(&root))
-        {
+        //
+        // Asked of the cache's location rather than of a bound cache, because
+        // the cache cannot be bound until the rules below are final. The
+        // location is a function of the scan root and the requested directory
+        // and of nothing the rules decide.
+        if let Some(excluded) = cache_exclusion(&root, &request.cache) {
             inventory.files.retain(|path| !path.starts_with(&excluded));
             inventory
                 .symlinks
@@ -336,12 +392,21 @@ impl ResolvedScanPlan {
         }
 
         let facts = project::detect(&root, &inventory, config.as_ref());
+        let selected = select_profiles(request, &facts.languages)?;
+        append_profiles(&mut rules, &selected)?;
+
+        require_silos(&rules, config.as_ref())?;
+        let silo_sets = scan::prepared_setup(&root, &rules, config.as_ref(), coverage.as_ref())
+            .map_err(ResolveError::new)?;
+
+        let cache = open_cache(&root, &rules, &request.cache, &anchoring);
         let setup = ScanSetupReport::build(
             &root,
             request,
             facts,
             &rules,
             &rule_dirs,
+            &selected,
             Loaded {
                 config: config.is_some(),
                 baseline: baseline.is_some(),
@@ -614,6 +679,7 @@ impl ScanSetupReport {
         facts: project::ProjectFacts,
         rules: &RuleSet,
         rule_dirs: &[PathBuf],
+        profiles: &[&'static Profile],
         loaded: Loaded,
     ) -> Self {
         let mut capabilities = vec![
@@ -661,6 +727,7 @@ impl ScanSetupReport {
                 "in-root symbolic links are not followed",
             ),
         ];
+        capabilities.extend(profiles_state(request, profiles));
         capabilities.sort_by(|left, right| left.id.cmp(&right.id));
 
         Self {
@@ -669,11 +736,52 @@ impl ScanSetupReport {
             workspaces: facts.workspace_relations,
             languages: facts.languages,
             source_roots: facts.source_roots,
-            rule_sources: rule_sources(root, rules),
+            rule_sources: rule_sources(root, rules, profiles),
             capabilities,
             explicit_overrides: request.explicit_overrides.iter().cloned().collect(),
         }
     }
+}
+
+/// The `profiles` capability, or nothing at all when no profile was asked for.
+///
+/// The absence is the one deviation from the design's table, and it is what
+/// keeps this package's output diff empty. The bare human line prints every
+/// capability the report carries, unconditionally, so a `profiles` entry in any
+/// state adds a clause to a line `v2_journey` freezes exactly - and with both
+/// `ScanRequest::automatic` and `ScanRequest::explicit` defaulting to
+/// [`ProfileSelection::None`], every scan that exists today would carry it.
+/// Reporting the capability only once a selection was actually requested says
+/// the same thing about every scan that can ask for one, and says nothing about
+/// the scans that cannot. The package that flips the automatic default owns the
+/// line change, and can drop this guard with it.
+fn profiles_state(request: &ScanRequest, selected: &[&'static Profile]) -> Option<CapabilityState> {
+    if request.profiles == ProfileSelection::None {
+        return None;
+    }
+    if request.no_embedded_rules {
+        return Some(CapabilityState::not_enabled(
+            "profiles",
+            CapabilityStatus::Skipped,
+            "the embedded pack is disabled for this scan",
+        ));
+    }
+    if selected.is_empty() {
+        // Two different empty answers. `auto` found nothing to load, which is a
+        // fact about the tree; an empty list named nothing to load, which is a
+        // fact about the request, and a reason that blamed the tree for it
+        // would send a reader looking at the wrong thing.
+        let reason = match request.profiles {
+            ProfileSelection::Named(_) => "no profile was named",
+            _ => "no detected language has an embedded profile",
+        };
+        return Some(CapabilityState::not_enabled(
+            "profiles",
+            CapabilityStatus::NotConfigured,
+            reason,
+        ));
+    }
+    Some(CapabilityState::enabled("profiles"))
 }
 
 /// Enabled, or not enabled with the one reason that explains it.
@@ -696,14 +804,25 @@ fn state(id: &str, enabled: bool, status: CapabilityStatus, reason: &str) -> Cap
 /// document, so the report is ordered by what the report itself says. Load
 /// order still decides which directory a duplicate id is reported against, and
 /// is untouched.
-fn rule_sources(root: &Path, rules: &RuleSet) -> Vec<RuleSource> {
+fn rule_sources(root: &Path, rules: &RuleSet, profiles: &[&'static Profile]) -> Vec<RuleSource> {
+    let embedded: BTreeSet<&str> = profiles
+        .iter()
+        .map(|profile| profile.identity())
+        .chain([EMBEDDED_PACK_SOURCE])
+        .collect();
     let mut sources: Vec<RuleSource> = rules
         .sources
         .iter()
         .map(|(origin, _)| {
-            if origin == EMBEDDED_PACK_SOURCE {
+            if embedded.contains(origin.as_str()) {
                 RuleSource {
-                    id: EMBEDDED_PACK_ID.to_string(),
+                    // A profile document is loaded under its own identity, so
+                    // the origin is already the label; only the pack's internal
+                    // origin has to be translated.
+                    id: match origin.as_str() {
+                        EMBEDDED_PACK_SOURCE => EMBEDDED_PACK_ID.to_string(),
+                        identity => identity.to_string(),
+                    },
                     origin: "embedded".to_string(),
                 }
             } else {
@@ -1074,6 +1193,19 @@ fn load_baseline(root: &Path, explicit: Option<&Path>) -> Result<Option<Baseline
     Ok(Some(baseline))
 }
 
+/// Where this request's cache keeps its files inside the scan root, or `None`
+/// when the cache is disabled or sits outside the walk.
+///
+/// The answer [`open_cache`] used to be asked for before the walk. It is asked
+/// of the location instead so that binding the cache can wait for the final
+/// rule set; see [`ResolvedScanPlan::resolve`].
+fn cache_exclusion(root: &Path, request: &CacheRequest) -> Option<PathBuf> {
+    if request.disabled {
+        return None;
+    }
+    cache::exclusion_dir(root, &state_root(root), request.dir.as_deref())
+}
+
 fn open_cache(
     root: &Path,
     rules: &RuleSet,
@@ -1118,20 +1250,75 @@ fn load_rules(dirs: &[PathBuf], no_embedded_rules: bool) -> Result<RuleSet, Reso
     rules.extend(loaded.rules);
     sources.extend(loaded.sources);
 
-    // The loader rejects duplicates within the pack and across `--rules`
-    // directories; the union of the two is only visible here.
-    let mut seen: BTreeSet<&str> = BTreeSet::new();
-    for rule in &rules {
-        if !seen.insert(rule.id.as_str()) {
-            return Err(ResolveError::new(format!("duplicate rule id: {}", rule.id)));
-        }
-    }
+    require_unique_ids(&rules)?;
 
     if rules.is_empty() {
         return Err(ResolveError::new(no_rules_message(dirs, no_embedded_rules)));
     }
 
     Ok(RuleSet { rules, sources })
+}
+
+/// Which embedded profile documents this request loads.
+///
+/// `--no-default-rules` disables every embedded document, profiles included.
+/// In v1 the flag meant "the built-in pack", and a flag that left profile
+/// documents loaded would mean something else under the same spelling.
+///
+/// The names are resolved before the flag suppresses them, so a misspelled
+/// identity is refused whether or not the documents were going to load. The
+/// alternative accepts the misspelling silently on one run and refuses it on
+/// the next, which is the worse half of both answers.
+fn select_profiles(
+    request: &ScanRequest,
+    languages: &[String],
+) -> Result<Vec<&'static Profile>, ResolveError> {
+    let selected = profiles::select(request.profile_registry, &request.profiles, languages)
+        .map_err(ResolveError::new)?;
+    if request.no_embedded_rules {
+        return Ok(Vec::new());
+    }
+    Ok(selected)
+}
+
+/// Append the selected profile documents to the loaded set, after the embedded
+/// pack and after the user's rule directories.
+///
+/// Each document is loaded under its own identity, which is what makes it a
+/// distinguishable entry in both `setup.rule_sources` and the rule digest the
+/// cache keys on: a profile that changed invalidates its own entries and
+/// nothing else's.
+///
+/// The duplicate-id check runs again over the union, because a `--rules`
+/// directory can now collide with a profile's ids and that has to be the same
+/// error it already is.
+fn append_profiles(rules: &mut RuleSet, selected: &[&'static Profile]) -> Result<(), ResolveError> {
+    if selected.is_empty() {
+        return Ok(());
+    }
+    for profile in selected {
+        let loaded = rules::load_str(profile.document(), profile.identity())
+            .map_err(|e| ResolveError::new(e.to_string()))?;
+        rules.rules.extend(loaded);
+        rules.sources.push((
+            profile.identity().to_string(),
+            profile.document().to_string(),
+        ));
+    }
+    require_unique_ids(&rules.rules)
+}
+
+/// No rule id may be claimed twice, whichever document claimed it. The loader
+/// enforces this within one document and across `--rules` directories; the
+/// union of those with the embedded pack and the profiles is only visible here.
+fn require_unique_ids(rules: &[CompiledRule]) -> Result<(), ResolveError> {
+    let mut seen: BTreeSet<&str> = BTreeSet::new();
+    for rule in rules {
+        if !seen.insert(rule.id.as_str()) {
+            return Err(ResolveError::new(format!("duplicate rule id: {}", rule.id)));
+        }
+    }
+    Ok(())
 }
 
 fn no_rules_message(dirs: &[PathBuf], no_embedded_rules: bool) -> String {

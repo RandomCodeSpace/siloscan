@@ -5,6 +5,7 @@ use siloscan_core::plan::{
     CapabilityState, CapabilityStatus, EMBEDDED_PACK_ID, ResolvedScanPlan, ResolvedScanReport,
     ScanRequest, ScanSetupReport,
 };
+use siloscan_core::profiles::{Profile, ProfileSelection};
 use siloscan_core::project::DetectionStatus;
 use siloscan_core::walk::IgnoreOptions;
 use std::fs;
@@ -359,6 +360,416 @@ fn every_capability_that_is_not_enabled_says_why() {
         capability(&report.setup, "symlink-following").status(),
         &CapabilityStatus::NotConfigured
     );
+}
+
+// ---------------------------------------------------------------------------
+// Profile selection
+// ---------------------------------------------------------------------------
+
+/// Three profile documents standing in for the shipped registry, which is
+/// empty: two languages, two families, distinct rule ids so the union check
+/// still means something. The patterns are written so that no document matches
+/// the fixture tree, because what is under test is which documents load and
+/// not what they report.
+const RELIABILITY_RUST: &str = concat!(
+    "version: 1\n",
+    "rules:\n",
+    "  - id: reliability.rust.probe\n",
+    "    severity: warning\n",
+    "    message: reliability probe\n",
+    "    regex:\n",
+    "      pattern: 'rust-r[e]liability-probe'\n",
+);
+
+const MAINTAINABILITY_RUST: &str = concat!(
+    "version: 1\n",
+    "rules:\n",
+    "  - id: maintainability.rust.probe\n",
+    "    severity: warning\n",
+    "    message: maintainability probe\n",
+    "    regex:\n",
+    "      pattern: 'rust-m[a]intainability-probe'\n",
+);
+
+const RELIABILITY_GO: &str = concat!(
+    "version: 1\n",
+    "rules:\n",
+    "  - id: reliability.go.probe\n",
+    "    severity: warning\n",
+    "    message: reliability probe\n",
+    "    regex:\n",
+    "      pattern: 'go-r[e]liability-probe'\n",
+);
+
+static TEST_PROFILES: &[Profile] = &[
+    Profile::new("maintainability-rust@1", "rust", MAINTAINABILITY_RUST),
+    Profile::new("reliability-go@1", "go", RELIABILITY_GO),
+    Profile::new("reliability-rust@1", "rust", RELIABILITY_RUST),
+];
+
+/// A profile carrying a rule whose preconditions the tree does not meet. The
+/// gates that refuse it are the ones the append has to run in front of.
+static GATED_PROFILES: &[Profile] = &[
+    Profile::new("boundary-rust@1", "rust", BOUNDARY_RULE),
+    Profile::new("coverage-rust@1", "rust", COVERAGE_RULE),
+];
+
+/// Two documents claiming one rule id. Neither loader sees the other, so only
+/// the check over the union can refuse this.
+static COLLIDING_PROFILES: &[Profile] = &[
+    Profile::new("maintainability-rust@1", "rust", RELIABILITY_RUST),
+    Profile::new("reliability-rust@1", "rust", RELIABILITY_RUST),
+];
+
+/// A document that is not a document. Shipped profiles are `include_str!` of
+/// files in this repository, so this is a build mistake rather than user input
+/// - which is exactly why the failure has to name the profile that caused it.
+static BROKEN_PROFILES: &[Profile] = &[Profile::new(
+    "reliability-rust@1",
+    "rust",
+    "version: 1\nrules: [\n",
+)];
+
+/// A request that loads the embedded pack, so the profile entries can be seen
+/// in the company of the entry they are ordered against.
+fn profile_request(root: &Path, rules: &Path) -> ScanRequest {
+    ScanRequest::explicit(root)
+        .with_rule_dirs(vec![rules.to_path_buf()])
+        .with_profile_registry(TEST_PROFILES)
+}
+
+fn setup_of(request: &ScanRequest) -> ScanSetupReport {
+    ResolvedScanPlan::resolve(request)
+        .expect("resolution")
+        .setup()
+        .clone()
+}
+
+fn source_ids(setup: &ScanSetupReport) -> Vec<&str> {
+    setup
+        .rule_sources
+        .iter()
+        .map(|source| source.id.as_str())
+        .collect()
+}
+
+fn has_capability(setup: &ScanSetupReport, id: &str) -> bool {
+    setup.capabilities.iter().any(|state| state.id() == id)
+}
+
+/// The default, and the reason every existing report is byte-identical:
+/// nothing is selected and the capability is not reported at all, so no line
+/// and no document gains a clause. The provenance decides nothing here yet,
+/// which is the whole amendment - a registry full of documents that a
+/// `--profiles` nobody supplied still loads none of them.
+#[test]
+fn profile_selection_defaults_to_none() {
+    let (tree, rules) = fixture();
+    let setup = setup_of(&profile_request(tree.path(), &rules));
+
+    assert_eq!(source_ids(&setup), [EMBEDDED_PACK_ID, "rules/rules.yaml"]);
+    assert!(!has_capability(&setup, "profiles"));
+    assert!(!setup.explicit_overrides.contains(&"profiles".to_string()));
+}
+
+/// An empty list named nothing, which is a fact about the request and not
+/// about the tree. Saying no language had a document would send a reader
+/// looking at their `.rs` files for the answer.
+#[test]
+fn an_empty_name_list_says_nothing_was_named() {
+    let (tree, rules) = fixture();
+    let setup = setup_of(
+        &profile_request(tree.path(), &rules).with_profiles(ProfileSelection::Named(Vec::new())),
+    );
+
+    assert_eq!(
+        capability(&setup, "profiles").status(),
+        &CapabilityStatus::NotConfigured
+    );
+    assert_eq!(
+        capability(&setup, "profiles").reason(),
+        Some("no profile was named")
+    );
+}
+
+/// The shipped registry holds no document, so `auto` on a tree the detector
+/// reads perfectly well still loads nothing.
+#[test]
+fn auto_against_the_shipped_registry_selects_nothing() {
+    let (tree, rules) = fixture();
+    let setup = setup_of(
+        &ScanRequest::explicit(tree.path())
+            .with_rule_dirs(vec![rules.clone()])
+            .with_profiles(ProfileSelection::Auto),
+    );
+
+    assert_eq!(setup.languages, ["rust"]);
+    assert_eq!(source_ids(&setup), [EMBEDDED_PACK_ID, "rules/rules.yaml"]);
+    assert_eq!(
+        capability(&setup, "profiles").status(),
+        &CapabilityStatus::NotConfigured
+    );
+    assert_eq!(
+        capability(&setup, "profiles").reason(),
+        Some("no detected language has an embedded profile")
+    );
+}
+
+/// `auto` is detection ∩ registry, which is what keeps a Rust tree from
+/// parsing Go. The fixture holds one `.rs` file and no `.go` file, so the two
+/// Rust documents load and the Go one does not.
+#[test]
+fn auto_selects_the_documents_of_the_detected_languages() {
+    let (tree, rules) = fixture();
+    let setup =
+        setup_of(&profile_request(tree.path(), &rules).with_profiles(ProfileSelection::Auto));
+
+    assert_eq!(setup.languages, ["rust"]);
+    assert_eq!(
+        source_ids(&setup),
+        [
+            EMBEDDED_PACK_ID,
+            "maintainability-rust@1",
+            "reliability-rust@1",
+            "rules/rules.yaml",
+        ]
+    );
+    assert_eq!(
+        capability(&setup, "profiles").status(),
+        &CapabilityStatus::Enabled
+    );
+}
+
+/// Every embedded source is reported before every directory one, and each
+/// group by its own id, whatever order the documents were loaded in. The
+/// profile documents load last and sort into the middle.
+#[test]
+fn profile_sources_are_reported_as_embedded_and_in_id_order() {
+    let (tree, rules) = fixture();
+    let setup = setup_of(&profile_request(tree.path(), &rules).with_profiles(
+        ProfileSelection::Named(vec![
+            "reliability-rust@1".to_string(),
+            "maintainability-rust@1".to_string(),
+        ]),
+    ));
+
+    let origins: Vec<&str> = setup
+        .rule_sources
+        .iter()
+        .map(|source| source.origin.as_str())
+        .collect();
+    assert_eq!(origins, ["embedded", "embedded", "embedded", "directory"]);
+    assert_eq!(
+        source_ids(&setup),
+        [
+            EMBEDDED_PACK_ID,
+            "maintainability-rust@1",
+            "reliability-rust@1",
+            "rules/rules.yaml",
+        ]
+    );
+}
+
+/// A named profile deliberately ignores detection: the fixture holds no Go
+/// file, and a caller that named the Go profile asked for it.
+#[test]
+fn a_named_profile_ignores_detection() {
+    let (tree, rules) = fixture();
+    let setup = setup_of(&profile_request(tree.path(), &rules).with_profiles(
+        ProfileSelection::Named(vec!["reliability-go@1".to_string()]),
+    ));
+
+    assert_eq!(setup.languages, ["rust"]);
+    assert_eq!(
+        source_ids(&setup),
+        [EMBEDDED_PACK_ID, "reliability-go@1", "rules/rules.yaml"]
+    );
+    assert!(setup.explicit_overrides.contains(&"profiles".to_string()));
+}
+
+/// Loading nothing for a name the caller supplied would be the clean scan that
+/// proved nothing, so it is a refusal that says what is available instead.
+#[test]
+fn a_named_profile_with_no_document_is_a_resolve_error() {
+    let (tree, rules) = fixture();
+    let error = resolve_err(&profile_request(tree.path(), &rules).with_profiles(
+        ProfileSelection::Named(vec!["reliability-elixir@1".to_string()]),
+    ));
+
+    assert_eq!(
+        error,
+        "unknown profile: reliability-elixir@1; available: \
+         maintainability-rust@1, reliability-go@1, reliability-rust@1"
+    );
+}
+
+/// `--no-default-rules` means every embedded document, not just the pack. A
+/// flag that left the profiles loaded would mean something else under the same
+/// spelling.
+#[test]
+fn no_default_rules_suppresses_the_profiles_too() {
+    let (tree, rules) = fixture();
+    let setup = setup_of(
+        &profile_request(tree.path(), &rules)
+            .without_embedded_rules()
+            .with_profiles(ProfileSelection::Auto),
+    );
+
+    assert_eq!(source_ids(&setup), ["rules/rules.yaml"]);
+    assert_eq!(
+        capability(&setup, "profiles").status(),
+        &CapabilityStatus::Skipped
+    );
+
+    // And it wins over a name, which detection never gets a say in either.
+    let named = setup_of(
+        &profile_request(tree.path(), &rules)
+            .without_embedded_rules()
+            .with_profiles(ProfileSelection::Named(vec![
+                "reliability-go@1".to_string(),
+            ])),
+    );
+    assert_eq!(source_ids(&named), ["rules/rules.yaml"]);
+
+    // Suppressing the documents does not stop the names being resolved. A
+    // misspelling accepted here and refused on the next run without the flag
+    // is the worse half of both answers.
+    let error = resolve_err(
+        &profile_request(tree.path(), &rules)
+            .without_embedded_rules()
+            .with_profiles(ProfileSelection::Named(vec![
+                "reliability-elixir@1".to_string(),
+            ])),
+    );
+    assert!(
+        error.starts_with("unknown profile: reliability-elixir@1;"),
+        "{error}"
+    );
+}
+
+/// The rules a profile document declares are in the set the scan runs and the
+/// digest the cache keys on, not in a side channel.
+#[test]
+fn a_selected_profile_contributes_its_rules_to_the_scan() {
+    let tree = tempfile::tempdir().unwrap();
+    write(
+        tree.path(),
+        "src/a.rs",
+        "let x = \"rust-reliability-probe\";\n",
+    );
+    let rules_only = rules_dir(tree.path(), "rules", NEEDLE_RULE);
+    let report = run(&ScanRequest::explicit(tree.path())
+        .with_rule_dirs(vec![rules_only.clone()])
+        .with_profile_registry(TEST_PROFILES)
+        .with_profiles(ProfileSelection::Named(vec![
+            "reliability-rust@1".to_string(),
+        ])));
+
+    let ids: Vec<&str> = report
+        .scan
+        .findings
+        .iter()
+        .map(|finding| finding.rule_id.as_str())
+        .collect();
+    assert_eq!(ids, ["reliability.rust.probe"]);
+
+    // The same tree without the profile. Its rule digest has to differ, or a
+    // warm cache written by one of these two runs would be served to the
+    // other - findings from a rule set that is not the one that produced them.
+    let bare = run(&ScanRequest::explicit(tree.path()).with_rule_dirs(vec![rules_only]));
+    assert!(bare.scan.findings.is_empty());
+    assert_ne!(
+        report.context().rules().source_hash(),
+        bare.context().rules().source_hash()
+    );
+}
+
+/// Every gate the scanner runs before it scans has to see the profile
+/// documents, or a rule that arrived in one bypasses the check that makes it
+/// mean anything and reports nothing at all. A boundary rule is the case with
+/// its own refusal: the same document in a `--rules` directory fails
+/// resolution, and it has to fail identically here.
+#[test]
+fn a_profile_carrying_a_boundary_rule_without_silos_fails_resolution() {
+    let tree = tempfile::tempdir().unwrap();
+    write(tree.path(), "src/a.rs", "fn main() {}\n");
+    let rules = rules_dir(tree.path(), "rules", NEEDLE_RULE);
+    let error = resolve_err(
+        &ScanRequest::explicit(tree.path())
+            .with_rule_dirs(vec![rules])
+            .with_profile_registry(GATED_PROFILES)
+            .with_profiles(ProfileSelection::Named(vec!["boundary-rust@1".to_string()])),
+    );
+
+    assert!(error.contains("[silos]"), "{error}");
+    assert!(error.contains("arch.api-db"), "{error}");
+}
+
+/// The same statement for the gate on the other side of the walk: a coverage
+/// rule with no report is refused whichever document carried it.
+#[test]
+fn a_profile_carrying_a_coverage_rule_without_a_report_fails_resolution() {
+    let tree = tempfile::tempdir().unwrap();
+    write(tree.path(), "src/a.rs", "fn main() {}\n");
+    let rules = rules_dir(tree.path(), "rules", NEEDLE_RULE);
+    let error = resolve_err(
+        &ScanRequest::explicit(tree.path())
+            .with_rule_dirs(vec![rules])
+            .with_profile_registry(GATED_PROFILES)
+            .with_profiles(ProfileSelection::Named(vec!["coverage-rust@1".to_string()])),
+    );
+
+    assert!(error.contains("cov.min"), "{error}");
+}
+
+/// Two profiles claiming one rule id. Each document loads on its own, so this
+/// is only visible over the union.
+#[test]
+fn two_profiles_claiming_one_rule_id_are_refused() {
+    let tree = tempfile::tempdir().unwrap();
+    write(tree.path(), "src/a.rs", "let x = 1;\n");
+    let error = resolve_err(
+        &ScanRequest::explicit(tree.path())
+            .with_profile_registry(COLLIDING_PROFILES)
+            .with_profiles(ProfileSelection::Auto),
+    );
+
+    assert_eq!(error, "duplicate rule id: reliability.rust.probe");
+}
+
+/// A profile document is shipped, not supplied, so one that does not parse is
+/// a build mistake - and the failure has to name which document it was.
+#[test]
+fn a_profile_document_that_does_not_parse_names_the_profile() {
+    let tree = tempfile::tempdir().unwrap();
+    write(tree.path(), "src/a.rs", "let x = 1;\n");
+    let error = resolve_err(
+        &ScanRequest::explicit(tree.path())
+            .with_profile_registry(BROKEN_PROFILES)
+            .with_profiles(ProfileSelection::Auto),
+    );
+
+    assert!(error.starts_with("reliability-rust@1: "), "{error}");
+}
+
+/// A rule directory that claims a profile's id is the same refusal a directory
+/// claiming the pack's id already is - which is why the check has to run again
+/// after the profiles are appended.
+#[test]
+fn a_rule_directory_colliding_with_a_profile_id_is_refused() {
+    let tree = tempfile::tempdir().unwrap();
+    write(tree.path(), "src/a.rs", "let x = 1;\n");
+    let rules = rules_dir(tree.path(), "rules", RELIABILITY_RUST);
+    let error = resolve_err(
+        &ScanRequest::explicit(tree.path())
+            .with_rule_dirs(vec![rules])
+            .with_profile_registry(TEST_PROFILES)
+            .with_profiles(ProfileSelection::Named(vec![
+                "reliability-rust@1".to_string(),
+            ])),
+    );
+
+    assert_eq!(error, "duplicate rule id: reliability.rust.probe");
 }
 
 // ---------------------------------------------------------------------------
