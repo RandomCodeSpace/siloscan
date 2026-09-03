@@ -111,6 +111,11 @@ pub const REGISTRY: &[Profile] = &[
         include_str!("../rules/profiles/maintainability-rust.yaml"),
     ),
     Profile::new(
+        "maintainability-typescript@1",
+        "typescript",
+        include_str!("../rules/profiles/maintainability-typescript.yaml"),
+    ),
+    Profile::new(
         "reliability-c@1",
         "c",
         include_str!("../rules/profiles/reliability-c.yaml"),
@@ -154,6 +159,11 @@ pub const REGISTRY: &[Profile] = &[
         "reliability-rust@1",
         "rust",
         include_str!("../rules/profiles/reliability-rust.yaml"),
+    ),
+    Profile::new(
+        "reliability-typescript@1",
+        "typescript",
+        include_str!("../rules/profiles/reliability-typescript.yaml"),
     ),
 ];
 

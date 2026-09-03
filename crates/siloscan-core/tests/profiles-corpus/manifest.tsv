@@ -169,3 +169,22 @@ javascript/debugger-statement-positive.js	2	reliability.javascript.debugger-stat
 javascript/debugger-statement-negative.js	2	NONE	the function carries no debugger statement
 javascript/constant-condition-positive.js	2	reliability.javascript.constant-condition	the condition is a boolean literal, so the branch is decided at author time
 javascript/constant-condition-negative.js	2	NONE	the condition is a parameter, so the branch is decided at run time
+# typescript
+typescript/function-length-over.ts	1	maintainability.typescript.function-length	the function is 401 lines, one over the profile's 400
+typescript/function-length-under.ts	1	NONE	the function is 400 lines, which the profile allows
+typescript/parameter-count-over.ts	1	maintainability.typescript.parameter-count	the function takes 8 parameters, one over the profile's 7
+typescript/parameter-count-under.ts	1	NONE	the function takes 7 parameters, which the profile allows
+typescript/nesting-depth-over.ts	1	maintainability.typescript.nesting-depth	the loops nest 6 deep, one over the profile's 5
+typescript/nesting-depth-under.ts	1	NONE	the loops nest 5 deep, which the profile allows
+typescript/cyclomatic-complexity-over.ts	1	maintainability.typescript.cyclomatic-complexity	the decision count is 26, one over the profile's 25
+typescript/cyclomatic-complexity-under.ts	1	NONE	the decision count is 25, which the profile allows
+typescript/self-comparison-positive.ts	2	reliability.typescript.self-comparison	both operands are the identical identifier, so the comparison cannot decide anything
+typescript/self-comparison-negative.ts	2	NONE	the operands are two different identifiers, which is an ordinary comparison
+typescript/self-assignment-positive.ts	2	reliability.typescript.self-assignment	the assignment writes the variable back to itself and has no effect
+typescript/self-assignment-negative.ts	2	NONE	the assignment reads a different variable, so it has an effect
+typescript/identical-if-branches-positive.ts	2	reliability.typescript.identical-if-branches	both arms are byte-identical, which is the copy-paste shape the rule owns
+typescript/identical-if-branches-negative.ts	2	NONE	the two arms differ, so the condition decides the value
+typescript/debugger-statement-positive.ts	2	reliability.typescript.debugger-statement	a debugger statement halts a browser session
+typescript/debugger-statement-negative.ts	2	NONE	the function carries no debugger statement
+typescript/constant-condition-positive.ts	2	reliability.typescript.constant-condition	the condition is a boolean literal, so the branch is decided at author time
+typescript/constant-condition-negative.ts	2	NONE	the condition is a parameter, so the branch is decided at run time

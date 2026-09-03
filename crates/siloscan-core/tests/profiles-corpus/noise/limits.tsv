@@ -111,3 +111,14 @@ maintainability.javascript.function-length	0	0.7342	2026-09-03	#78 P4a
 maintainability.javascript.parameter-count	0	0.3674	2026-09-03	#78 P4a
 maintainability.javascript.nesting-depth	0	0.1700	2026-09-03	#78 P4a
 maintainability.javascript.cyclomatic-complexity	0	0.1020	2026-09-03	#78 P4a
+# typescript, measured against zod 3.23.8, rxjs 7.8.1 and nest 12.0.1, with
+# maintainability.typescript.function-length raised once from 120 to 400.
+reliability.typescript.self-comparison	0	0.0000	2026-09-03	#78 P4a
+reliability.typescript.self-assignment	0	0.0000	2026-09-03	#78 P4a
+reliability.typescript.identical-if-branches	0	0.0000	2026-09-03	#78 P4a
+reliability.typescript.debugger-statement	0	0.0000	2026-09-03	#78 P4a
+reliability.typescript.constant-condition	0	0.0000	2026-09-03	#78 P4a
+maintainability.typescript.function-length	0	0.7514	2026-09-03	#78 P4a
+maintainability.typescript.parameter-count	0	0.0661	2026-09-03	#78 P4a
+maintainability.typescript.nesting-depth	0	0.4082	2026-09-03	#78 P4a
+maintainability.typescript.cyclomatic-complexity	0	0.2450	2026-09-03	#78 P4a
