@@ -11,7 +11,10 @@ readme = "README.md"
 description = "Core library for siloscan: rule loading, scanning engines, findings"
 # The detection corpus is credential-shaped by construction. It belongs in the
 # repository, where the harness reads it, and nowhere near a published artifact.
-exclude = ["tests/corpus/**"]
+# The profile corpus is not credential-shaped, but it is measurement input for a
+# test that only ever runs from a checkout, so it is no more publishable than
+# the other one.
+exclude = ["tests/corpus/**", "tests/profiles-corpus/**"]
 
 [dependencies]
 getrandom = "0.4.3"
