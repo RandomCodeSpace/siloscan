@@ -33,3 +33,12 @@ maintainability.java.parameter-count	0	0.226361	2026-09-03	#78 P4b: max of commo
 reliability.java.identical-if-branches	0	0.003903	2026-09-03	#78 P4b: max of commons-lang 0.0000, gson 0.0000, guava 0.0039
 reliability.java.self-comparison	0	0.000000	2026-09-03	#78 P4b: no finding on commons-lang, gson or guava
 reliability.java.string-literal-identity	0	0.000000	2026-09-03	#78 P4b: no finding on commons-lang, gson or guava
+maintainability.c.cyclomatic-complexity	0	0.775134	2026-09-03	#78 P4b: max of curl 0.7751, jq 0.7284, redis 0.7033
+maintainability.c.function-length	0	0.819428	2026-09-03	#78 P4b: max of curl 0.8194, jq 0.7867, redis 0.7365
+maintainability.c.nesting-depth	0	0.709973	2026-09-03	#78 P4b: max of curl 0.6699, jq 0.5245, redis 0.7100
+maintainability.c.parameter-count	0	0.272046	2026-09-03	#78 P4b: max of curl 0.1882, jq 0.1457, redis 0.2720
+reliability.c.assignment-in-condition	0	0.495324	2026-09-03	#78 P4b: max of curl 0.0000, jq 0.4953, redis 0.0000
+reliability.c.identical-if-branches	0	0.006636	2026-09-03	#78 P4b: max of curl 0.0000, jq 0.0000, redis 0.0066
+reliability.c.self-assignment	0	0.006636	2026-09-03	#78 P4b: max of curl 0.0000, jq 0.0000, redis 0.0066
+reliability.c.self-comparison	0	0.000000	2026-09-03	#78 P4b: no finding on curl, jq or redis
+reliability.c.string-literal-comparison	0	0.000000	2026-09-03	#78 P4b: no finding on curl, jq or redis

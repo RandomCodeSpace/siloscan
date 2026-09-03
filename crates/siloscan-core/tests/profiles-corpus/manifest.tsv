@@ -27,3 +27,21 @@ java/metric-under.java	2	NONE	the method spans exactly 120 lines, which is the p
 java/metric-under.java	124	NONE	seven parameters is exactly the profile's limit
 java/metric-under.java	129	NONE	five nested if statements is exactly the profile's limit
 java/metric-under.java	144	NONE	24 branches plus the entry path is 25, exactly the profile's limit
+c/positive.c	2	reliability.c.self-comparison	both operands are the identical identifier, so the comparison is constant
+c/positive.c	5	reliability.c.self-assignment	the assignment writes `a` to itself and has no effect
+c/positive.c	8	reliability.c.assignment-in-condition	the condition assigns rather than compares, with no second pair of parentheses
+c/positive.c	14	reliability.c.identical-if-branches	both arms are the byte-identical block `{ return 1; }`
+c/positive.c	21	reliability.c.string-literal-comparison	`==` against a string literal compares addresses, not contents
+c/negative.c	2	NONE	the operands are different identifiers, which is an ordinary comparison
+c/negative.c	5	NONE	the operands are different identifiers, which is an ordinary assignment
+c/negative.c	8	NONE	the second pair of parentheses is the compilers' own deliberate-assignment form
+c/negative.c	14	NONE	the two arms return different values, so the condition decides something
+c/negative.c	22	NONE	strcmp compares contents, which is the correct spelling
+c/metric-over.c	1	maintainability.c.function-length	the function spans 151 lines, one over this document's raised 150
+c/metric-over.c	152	maintainability.c.parameter-count	the function takes 8 parameters, one over the profile's 7
+c/metric-over.c	155	maintainability.c.nesting-depth	six nested if statements, one over the profile's 5
+c/metric-over.c	170	maintainability.c.cyclomatic-complexity	30 branches plus the entry path is 31, one over this document's raised 30
+c/metric-under.c	1	NONE	the function spans exactly 150 lines, which is this document's limit and not over it
+c/metric-under.c	151	NONE	seven parameters is exactly the profile's limit
+c/metric-under.c	154	NONE	five nested if statements is exactly the profile's limit
+c/metric-under.c	167	NONE	29 branches plus the entry path is 30, exactly this document's limit

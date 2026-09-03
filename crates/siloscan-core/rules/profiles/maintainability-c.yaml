@@ -1,0 +1,39 @@
+# C maintainability profile. Original work: the four measures are the engine's
+# own (crates/siloscan-core/src/engines/metric.rs) and the thresholds are this
+# repository's, chosen conservatively so the first run of a real tree stays
+# readable.
+#
+# Identity: maintainability-c@1. See crates/siloscan-core/src/profiles.rs.
+version: 1
+rules:
+  - id: maintainability.c.function-length
+    severity: info
+    message: 'This function is longer than the profile allows.'
+    languages: [c]
+    metric:
+      measure: function-length
+      max: 150
+
+  - id: maintainability.c.parameter-count
+    severity: info
+    message: 'This function takes more parameters than the profile allows.'
+    languages: [c]
+    metric:
+      measure: parameter-count
+      max: 7
+
+  - id: maintainability.c.nesting-depth
+    severity: info
+    message: 'This function nests more deeply than the profile allows.'
+    languages: [c]
+    metric:
+      measure: nesting-depth
+      max: 5
+
+  - id: maintainability.c.cyclomatic-complexity
+    severity: info
+    message: 'This function has more branches than the profile allows.'
+    languages: [c]
+    metric:
+      measure: cyclomatic-complexity
+      max: 30

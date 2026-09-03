@@ -1,0 +1,72 @@
+# C reliability profile. Original work: every query below was written against
+# tree-sitter-c's own node-types.json. Rule names such as "assignment in
+# condition" are not ownable and no pattern, query or message text is taken
+# from another analyser.
+#
+# Identity: reliability-c@1. See crates/siloscan-core/src/profiles.rs.
+#
+# Two candidates from the rule matrix are deliberately absent, each removed on
+# the measurement recorded in tests/profiles-corpus/noise/limits.tsv rather
+# than re-tuned:
+#   unreachable-after-return  1.21 per kLOC on curl, 1.84 on jq, 1.49 on redis,
+#                             and every finding read is a trailing comment on
+#                             the return line, not code.
+#   empty-if-body             every finding read on curl is the deliberate
+#                             `if (cond) ; else if (...)` idiom that excludes a
+#                             case, and jq's are `#ifdef` bodies the C parser
+#                             cannot see. Neither is a stray semicolon.
+version: 1
+rules:
+  - id: reliability.c.self-comparison
+    severity: warning
+    message: 'Both operands of this comparison are the same identifier, so the result is constant.'
+    ast:
+      c: |
+        ((binary_expression
+           left: (identifier) @l
+           operator: "=="
+           right: (identifier) @r) @report
+         (#eq? @l @r))
+
+  - id: reliability.c.self-assignment
+    severity: warning
+    message: 'This assignment writes a variable to itself and has no effect.'
+    ast:
+      c: |
+        ((assignment_expression
+           left: (identifier) @l
+           operator: "="
+           right: (identifier) @r) @report
+         (#eq? @l @r))
+
+  - id: reliability.c.assignment-in-condition
+    severity: warning
+    message: 'This condition assigns rather than compares. Wrap it in a second pair of parentheses if that is deliberate.'
+    ast:
+      c: |
+        (if_statement
+          condition: (parenthesized_expression
+            (assignment_expression) @report))
+
+  - id: reliability.c.identical-if-branches
+    severity: warning
+    message: 'Both branches of this if statement have the same body, so the condition decides nothing.'
+    ast:
+      c: |
+        ((if_statement
+           consequence: (compound_statement) @a
+           alternative: (else_clause (compound_statement) @b)) @report
+         (#eq? @a @b))
+
+  - id: reliability.c.string-literal-comparison
+    severity: warning
+    message: 'Comparing a pointer to a string literal with == compares addresses, not contents. Use strcmp.'
+    ast:
+      c: |
+        (binary_expression
+          left: (_)
+          operator: "=="
+          right: (string_literal)) @report
+        (binary_expression
+          left: (string_literal)
+          operator: "==") @report

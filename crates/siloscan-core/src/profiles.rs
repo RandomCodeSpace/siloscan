@@ -61,9 +61,19 @@ impl Profile {
 /// Every embedded profile document, ordered by identity.
 pub const REGISTRY: &[Profile] = &[
     Profile::new(
+        "maintainability-c@1",
+        "c",
+        include_str!("../rules/profiles/maintainability-c.yaml"),
+    ),
+    Profile::new(
         "maintainability-java@1",
         "java",
         include_str!("../rules/profiles/maintainability-java.yaml"),
+    ),
+    Profile::new(
+        "reliability-c@1",
+        "c",
+        include_str!("../rules/profiles/reliability-c.yaml"),
     ),
     Profile::new(
         "reliability-java@1",
