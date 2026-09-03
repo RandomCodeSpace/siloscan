@@ -1,0 +1,197 @@
+name: Performance
+
+# The fourteen paired performance cells: seven lanes, wall time and peak RSS
+# each. Both binaries are built here from this one checkout - the candidate
+# from the tree, the pinned v1.5.1 reference from the checkout's own object
+# store - so nothing measured came from a prior run.
+#
+# CPU expectation: every sample runs on a standard GitHub-hosted ubuntu-latest
+# runner, 4 vCPU x86-64, and both binaries of a lane run on the same runner
+# inside the same job. That is what makes the pairing valid. The absolute
+# numbers are not comparable to research/oracle-v1.5.1/measurements, which was
+# recorded on an 8 vCPU AMD EPYC 9354P host. There is no `nice` and no
+# `taskset`: the plan requires identical CPU allocation between the two
+# binaries, which ABBA pairing on one runner already provides, and pinning
+# would measure a configuration no user runs.
+#
+# No build cache is restored. The candidate build populates the Cargo registry
+# for the reference build, whose lockfile is a strict subset of the candidate's,
+# so the reference still builds `--locked --offline` exactly as the oracle
+# harness builds it.
+#
+# Takes no input: the gate qualifies the caller's own GITHUB_SHA. A workflow
+# that could be handed a ref would let a fork's code run against this
+# repository's runners.
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # The pinned v1.5.1 reference, identical to REFERENCE_COMMIT in
+  # crates/siloscan/tests/v2_oracle_harness.rs.
+  REFERENCE_COMMIT: 880d211a463e97eb3c188f957e5592d88f36dcf8
+
+jobs:
+  gate:
+    name: Paired performance gate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      verdict: ${{ steps.gate.outputs.verdict }}
+    steps:
+      # Full history: the reference is built from the pinned v1.5.1 commit in
+      # this checkout's own object store, exactly as the oracle harness does.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Record the candidate identity
+        run: |
+          set -euo pipefail
+          head="$(git rev-parse HEAD)"
+          if [ "$head" != "$GITHUB_SHA" ]; then
+            echo "checked out $head, candidate is $GITHUB_SHA" >&2
+            exit 1
+          fi
+          echo "performance gate at $head" >> "$GITHUB_STEP_SUMMARY"
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master, 2026-07-16
+        with:
+          toolchain: stable
+      - name: Build the candidate
+        run: cargo build --locked --release -p siloscan
+      - name: Build the pinned v1.5.1 reference
+        run: |
+          set -euo pipefail
+          git clone --quiet --no-checkout --local --no-hardlinks --no-tags \
+            "$GITHUB_WORKSPACE/.git" "$RUNNER_TEMP/reference"
+          git -C "$RUNNER_TEMP/reference" checkout --detach --force "$REFERENCE_COMMIT"
+          cargo build --locked --offline --release \
+            --manifest-path "$RUNNER_TEMP/reference/Cargo.toml" \
+            --target-dir "$RUNNER_TEMP/reference-target" \
+            -p siloscan --bins
+      - name: Generate the scale tree
+        run: |
+          set -euo pipefail
+          python3 scripts/scale_tree.py --out "$RUNNER_TEMP/scale"
+          python3 scripts/scale_tree.py --out "$RUNNER_TEMP/scale" --verify
+          mkdir -p "$RUNNER_TEMP/scale-rules"
+          cp research/oracle-v1.5.1/scale/ast.yaml "$RUNNER_TEMP/scale-rules/"
+      - name: Run the gate
+        id: gate
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/performance"
+          set +e
+          python3 scripts/perf_gate.py \
+            --reference "$RUNNER_TEMP/reference-target/release/siloscan" \
+            --candidate target/release/siloscan \
+            --tree "$RUNNER_TEMP/scale" \
+            --rules "$RUNNER_TEMP/scale-rules" \
+            --work "$RUNNER_TEMP/perf-work" \
+            --out "$RUNNER_TEMP/performance/samples.json" \
+            --table "$RUNNER_TEMP/performance/table.txt"
+          status=$?
+          set -e
+          {
+            echo '### Performance, first run'
+            echo '```'
+            cat "$RUNNER_TEMP/performance/table.txt"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          case "$status" in
+            0) echo "verdict=pass" >> "$GITHUB_OUTPUT" ;;
+            1) echo "verdict=rerun" >> "$GITHUB_OUTPUT" ;;
+            *) echo "the gate failed with status $status" >&2; exit "$status" ;;
+          esac
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: performance-${{ github.sha }}-first
+          path: ${{ runner.temp }}/performance
+          if-no-files-found: error
+          overwrite: true
+
+  # A suspected or invalidated first run repeats the complete pair once, on a
+  # fresh runner. `--compare` then applies the twice-rule: the same lane and
+  # metric above 1.05 in both runs rejects the candidate, with no waiver and no
+  # offset. A cell that is clean this time passes; a cell that is above the
+  # limit for the first time here is suspected again and still fails the job,
+  # because the plan allows exactly one repeat.
+  rerun:
+    name: Fresh-runner rerun
+    needs: gate
+    if: needs.gate.outputs.verdict == 'rerun'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Record the candidate identity
+        run: |
+          set -euo pipefail
+          head="$(git rev-parse HEAD)"
+          if [ "$head" != "$GITHUB_SHA" ]; then
+            echo "checked out $head, candidate is $GITHUB_SHA" >&2
+            exit 1
+          fi
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master, 2026-07-16
+        with:
+          toolchain: stable
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: performance-${{ github.sha }}-first
+          path: ${{ runner.temp }}/first
+      - name: Build the candidate
+        run: cargo build --locked --release -p siloscan
+      - name: Build the pinned v1.5.1 reference
+        run: |
+          set -euo pipefail
+          git clone --quiet --no-checkout --local --no-hardlinks --no-tags \
+            "$GITHUB_WORKSPACE/.git" "$RUNNER_TEMP/reference"
+          git -C "$RUNNER_TEMP/reference" checkout --detach --force "$REFERENCE_COMMIT"
+          cargo build --locked --offline --release \
+            --manifest-path "$RUNNER_TEMP/reference/Cargo.toml" \
+            --target-dir "$RUNNER_TEMP/reference-target" \
+            -p siloscan --bins
+      - name: Generate the scale tree
+        run: |
+          set -euo pipefail
+          python3 scripts/scale_tree.py --out "$RUNNER_TEMP/scale"
+          python3 scripts/scale_tree.py --out "$RUNNER_TEMP/scale" --verify
+          mkdir -p "$RUNNER_TEMP/scale-rules"
+          cp research/oracle-v1.5.1/scale/ast.yaml "$RUNNER_TEMP/scale-rules/"
+      - name: Rerun the gate and apply the twice-rule
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/performance"
+          set +e
+          python3 scripts/perf_gate.py \
+            --reference "$RUNNER_TEMP/reference-target/release/siloscan" \
+            --candidate target/release/siloscan \
+            --tree "$RUNNER_TEMP/scale" \
+            --rules "$RUNNER_TEMP/scale-rules" \
+            --work "$RUNNER_TEMP/perf-work" \
+            --out "$RUNNER_TEMP/performance/samples.json" \
+            --table "$RUNNER_TEMP/performance/table.txt" \
+            --compare "$RUNNER_TEMP/first/samples.json"
+          status=$?
+          set -e
+          {
+            echo '### Performance, fresh-runner rerun'
+            echo '```'
+            cat "$RUNNER_TEMP/performance/table.txt"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$status"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: performance-${{ github.sha }}-rerun
+          path: ${{ runner.temp }}/performance
+          if-no-files-found: error
+          overwrite: true
