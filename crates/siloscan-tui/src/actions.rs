@@ -58,7 +58,10 @@ pub fn accept_baseline(state: &mut AppState, row_idx: usize) {
     state.clamp_ratchet();
     state.clamp_selection();
 
-    if let Err(e) = persist_baseline(&state.root, &state.dirty_baseline) {
+    // The baseline root, not the scan root: a config-anchored scan measures its
+    // fingerprints from the config root, so that is the only place a baseline
+    // written here is read back from.
+    if let Err(e) = persist_baseline(&state.baseline_root, &state.dirty_baseline) {
         state.status = format!("baseline: {e}");
     }
 }
@@ -258,7 +261,6 @@ mod tests {
                 rules: Vec::new(),
                 ..Default::default()
             }),
-            None,
         );
         state.rows = rows;
         state

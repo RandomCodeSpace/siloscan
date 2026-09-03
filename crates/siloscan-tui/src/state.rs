@@ -8,13 +8,14 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use siloscan_core::baseline::Baseline;
 use siloscan_core::config::Anchor;
 use siloscan_core::findings::Finding;
 use siloscan_core::metrics::Metrics;
+use siloscan_core::plan::ScanSetupReport;
 use siloscan_core::rules::{RuleSet, Severity};
 use siloscan_core::scan::Progress;
 
+use crate::snapshot::SavedOutcome;
 use crate::ui::dashboard::{SiloCard, SiloGroup};
 
 /// Why a rescan is refused against a loaded report.
@@ -220,11 +221,18 @@ pub struct AppState {
     pub progress: Option<Progress>,
     /// Index into `new_rows()`.
     pub ratchet_cursor: usize,
+    /// Directory the findings' paths are read from, for the source pane.
     pub root: PathBuf,
+    /// Directory holding `.siloscan/baseline.json`, which is the scan root
+    /// under scan-root anchoring and the config root under config anchoring.
+    /// Distinct from `root`: a config-anchored scan of a module measures its
+    /// fingerprints from the repository root, so that is where its baseline
+    /// lives, and writing one beside the module would ratchet nothing.
+    pub baseline_root: PathBuf,
     pub rules: Arc<RuleSet>,
-    /// Baseline as of the last load; the ratchet writes it and a rescan
-    /// re-reads it.
-    pub baseline: Option<Arc<Baseline>>,
+    /// What resolution found for the last live scan. `None` in snapshot mode
+    /// and before the first report arrives.
+    pub setup: Option<ScanSetupReport>,
     /// Findings accepted in the ratchet console, pending a baseline write.
     pub dirty_baseline: Vec<Finding>,
     /// Boundary violations as (from silo, to silo, index into `rows`).
@@ -247,6 +255,10 @@ pub struct AppState {
     /// resolve against the working directory, so the banner says so; nothing
     /// else reads it. Meaningless while `snapshot` is `None`.
     pub snapshot_anchor: Anchor,
+    /// The gate the loaded report's run was judged against. `None` for a live
+    /// session and for a report that records no outcome, which is not the same
+    /// as a run that passed. The footer says which of the two it is.
+    pub saved_outcome: Option<SavedOutcome>,
     /// True while the filter text box owns the keyboard.
     pub input_mode: bool,
     /// Status bar message.
@@ -255,7 +267,12 @@ pub struct AppState {
 }
 
 impl AppState {
-    pub fn new(root: PathBuf, rules: Arc<RuleSet>, baseline: Option<Arc<Baseline>>) -> Self {
+    /// A session over `root` with nothing loaded yet.
+    ///
+    /// The baseline root starts as the scan root, which is where it stays for
+    /// every scan-root-anchored scan; a config-anchored plan replaces it when
+    /// its first report arrives.
+    pub fn new(root: PathBuf, rules: Arc<RuleSet>) -> Self {
         AppState {
             screen: Screen::default(),
             filters: Filters::default(),
@@ -265,9 +282,10 @@ impl AppState {
             scan_running: false,
             progress: None,
             ratchet_cursor: 0,
+            baseline_root: root.clone(),
             root,
             rules,
-            baseline,
+            setup: None,
             dirty_baseline: Vec::new(),
             boundary_edges: Vec::new(),
             metrics: Metrics::default(),
@@ -277,6 +295,7 @@ impl AppState {
             selected_silo: None,
             snapshot: None,
             snapshot_anchor: Anchor::default(),
+            saved_outcome: None,
             input_mode: false,
             status: String::new(),
             should_quit: false,
@@ -594,7 +613,6 @@ mod tests {
                 rules: Vec::new(),
                 ..Default::default()
             }),
-            None,
         );
         state.rows = rows;
         state

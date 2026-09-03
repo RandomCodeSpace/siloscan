@@ -518,7 +518,6 @@ mod tests {
                 rules: Vec::new(),
                 ..Default::default()
             }),
-            None,
         );
         state.rows = [
             ("api/handler.rs", 4, "db::pool"),
