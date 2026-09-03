@@ -21,14 +21,11 @@
 //!
 //! # Staying out of the real state directory
 //!
-//! `HOME`, `XDG_STATE_HOME` and `LOCALAPPDATA` point into a temporary directory,
-//! and on macOS `CFFIXED_USER_HOME` redirects Foundation's idea of the user's
-//! home along with them. Windows has no equivalent - `SHGetKnownFolderPath`
-//! reads no environment variable - so a saving case there does write under the
-//! real local application data folder. That is safe rather than merely tolerated:
-//! the scope key is the hash of a path inside this run's own temporary
-//! directory, so it names a directory no other run and no real scan can collide
-//! with.
+//! `common::isolation` owns that rule and explains it. The short version: unix
+//! redirects the cache, the state root and the home they fall back on; Windows
+//! redirects only the cache, because its state root comes from a shell call that
+//! reads no environment variable and breaks outright if `USERPROFILE` is pointed
+//! somewhere without an `AppData\Local` under it.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -36,6 +33,9 @@ use std::process::{Command, Output};
 
 use siloscan_core::serde_json::Value;
 use tempfile::TempDir;
+
+#[path = "common/isolation.rs"]
+mod isolation;
 
 const SILOSCAN: &str = env!("CARGO_BIN_EXE_siloscan");
 
@@ -86,20 +86,14 @@ impl Host {
     /// exercise an invalid or hostile `XDG_STATE_HOME`.
     fn run_in(&self, cwd: &Path, state: Option<&str>, args: &[&str]) -> Output {
         let mut command = Command::new(SILOSCAN);
-        command
-            .current_dir(cwd)
-            .env("XDG_CACHE_HOME", &self.cache)
-            .env("HOME", &self.home)
-            .env("USERPROFILE", &self.home)
-            // Foundation's user home on macOS, so `URLForDirectory:inDomain:`
-            // answers with a directory this run owns. Windows has no equivalent;
-            // see the module note.
-            .env("CFFIXED_USER_HOME", &self.home)
-            .env("LOCALAPPDATA", &self.state);
-        match state {
-            Some(value) => command.env("XDG_STATE_HOME", value),
-            None => command.env("XDG_STATE_HOME", &self.state),
-        };
+        command.current_dir(cwd);
+        isolation::isolate(&mut command, &self.cache, &self.state, &self.home);
+        // After the shared rule, so a test that is about `XDG_STATE_HOME` gets
+        // the value it asked for. Only Linux reads it, and every test that
+        // passes one is gated to Linux.
+        if let Some(value) = state {
+            command.env("XDG_STATE_HOME", value);
+        }
         command.args(args).output().expect("siloscan should run")
     }
 

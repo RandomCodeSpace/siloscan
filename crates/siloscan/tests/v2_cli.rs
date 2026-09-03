@@ -14,8 +14,8 @@
 //! searching the directory a test set `XDG_STATE_HOME` to: only Linux resolves
 //! its state root from the environment, so that search would find nothing on
 //! macOS and Windows whether or not a report was written. `v2_persistence` has
-//! the long version of the argument, and the environment set below is the same
-//! one, `CFFIXED_USER_HOME` included.
+//! the long version of that argument, and `common::isolation` has the rule for
+//! which directories a child is pointed at on which platform.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -23,6 +23,9 @@ use std::process::{Command, Output};
 
 use siloscan_core::serde_json::Value;
 use tempfile::TempDir;
+
+#[path = "common/isolation.rs"]
+mod isolation;
 
 const BINARIES: [(&str, &str); 2] = [
     ("siloscan", env!("CARGO_BIN_EXE_siloscan")),
@@ -88,18 +91,9 @@ impl Host {
     }
 
     fn run_in(&self, binary: &str, cwd: &Path, args: &[&str]) -> Output {
-        Command::new(binary)
-            .current_dir(cwd)
-            .env("XDG_CACHE_HOME", &self.cache)
-            .env("XDG_STATE_HOME", &self.state)
-            .env("HOME", &self.home)
-            .env("USERPROFILE", &self.home)
-            // Foundation's user home on macOS. Windows reads no variable for
-            // this and writes under the real local application data folder,
-            // where the scope key names a directory derived from this run's own
-            // temporary path and so collides with nothing.
-            .env("CFFIXED_USER_HOME", &self.home)
-            .env("LOCALAPPDATA", &self.state)
+        let mut command = Command::new(binary);
+        command.current_dir(cwd);
+        isolation::isolate(&mut command, &self.cache, &self.state, &self.home)
             .args(args)
             .output()
             .expect("binary should run")

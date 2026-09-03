@@ -5,6 +5,9 @@ use std::process::{Command, Output, Stdio};
 use siloscan_core::serde_json::Value;
 use tempfile::TempDir;
 
+#[path = "common/isolation.rs"]
+mod isolation;
+
 const MATCHING_RULE: &str = concat!(
     "version: 1\n",
     "rules:\n",
@@ -239,27 +242,15 @@ fn cache_home() -> TempDir {
 /// The state root is redirected for a stronger reason than tidiness: a bare
 /// invocation saves a report, and a test that reached the developer's own state
 /// directory would overwrite a real one. Every case here supplies a scan option
-/// and so saves nothing, and this is the second line of defence.
+/// and so saves nothing; this is the second line of defence, and what it can and
+/// cannot do per platform is `common::isolation`'s rule rather than this
+/// suite's.
 ///
-/// That defence is complete on Linux and partial elsewhere. The cache reads its
-/// environment on every platform, and so does the saved-report state root on
-/// Linux; on macOS the root comes from Foundation, which `CFFIXED_USER_HOME`
-/// redirects, and on Windows it comes from the shell, which reads no
-/// environment variable at all. A Windows run that saved would write to the real
-/// local application data folder. None does, and `v2_persistence` is where that
-/// is asserted rather than assumed.
+/// One throwaway directory serves as cache, state and home, because this suite
+/// asserts on cache entries and never on a saved report.
 fn bin(cache: &Path) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_siloscan"));
-    // One per platform, per `cache::default_cache_base` and the saved-report
-    // state root. Setting all of them keeps this helper correct on any of the
-    // three without a `cfg`.
-    command
-        .env("XDG_CACHE_HOME", cache)
-        .env("XDG_STATE_HOME", cache)
-        .env("HOME", cache)
-        .env("USERPROFILE", cache)
-        .env("CFFIXED_USER_HOME", cache)
-        .env("LOCALAPPDATA", cache);
+    isolation::isolate(&mut command, cache, cache, cache);
     command
 }
 
