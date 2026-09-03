@@ -50,3 +50,12 @@ reliability.cpp.assignment-in-condition	0	0.000000	2026-09-03	#78 P4b: no findin
 reliability.cpp.empty-if-body	0	0.000000	2026-09-03	#78 P4b: no finding on abseil-cpp, fmt or nlohmann/json
 reliability.cpp.identical-if-branches	0	0.000000	2026-09-03	#78 P4b: no finding on abseil-cpp, fmt or nlohmann/json
 reliability.cpp.self-assignment	0	0.000000	2026-09-03	#78 P4b: no finding on abseil-cpp, fmt or nlohmann/json
+maintainability.csharp.cyclomatic-complexity	0	0.384109	2026-09-03	#78 P4b: max of AutoMapper 0.0208, Dapper 0.2483, Newtonsoft.Json 0.3841
+maintainability.csharp.function-length	0	0.361514	2026-09-03	#78 P4b: max of AutoMapper 0.0416, Dapper 0.3476, Newtonsoft.Json 0.3615
+maintainability.csharp.nesting-depth	0	0.248263	2026-09-03	#78 P4b: max of AutoMapper 0.0000, Dapper 0.2483, Newtonsoft.Json 0.1958
+maintainability.csharp.parameter-count	0	0.893744	2026-09-03	#78 P4b: max of AutoMapper 0.0000, Dapper 0.8937, Newtonsoft.Json 0.0678
+reliability.csharp.async-void	0	0.148958	2026-09-03	#78 P4b: max of AutoMapper 0.0000, Dapper 0.1490, Newtonsoft.Json 0.0000
+reliability.csharp.empty-catch	0	0.347568	2026-09-03	#78 P4b: max of AutoMapper 0.0416, Dapper 0.3476, Newtonsoft.Json 0.0527
+reliability.csharp.identical-if-branches	0	0.000000	2026-09-03	#78 P4b: no finding on AutoMapper, Dapper or Newtonsoft.Json
+reliability.csharp.rethrow-loses-stack	0	0.000000	2026-09-03	#78 P4b: no finding on AutoMapper, Dapper or Newtonsoft.Json
+reliability.csharp.self-comparison	0	0.000000	2026-09-03	#78 P4b: no finding on AutoMapper, Dapper or Newtonsoft.Json

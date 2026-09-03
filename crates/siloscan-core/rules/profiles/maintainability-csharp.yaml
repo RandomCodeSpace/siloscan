@@ -1,0 +1,39 @@
+# C# maintainability profile. Original work: the four measures are the
+# engine's own (crates/siloscan-core/src/engines/metric.rs) and the thresholds
+# are this repository's, chosen conservatively so the first run of a real tree
+# stays readable.
+#
+# Identity: maintainability-csharp@1. See crates/siloscan-core/src/profiles.rs.
+version: 1
+rules:
+  - id: maintainability.csharp.function-length
+    severity: info
+    message: 'This method is longer than the profile allows.'
+    languages: [csharp]
+    metric:
+      measure: function-length
+      max: 120
+
+  - id: maintainability.csharp.parameter-count
+    severity: info
+    message: 'This method takes more parameters than the profile allows.'
+    languages: [csharp]
+    metric:
+      measure: parameter-count
+      max: 7
+
+  - id: maintainability.csharp.nesting-depth
+    severity: info
+    message: 'This method nests more deeply than the profile allows.'
+    languages: [csharp]
+    metric:
+      measure: nesting-depth
+      max: 5
+
+  - id: maintainability.csharp.cyclomatic-complexity
+    severity: info
+    message: 'This method has more branches than the profile allows.'
+    languages: [csharp]
+    metric:
+      measure: cyclomatic-complexity
+      max: 25

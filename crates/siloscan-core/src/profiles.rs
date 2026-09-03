@@ -71,6 +71,11 @@ pub const REGISTRY: &[Profile] = &[
         include_str!("../rules/profiles/maintainability-cpp.yaml"),
     ),
     Profile::new(
+        "maintainability-csharp@1",
+        "csharp",
+        include_str!("../rules/profiles/maintainability-csharp.yaml"),
+    ),
+    Profile::new(
         "maintainability-java@1",
         "java",
         include_str!("../rules/profiles/maintainability-java.yaml"),
@@ -84,6 +89,11 @@ pub const REGISTRY: &[Profile] = &[
         "reliability-cpp@1",
         "cpp",
         include_str!("../rules/profiles/reliability-cpp.yaml"),
+    ),
+    Profile::new(
+        "reliability-csharp@1",
+        "csharp",
+        include_str!("../rules/profiles/reliability-csharp.yaml"),
     ),
     Profile::new(
         "reliability-java@1",

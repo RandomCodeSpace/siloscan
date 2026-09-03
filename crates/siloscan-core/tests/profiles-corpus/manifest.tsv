@@ -61,3 +61,21 @@ cpp/metric-over.cpp	19	maintainability.cpp.cyclomatic-complexity	25 branches plu
 cpp/metric-under.cpp	1	NONE	seven parameters is exactly the profile's limit
 cpp/metric-under.cpp	4	NONE	five nested if statements is exactly the profile's limit
 cpp/metric-under.cpp	17	NONE	24 branches plus the entry path is 25, exactly the profile's limit
+csharp/metric-over.cs	2	maintainability.csharp.function-length	the method spans 121 lines, one over the profile's 120
+csharp/metric-over.cs	125	maintainability.csharp.parameter-count	the method takes 8 parameters, one over the profile's 7
+csharp/metric-over.cs	130	maintainability.csharp.nesting-depth	six nested if statements, one over the profile's 5
+csharp/metric-over.cs	147	maintainability.csharp.cyclomatic-complexity	25 branches plus the entry path is 26, one over the profile's 25
+csharp/metric-under.cs	2	NONE	the method spans exactly 120 lines, which is the profile's limit and not over it
+csharp/metric-under.cs	124	NONE	seven parameters is exactly the profile's limit
+csharp/metric-under.cs	129	NONE	five nested if statements is exactly the profile's limit
+csharp/metric-under.cs	144	NONE	24 branches plus the entry path is 25, exactly the profile's limit
+csharp/positive.cs	1	reliability.csharp.empty-catch	the catch body is literally `{}`, so the exception is dropped without a record
+csharp/positive.cs	2	reliability.csharp.self-comparison	both operands are the identical identifier, so the comparison is constant
+csharp/positive.cs	3	reliability.csharp.rethrow-loses-stack	throwing the caught identifier resets the stack trace a bare throw would keep
+csharp/positive.cs	4	reliability.csharp.async-void	the method is async and returns void, so a fault escapes to the thread pool
+csharp/positive.cs	5	reliability.csharp.identical-if-branches	both arms are the byte-identical block `{ return 1; }`
+csharp/negative.cs	1	NONE	the handler logs the exception, so the block is not empty
+csharp/negative.cs	2	NONE	the operands are different identifiers, which is an ordinary comparison
+csharp/negative.cs	3	NONE	a bare throw rethrows and keeps the stack trace
+csharp/negative.cs	4	NONE	the method returns Task, so a fault reaches whoever awaits it
+csharp/negative.cs	5	NONE	the two arms return different values, so the condition decides something

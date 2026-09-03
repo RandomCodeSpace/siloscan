@@ -13,3 +13,4 @@ language	recall_floor	measured_at	ticket
 java	1.0	2026-09-03	#78 P4b: every java launch rule fires on its own positive example
 c	1.0	2026-09-03	#78 P4b: every c launch rule fires on its own positive example
 cpp	1.0	2026-09-03	#78 P4b: every cpp launch rule fires on its own positive example
+csharp	1.0	2026-09-03	#78 P4b: every csharp launch rule fires on its own positive example
