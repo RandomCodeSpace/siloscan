@@ -1,17 +1,22 @@
 name: Release candidate
 
 # Pre-tag qualification. Runs the archive, package, install and identity gates
-# against any branch or commit and creates no release state whatsoever: no tag,
-# no release, no registry publication. Everything it produces is a workflow
-# artifact bound to one full commit SHA.
+# and creates no release state whatsoever: no tag, no release, no registry
+# publication. Everything it produces is a workflow artifact bound to one full
+# commit SHA.
+#
+# It qualifies the ref it was dispatched on, never a ref given as an input:
+# `gh workflow run candidate.yml --ref <branch-or-sha>`. A workflow that
+# checked out a caller-supplied ref would let untrusted code run against this
+# repository's shared build cache.
 on:
   workflow_dispatch:
     inputs:
-      ref:
-        description: Branch, tag or full commit SHA to qualify.
-        required: true
-        default: main
-        type: string
+      require_main_tip:
+        description: Fail unless the dispatched commit is the current tip of main.
+        required: false
+        default: true
+        type: boolean
 
 permissions:
   contents: read
@@ -22,49 +27,44 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-    outputs:
-      sha: ${{ steps.resolve.outputs.sha }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ inputs.ref }}
-          fetch-depth: 0
-      # Every later job checks out this resolved SHA and asserts it, so a branch
-      # that moves mid-run cannot split the candidate across two commits.
-      - name: Resolve the requested ref to one full commit SHA
-        id: resolve
+      # A candidate is only meaningful as one full commit SHA, and the plan's
+      # identity chain starts at the current main tip. Dispatching with
+      # require_main_tip off qualifies a branch and cannot feed a release.
+      - name: Record the candidate commit
         env:
-          REQUESTED_REF: ${{ inputs.ref }}
+          REQUIRE_MAIN_TIP: ${{ inputs.require_main_tip }}
         run: |
           set -euo pipefail
-          sha="$(git rev-parse HEAD)"
-          if ! printf '%s' "$sha" | grep -Eq '^[0-9a-f]{40}$'; then
-            echo "$sha is not a full 40-character SHA" >&2
+          if ! printf '%s' "$GITHUB_SHA" | grep -Eq '^[0-9a-f]{40}$'; then
+            echo "$GITHUB_SHA is not a full 40-character SHA" >&2
             exit 1
           fi
-          echo "sha=$sha" >> "$GITHUB_OUTPUT"
-          echo "candidate $REQUESTED_REF resolves to $sha" >> "$GITHUB_STEP_SUMMARY"
-      - name: Report whether the candidate is the current main tip
-        env:
-          CANDIDATE_SHA: ${{ steps.resolve.outputs.sha }}
-        run: |
-          set -euo pipefail
+          head="$(git rev-parse HEAD)"
+          if [ "$head" != "$GITHUB_SHA" ]; then
+            echo "checked out $head, candidate is $GITHUB_SHA" >&2
+            exit 1
+          fi
           main="$(git ls-remote origin refs/heads/main | cut -f1)"
-          if [ "$main" = "$CANDIDATE_SHA" ]; then
+          echo "candidate $GITHUB_REF_NAME is $GITHUB_SHA" >> "$GITHUB_STEP_SUMMARY"
+          if [ "$main" = "$GITHUB_SHA" ]; then
             echo "candidate is the current main tip" >> "$GITHUB_STEP_SUMMARY"
+          elif [ "$REQUIRE_MAIN_TIP" = "true" ]; then
+            echo "main is at $main, candidate is $GITHUB_SHA" >&2
+            echo "dispatch with require_main_tip disabled to qualify a branch" >&2
+            exit 1
           else
-            echo "warning: main is at $main, candidate is $CANDIDATE_SHA" >> "$GITHUB_STEP_SUMMARY"
+            echo "warning: main is at $main; this candidate cannot feed a release" >> "$GITHUB_STEP_SUMMARY"
           fi
 
   qualify:
     name: Qualify
     needs: identity
     uses: ./.github/workflows/qualify.yml
-    with:
-      sha: ${{ needs.identity.outputs.sha }}
 
   # Still to be added to this workflow by their owning work packages, each
-  # taking the same resolved candidate SHA:
+  # binding itself to the same GITHUB_SHA:
   #
   #   automatic-journey  - package 6, the bare and review journeys per ecosystem
   #   persistence        - package 6, native Linux, macOS and Windows state paths

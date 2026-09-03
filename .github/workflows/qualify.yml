@@ -5,13 +5,11 @@ name: Qualify
 # manifest that binds them all to one commit. candidate.yml calls this before a
 # tag exists and release.yml calls it after tagging, so a tag runs exactly the
 # gates the candidate passed.
+# Takes no input: every job checks out the caller's own GITHUB_SHA. A workflow
+# that could be handed an arbitrary ref would let a fork's code run with this
+# repository's shared build cache.
 on:
   workflow_call:
-    inputs:
-      sha:
-        description: Full 40-character commit SHA every job checks out and binds itself to.
-        required: true
-        type: string
     outputs:
       version:
         description: The workspace version the candidate was qualified at.
@@ -42,18 +40,14 @@ jobs:
             target: x86_64-pc-windows-msvc
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ inputs.sha }}
       # Every job in the chain proves for itself that it built this exact commit.
       - name: Record the candidate identity
         shell: bash
-        env:
-          CANDIDATE_SHA: ${{ inputs.sha }}
         run: |
           set -euo pipefail
           head="$(git rev-parse HEAD)"
-          if [ "$head" != "$CANDIDATE_SHA" ]; then
-            echo "checked out $head, candidate is $CANDIDATE_SHA" >&2
+          if [ "$head" != "$GITHUB_SHA" ]; then
+            echo "checked out $head, candidate is $GITHUB_SHA" >&2
             exit 1
           fi
           echo "archive gate ${{ matrix.target }} at $head" >> "$GITHUB_STEP_SUMMARY"
@@ -153,7 +147,6 @@ jobs:
       - name: Archive gate
         shell: bash
         env:
-          CANDIDATE_SHA: ${{ inputs.sha }}
           VERSION: ${{ steps.meta.outputs.version }}
           TARGET: ${{ matrix.target }}
         run: |
@@ -173,7 +166,7 @@ jobs:
             --archive "target/$TARGET/release/$archive" \
             --checksums "target/$TARGET/release/SHA256SUMS-$TARGET.txt" \
             --extract-root "$RUNNER_TEMP/extracted" \
-            --sha "$CANDIDATE_SHA" \
+            --sha "$GITHUB_SHA" \
             --target "$TARGET" \
             --record "$RUNNER_TEMP/records/record-archive-$TARGET.json"
       - name: Stage the archive artifact
@@ -198,6 +191,7 @@ jobs:
           name: archive-${{ matrix.target }}
           path: ${{ runner.temp }}/artifact
           if-no-files-found: error
+          overwrite: true
 
   package:
     name: Package and empty-root install
@@ -206,16 +200,12 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ inputs.sha }}
       - name: Record the candidate identity
-        env:
-          CANDIDATE_SHA: ${{ inputs.sha }}
         run: |
           set -euo pipefail
           head="$(git rev-parse HEAD)"
-          if [ "$head" != "$CANDIDATE_SHA" ]; then
-            echo "checked out $head, candidate is $CANDIDATE_SHA" >&2
+          if [ "$head" != "$GITHUB_SHA" ]; then
+            echo "checked out $head, candidate is $GITHUB_SHA" >&2
             exit 1
           fi
           echo "package gate at $head" >> "$GITHUB_STEP_SUMMARY"
@@ -234,13 +224,11 @@ jobs:
       - name: Package the workspace
         run: cargo package --locked --workspace
       - name: Record the packaged crates
-        env:
-          CANDIDATE_SHA: ${{ inputs.sha }}
         run: |
           set -euo pipefail
           python3 scripts/candidate_manifest.py packages \
             --crate-dir target/package \
-            --sha "$CANDIDATE_SHA" \
+            --sha "$GITHUB_SHA" \
             --out-dir "$RUNNER_TEMP/records"
       # One CLI install into an empty root has to yield both aliases.
       - name: Install into an empty root
@@ -266,6 +254,7 @@ jobs:
           name: packages
           path: ${{ runner.temp }}/artifact
           if-no-files-found: error
+          overwrite: true
 
   manifest:
     name: Candidate manifest
@@ -277,17 +266,13 @@ jobs:
       version: ${{ steps.meta.outputs.version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ inputs.sha }}
       - name: Read the workspace version
         id: meta
-        env:
-          CANDIDATE_SHA: ${{ inputs.sha }}
         run: |
           set -euo pipefail
           head="$(git rev-parse HEAD)"
-          if [ "$head" != "$CANDIDATE_SHA" ]; then
-            echo "checked out $head, candidate is $CANDIDATE_SHA" >&2
+          if [ "$head" != "$GITHUB_SHA" ]; then
+            echo "checked out $head, candidate is $GITHUB_SHA" >&2
             exit 1
           fi
           version="$(sed -n '/^\[workspace\.package\]/,/^\[/ s/^version = "\(.*\)"$/\1/p' Cargo.toml)"
@@ -299,13 +284,12 @@ jobs:
       # Fails unless every archive and packaged crate names this one commit.
       - name: Build the candidate manifest
         env:
-          CANDIDATE_SHA: ${{ inputs.sha }}
           VERSION: ${{ steps.meta.outputs.version }}
         run: |
           set -euo pipefail
           python3 scripts/candidate_manifest.py build \
             --records-dir "$RUNNER_TEMP/records" \
-            --sha "$CANDIDATE_SHA" \
+            --sha "$GITHUB_SHA" \
             --version "$VERSION" \
             --run-id "$GITHUB_RUN_ID" \
             --run-attempt "$GITHUB_RUN_ATTEMPT" \
@@ -323,3 +307,4 @@ jobs:
           name: candidate-manifest
           path: ${{ runner.temp }}/candidate-manifest.json
           if-no-files-found: error
+          overwrite: true
