@@ -101,3 +101,13 @@ maintainability.python.function-length	0	0.4631	2026-09-03	#78 P4a
 maintainability.python.parameter-count	0	0.5545	2026-09-03	#78 P4a
 maintainability.python.nesting-depth	0	0.0584	2026-09-03	#78 P4a
 maintainability.python.cyclomatic-complexity	0	0.1251	2026-09-03	#78 P4a
+# javascript, measured against express 4.22.2, lodash 4.18.1 and axios 1.20.0,
+# with maintainability.javascript.function-length raised once from 120 to 400.
+reliability.javascript.self-assignment	0	0.0000	2026-09-03	#78 P4a
+reliability.javascript.identical-if-branches	0	0.0000	2026-09-03	#78 P4a
+reliability.javascript.debugger-statement	0	0.0000	2026-09-03	#78 P4a
+reliability.javascript.constant-condition	0	0.0000	2026-09-03	#78 P4a
+maintainability.javascript.function-length	0	0.7342	2026-09-03	#78 P4a
+maintainability.javascript.parameter-count	0	0.3674	2026-09-03	#78 P4a
+maintainability.javascript.nesting-depth	0	0.1700	2026-09-03	#78 P4a
+maintainability.javascript.cyclomatic-complexity	0	0.1020	2026-09-03	#78 P4a

@@ -91,6 +91,11 @@ pub const REGISTRY: &[Profile] = &[
         include_str!("../rules/profiles/maintainability-java.yaml"),
     ),
     Profile::new(
+        "maintainability-javascript@1",
+        "javascript",
+        include_str!("../rules/profiles/maintainability-javascript.yaml"),
+    ),
+    Profile::new(
         "maintainability-python@1",
         "python",
         include_str!("../rules/profiles/maintainability-python.yaml"),
@@ -129,6 +134,11 @@ pub const REGISTRY: &[Profile] = &[
         "reliability-java@1",
         "java",
         include_str!("../rules/profiles/reliability-java.yaml"),
+    ),
+    Profile::new(
+        "reliability-javascript@1",
+        "javascript",
+        include_str!("../rules/profiles/reliability-javascript.yaml"),
     ),
     Profile::new(
         "reliability-python@1",
