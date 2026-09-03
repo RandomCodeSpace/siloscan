@@ -54,12 +54,14 @@ pub struct ScanReport {
     /// Zero on a scan whose walk consulted no ignore source, since nothing
     /// could have been excluded by one.
     pub ignored: walk::Ignored,
-    /// Per-file semantic facts for every file that produced a parse tree.
+    /// Per-file semantic facts, populated only when a boundary rule is loaded.
     ///
-    /// Files are parsed only when a loaded ast or boundary rule needs a tree,
-    /// so a scan carrying neither leaves this empty. A library consumer must
-    /// not read an empty graph as "the tree has no imports": it usually means
-    /// nothing asked for one.
+    /// The import facts are the boundary engine's input and nothing else reads
+    /// them, and extracting them from a parsed tree costs about as much as the
+    /// parse. So a scan with no boundary rule leaves this empty even where it
+    /// parsed every file for its ast rules. A library consumer must not read an
+    /// empty graph as "the tree has no imports": it means no rule asked for
+    /// them.
     pub graph: crate::graph::Graph,
     /// Every boundary violation as `(from silo, to silo, fingerprint)`, sorted.
     /// The finding itself is in `findings`, `baselined` or `suppressed`
@@ -1372,6 +1374,7 @@ fn scan_one(
                 &content,
                 language,
                 plan.parse,
+                needs.boundary,
             ) {
                 Err(error) => (Outcome::Failed(error.to_string()), 0),
                 Ok(entry) => {
@@ -1475,6 +1478,16 @@ fn suppress_whole_tree(
 /// before inline suppression. Suppression is re-applied to every retrieved
 /// entry. The content hash covers the markers either way, so this is a wash for
 /// correctness and keeps the stored payload engine-pure.
+///
+/// `graph` is [`ParseNeeds::boundary`]: whether the import facts have a reader.
+/// It is not part of the entry key, unlike `parse`, and does not need to be.
+/// `parse` turns on the config's parse cap and the file's own size, neither of
+/// which the key's rule hash covers; `graph` is a function of the loaded rules
+/// alone, and [`Cache::bind`] folds [`RuleSet::source_hash`] into the scope
+/// every entry is filed under. Two runs that disagree about `graph` disagree
+/// about their rule sources, so they read and write different namespaces and a
+/// run that needs facts can never be served an entry written without them.
+#[allow(clippy::too_many_arguments)]
 fn scan_text(
     rules: &RuleSet,
     ast_queries: &crate::engines::ast::AstQueries,
@@ -1483,6 +1496,7 @@ fn scan_text(
     content: &str,
     language: Option<&str>,
     parse: bool,
+    graph: bool,
 ) -> Result<crate::cache::CachedFile, RegexCompileError> {
     let hash = options
         .cache
@@ -1519,8 +1533,11 @@ fn scan_text(
         tree.as_ref(),
     ));
 
-    let facts = match (language, &tree) {
-        (Some(lang), Some(tree)) => Some(crate::graph::extract(lang, content, tree)),
+    // Extracted only for the one thing that reads it. Walking a parsed tree for
+    // its imports costs about as much as the parse did, and with no boundary
+    // rule loaded the result is built, cached and never looked at.
+    let facts = match (graph, language, &tree) {
+        (true, Some(lang), Some(tree)) => Some(crate::graph::extract(lang, content, tree)),
         _ => None,
     };
 
@@ -2527,15 +2544,22 @@ rules:
         );
         write(dir.path(), "notes.txt", b"needle\n");
 
-        // An ast rule in the set is what asks for a tree; nothing here matches
-        // it, so the facts below are the only thing it contributes. A rule set
-        // that needs no tree collects no facts at all, which is what keeps a
-        // regex-only scan off tree-sitter.
+        // A boundary rule in the set is what asks for the import facts; there
+        // is no config here, so it reports nothing and the facts below are the
+        // only thing it contributes. An ast rule alongside it asks for the same
+        // tree and matches nothing. A rule set that needs no tree collects no
+        // facts at all, which is what keeps a regex-only scan off tree-sitter.
         let mut rules = ruleset();
         rules.rules.extend(load_str(AST_RULES, "ast").unwrap());
         rules
             .sources
             .push(("ast".to_string(), AST_RULES.to_string()));
+        rules
+            .rules
+            .extend(load_str(BOUNDARY_RULES, "boundary").unwrap());
+        rules
+            .sources
+            .push(("boundary".to_string(), BOUNDARY_RULES.to_string()));
 
         let cache_home = cache_base();
         let cache = cache_for(cache_home.path(), dir.path(), &rules);
@@ -2555,6 +2579,50 @@ rules:
             vec!["std::io::Read"]
         );
         assert!(!cold.graph.files.contains_key("notes.txt"));
+    }
+
+    /// The import facts are the boundary engine's input and nothing else reads
+    /// them, so a parsed file yields them only when a boundary rule is loaded.
+    /// Extracting them costs about as much as the parse did.
+    #[cfg(feature = "tree-sitter-rust")]
+    #[test]
+    fn import_facts_are_extracted_only_for_a_boundary_rule() {
+        let content = "use std::io::Read;\n\nfn main() { dbg!(1); }\n";
+
+        let entry = |rules: &RuleSet| {
+            let queries =
+                crate::engines::ast::AstQueries::build(&rules.rules).expect("queries combine");
+            let needs = ParseNeeds::of(rules);
+            scan_text(
+                rules,
+                &queries,
+                &ScanOptions::default(),
+                "src/a.rs",
+                content,
+                Some("rust"),
+                true,
+                needs.boundary,
+            )
+            .expect("the scan should not fail")
+        };
+
+        let ast_only = entry(&ast_ruleset());
+        // The tree was built and used: the ast rule matched.
+        assert_eq!(ast_only.findings.len(), 1);
+        assert_eq!(ast_only.findings[0].rule_id, "rust.dbg-macro");
+        assert!(ast_only.facts.is_none());
+
+        let with_boundary = entry(&boundary_rules());
+        let facts = with_boundary.facts.expect("facts");
+        assert_eq!(facts.language, "rust");
+        assert_eq!(
+            facts
+                .imports
+                .iter()
+                .map(|import| import.raw.as_str())
+                .collect::<Vec<_>>(),
+            vec!["std::io::Read"]
+        );
     }
 
     #[cfg(feature = "tree-sitter-rust")]
@@ -4140,7 +4208,9 @@ rules:
         assert!(at_cap.skipped.is_empty(), "{:?}", at_cap.skipped);
         assert_eq!(at_cap.findings.len(), 1);
         assert_eq!(at_cap.findings[0].rule_id, "rust.dbg-macro");
-        assert!(at_cap.graph.files.contains_key("src/a.rs"));
+        // The finding is the proof the file parsed. No boundary rule is
+        // loaded, so the parsed tree yields no import facts.
+        assert!(at_cap.graph.files.is_empty());
 
         let over_cap = report(size - 1);
         assert_eq!(over_cap.skipped.len(), 1);
