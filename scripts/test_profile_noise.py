@@ -11,6 +11,7 @@ committed noise set and the committed limits, both of which are in the tree.
 from __future__ import annotations
 
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -253,6 +254,95 @@ class Languages(unittest.TestCase):
 
     def test_a_dot_in_a_directory_is_not_an_extension(self):
         self.assertIsNone(profile_noise.language_of("vendor.d/LICENSE"))
+
+    def test_a_header_with_no_tree_to_read_stays_c(self):
+        self.assertEqual(profile_noise.language_of("include/widget.h"), "c")
+
+
+#: The four headers `lang.rs`'s own unit tests use, so the two implementations
+#: are held to the same fixtures.
+C_HEADER = (
+    "#ifndef WIDGET_H\n"
+    "#define WIDGET_H\n"
+    "struct widget { int id; };\n"
+    "void widget_init(struct widget *w);\n"
+    "#endif\n"
+)
+CPP_HEADER = "#pragma once\nclass Widget {\npublic:\n  int id() const;\n};\n"
+C_HEADER_WITH_CPP_WORDS_IN_A_COMMENT = (
+    "/*\n"
+    " * namespace foo is not a thing here, and neither is\n"
+    " * class bar or template <typename T>.\n"
+    " */\n"
+    "// namespace again\n"
+    "int widget_id(void);\n"
+)
+
+
+class CppHeaders(unittest.TestCase):
+    def test_a_c_header_is_not_cpp(self):
+        self.assertFalse(profile_noise.is_cpp_header(C_HEADER))
+
+    def test_a_header_with_a_class_is_cpp(self):
+        self.assertTrue(profile_noise.is_cpp_header(CPP_HEADER))
+
+    def test_a_comment_mentioning_namespace_does_not_make_a_header_cpp(self):
+        self.assertFalse(
+            profile_noise.is_cpp_header(C_HEADER_WITH_CPP_WORDS_IN_A_COMMENT)
+        )
+
+    def test_an_empty_header_is_not_cpp(self):
+        self.assertFalse(profile_noise.is_cpp_header(""))
+
+    def test_code_after_a_block_comment_is_read(self):
+        self.assertTrue(
+            profile_noise.is_cpp_header("/* a comment */ namespace widget {\n")
+        )
+
+    def test_a_header_in_a_tree_is_classified_by_its_content(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            tree = Path(scratch)
+            (tree / "include").mkdir()
+            for name, content in (
+                ("c.h", C_HEADER),
+                ("cpp.h", CPP_HEADER),
+                ("comment.h", C_HEADER_WITH_CPP_WORDS_IN_A_COMMENT),
+                ("empty.h", ""),
+            ):
+                (tree / "include" / name).write_text(content, encoding="utf-8")
+            language = {
+                name: profile_noise.language_of(f"include/{name}", tree)
+                for name in ("c.h", "cpp.h", "comment.h", "empty.h")
+            }
+        self.assertEqual(
+            language,
+            {"c.h": "c", "cpp.h": "cpp", "comment.h": "c", "empty.h": "c"},
+        )
+
+    def test_a_header_the_tree_does_not_have_falls_back_to_the_table(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            self.assertEqual(
+                profile_noise.language_of("include/gone.h", Path(scratch)), "c"
+            )
+
+    def test_a_cpp_header_counts_in_the_cpp_denominator(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            tree = Path(scratch)
+            (tree / "a.h").write_text(CPP_HEADER, encoding="utf-8")
+            (tree / "b.h").write_text(C_HEADER, encoding="utf-8")
+            report = {
+                "metrics": {
+                    "files": {
+                        "a.h": {"code_lines": 40},
+                        "b.h": {"code_lines": 60},
+                    }
+                },
+                "findings": [],
+            }
+            files, files_total, code_lines, _ = profile_noise.tally(
+                report, "cpp", tree
+            )
+        self.assertEqual((files, files_total, code_lines), (1, 2, 40))
 
 
 class ProfileFamilies(unittest.TestCase):

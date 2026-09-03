@@ -110,6 +110,11 @@ PROFILE_FAMILIES = ("reliability", "maintainability")
 #: carry line counts and no language, so this is the only way to restrict the
 #: denominator to the language a repository was pinned for. It is a copy and can
 #: drift: if ``FileMetrics`` ever gains a language field, read that instead.
+#:
+#: ``h`` is the entry that is only half true. C and C++ share the extension and
+#: the product decides between them from the file's content, so this table's
+#: answer is the one to fall back on when the file cannot be read; see
+#: ``is_cpp_header`` below.
 EXTENSIONS = {
     "rs": "rust",
     "py": "python",
@@ -137,14 +142,82 @@ def is_profile_rule(rule_id: str) -> bool:
     return rule_id.split(".", 1)[0] in PROFILE_FAMILIES
 
 
-def language_of(path: str) -> str | None:
-    """The language of one scanned path, by extension. ``None`` for anything
-    the ten grammars do not cover, an extensionless file included - a file
-    named ``go`` is not a Go file."""
+#: Line prefixes that make a ``.h`` file C++ rather than C. One copy of the
+#: list, mirroring ``is_cpp_header`` in ``crates/siloscan-core/src/lang.rs``:
+#: that function is the product's own decision and the denominator here has to
+#: agree with it, so the two change together or the rate counts a file's
+#: findings under one language and its lines under the other.
+CPP_HEADER_SIGNALS = (
+    "namespace ",
+    "class ",
+    "template<",
+    "template <",
+    "public:",
+    "private:",
+    "protected:",
+    'extern "C++"',
+)
+
+
+def is_cpp_header(content: str) -> bool:
+    """Whether a ``.h`` file's content is C++, by the rule ``lang.rs`` applies.
+
+    Comments are removed first, so prose that mentions a C++ keyword cannot
+    decide the file, and every signal is then anchored at the start of the
+    remaining code on the line, so an identifier or a string that contains one
+    of these words cannot decide it either. An empty header is C.
+    """
+    in_block_comment = False
+    for line in content.splitlines():
+        code: list[str] = []
+        rest = line
+        while True:
+            if in_block_comment:
+                end = rest.find("*/")
+                if end < 0:
+                    break
+                rest = rest[end + 2 :]
+                in_block_comment = False
+            else:
+                block = rest.find("/*")
+                slash = rest.find("//")
+                if block >= 0 and (slash < 0 or block < slash):
+                    code.append(rest[:block])
+                    rest = rest[block + 2 :]
+                    in_block_comment = True
+                elif slash >= 0:
+                    code.append(rest[:slash])
+                    break
+                else:
+                    code.append(rest)
+                    break
+        if "".join(code).strip().startswith(CPP_HEADER_SIGNALS):
+            return True
+    return False
+
+
+def language_of(path: str, tree: Path | None = None) -> str | None:
+    """The language of one scanned path. ``None`` for anything the ten grammars
+    do not cover, an extensionless file included - a file named ``go`` is not a
+    Go file.
+
+    The extension decides, except for ``.h``, which C and C++ share: given
+    ``tree``, the file is read from it and its content decides, the way the
+    product does it. Without ``tree``, or when the file cannot be read, the
+    extension table's ``c`` stands.
+    """
     name = path.rpartition("/")[2]
     if "." not in name:
         return None
-    return EXTENSIONS.get(name.rpartition(".")[2].lower())
+    extension = name.rpartition(".")[2].lower()
+    language = EXTENSIONS.get(extension)
+    if extension == "h" and tree is not None:
+        try:
+            content = (tree / path).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return language
+        return "cpp" if is_cpp_header(content) else "c"
+    return language
 
 
 class NoiseError(Exception):
@@ -398,7 +471,9 @@ def scan(binary: Path, tree: Path, profiles: str) -> tuple[dict, float]:
         raise NoiseError(f"{' '.join(command)} produced no JSON: {error}") from error
 
 
-def tally(report: dict, language: str) -> tuple[int, int, int, dict[str, int]]:
+def tally(
+    report: dict, language: str, tree: Path | None = None
+) -> tuple[int, int, int, dict[str, int]]:
     """``(files of `language`, files total, code lines of `language`, findings
     per profile rule)`` out of one report.
 
@@ -408,13 +483,18 @@ def tally(report: dict, language: str) -> tuple[int, int, int, dict[str, int]]:
     code lines are the ones belonging to ``language``, because
     ``metrics.totals.code_lines`` sums every tier-1 language in the tree.
 
+    ``tree`` is the checkout the report was taken from, and it is passed so a
+    ``.h`` file can be read: C and C++ share the extension, and a header the
+    product scanned as C++ has to land in the C++ denominator or its findings
+    are divided by lines that do not include it.
+
     Suppressed and baselined findings are counted with the rest. A noise
     measurement asks what a rule reports about code that never heard of it, and
     a repository that happens to carry a `siloscan:ignore` comment did not make
     the rule quieter.
     """
     files = report.get("metrics", {}).get("files", {})
-    matching = [path for path in files if language_of(path) == language]
+    matching = [path for path in files if language_of(path, tree) == language]
     code_lines = sum(int(files[path].get("code_lines") or 0) for path in matching)
 
     findings: dict[str, int] = {}
@@ -572,10 +652,14 @@ def main(argv: list[str]) -> int:
                 tree = Path(scratch) / repo.name.replace("/", "-")
                 clone(repo, tree)
                 report, elapsed = scan(args.binary, tree, args.profiles)
+                # Inside the checkout's lifetime: a `.h` file's language is
+                # decided by reading it, and the directory goes away below.
+                files, files_total, code_lines, findings = tally(
+                    report, repo.language, tree
+                )
         except NoiseError as error:
             print(f"error: {error}", file=sys.stderr)
             return 2
-        files, files_total, code_lines, findings = tally(report, repo.language)
         result = Result(
             repo=repo,
             files_scanned=files,
