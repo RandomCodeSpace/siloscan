@@ -22,7 +22,7 @@ mod ui;
 
 use std::fmt;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::{self, Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::Duration;
@@ -49,10 +49,20 @@ pub enum ReviewSession {
     /// Open an existing report without resolving a plan or running a scan.
     SavedReport {
         report: PathBuf,
-        /// Directory the report's paths are read from, for the source pane.
+        /// The scope's own directory: the requested directory, or the parent of
+        /// a single-file scope. Not necessarily the directory the report's
+        /// paths are relative to.
+        ///
+        /// A config-anchored report measures its paths from the config root and
+        /// records how far above the scope that is, so the base the source pane
+        /// needs is `scope.path_base_ancestor_levels` parents up from here. Only
+        /// the report knows that number, and it is not worth a second parse of a
+        /// file this session is about to read anyway - so the caller passes the
+        /// level-0 base and the session climbs. A report with no scope marker
+        /// records no levels, and this is used as given.
         source_base: PathBuf,
         /// Config whose silos the module cards are grouped by. Discovered from
-        /// `source_base` when absent.
+        /// the resolved source base when absent.
         config: Option<PathBuf>,
         /// The scope this report has to describe, for an implicit latest
         /// lookup. `None` for an explicitly named report file, which is opened
@@ -122,6 +132,11 @@ pub fn run(session: ReviewSession) -> Result<(), TuiError> {
 /// binary prints it and exits 2 with an untouched terminal - and what lets the
 /// session tests drive a whole session against a test backend rather than a
 /// pseudo-terminal.
+///
+/// This is the test seam and not a contract: it is public because the session
+/// tests are a separate crate, it is hidden because [`run`] is the entry a front
+/// end uses, and it may change with the tests that drive it.
+#[doc(hidden)]
 pub struct OpenSession {
     state: AppState,
     /// The config the last report was resolved under, for the module cards.
@@ -134,6 +149,8 @@ pub struct OpenSession {
     rx: Receiver<AppEvent>,
 }
 
+/// Every method here is part of the test seam described on the type.
+#[doc(hidden)]
 impl OpenSession {
     /// Perform `session`'s setup and, for a live session, start its first scan.
     pub fn open(session: ReviewSession) -> Result<Self, TuiError> {
@@ -169,10 +186,18 @@ impl OpenSession {
             } => {
                 let data = snapshot::load(&report, expect.as_ref())
                     .map_err(|error| TuiError(TuiErrorKind::Setup(error.to_string())))?;
-                let config = silo_config(&source_base, config.as_deref())
+
+                let levels = data
+                    .markers
+                    .as_ref()
+                    .map_or(0, |markers| markers.scope.path_base_ancestor_levels);
+                let base = climb(&source_base, levels)
                     .map_err(|error| TuiError(TuiErrorKind::Setup(error)))?;
 
-                let mut state = AppState::new(source_base, Arc::new(RuleSet::default()));
+                let config = silo_config(&base, config.as_deref())
+                    .map_err(|error| TuiError(TuiErrorKind::Setup(error)))?;
+
+                let mut state = AppState::new(base, Arc::new(RuleSet::default()));
                 app::apply_snapshot(&mut state, data, config.as_deref());
 
                 Ok(Self {
@@ -229,10 +254,30 @@ impl OpenSession {
         Ok(())
     }
 
-    /// The status line, which is where a session says what it is showing and
-    /// what it is not.
+    /// The status line: the debt counts, or the reason a scan produced none.
     pub fn status(&self) -> &str {
         &self.state.status
+    }
+
+    /// What a read-only session is not showing about the report it loaded.
+    pub fn notes(&self) -> &str {
+        &self.state.snapshot_notes
+    }
+
+    /// The directory the findings' paths are read from.
+    pub fn source_base(&self) -> &Path {
+        &self.state.root
+    }
+
+    /// The directory this session's baseline lives in, which is the config root
+    /// under config anchoring and the scan root otherwise.
+    pub fn baseline_root(&self) -> &Path {
+        &self.state.baseline_root
+    }
+
+    /// Handle one key, exactly as the input loop does.
+    pub fn key(&mut self, key: KeyEvent) {
+        self.on_key(key);
     }
 
     /// True while a scan is running.
@@ -301,6 +346,40 @@ impl OpenSession {
             _ => ui::handle_key(&mut self.state, key),
         }
     }
+}
+
+/// The directory a report's paths are relative to: `levels` parents above the
+/// scope's own directory.
+///
+/// The base is made absolute first, and without touching the filesystem, so
+/// that a relative spelling climbs the same directories an absolute one does.
+/// `modules/api` has two parents to give whether it was written that way or as
+/// `/repo/modules/api`, and `Path::parent` would have run out after one.
+///
+/// Running out of parents is a refusal rather than a stop at the filesystem
+/// root: a report that measures its paths from further up than this base can
+/// reach was not saved for this scope, and reading source from whatever
+/// directory the climb happened to end on would show the wrong file's contents
+/// under the right file's name.
+fn climb(base: &Path, levels: u32) -> Result<PathBuf, String> {
+    // Nothing to climb, so nothing to rewrite: a legacy report and the
+    // standalone binary's `.` keep the base they were given, spelling included.
+    if levels == 0 {
+        return Ok(base.to_path_buf());
+    }
+    let mut resolved = path::absolute(base).map_err(|e| format!("{}: {e}", base.display()))?;
+
+    for climbed in 0..levels {
+        let Some(parent) = resolved.parent() else {
+            return Err(format!(
+                "{}: the report's paths are measured {levels} directories above \
+                 this scope, which has only {climbed}",
+                base.display()
+            ));
+        };
+        resolved = parent.to_path_buf();
+    }
+    Ok(resolved)
 }
 
 /// The config whose silos a read-only session groups its module cards by.

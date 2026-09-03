@@ -17,6 +17,7 @@ use std::process::{Command, Output};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use siloscan_core::plan::{
@@ -47,11 +48,7 @@ const IDENTITY: &str = "sha256-v1:0f0e0d0c0b0a09080706050403020100f0e0d0c0b0a090
 fn project(dir: &Path) -> ScanRequest {
     fs::create_dir_all(dir.join("src")).expect("the fixture tree is writable");
     fs::write(dir.join("src/leak.rs"), b"let key = \"needle-42\";\n").expect("writable");
-    fs::write(
-        dir.join("rules.yaml"),
-        "version: 1\nrules:\n  - id: test.needle\n    severity: error\n    message: \"needle\"\n    regex:\n      pattern: \"needle-[0-9]+\"\n",
-    )
-    .expect("writable");
+    fs::write(dir.join("rules.yaml"), RULE).expect("writable");
 
     ScanRequest::explicit(dir)
         .with_rule_dirs(vec![dir.to_path_buf()])
@@ -59,10 +56,57 @@ fn project(dir: &Path) -> ScanRequest {
         .without_cache()
 }
 
+/// The one rule the fixtures scan with. Its pattern does not match the file
+/// that declares it, so the only finding in a fixture tree is the planted one.
+const RULE: &str = "version: 1\nrules:\n  - id: test.needle\n    severity: error\n    message: \"needle\"\n    regex:\n      pattern: \"needle-[0-9]+\"\n";
+
+/// A line that exists only in the module's source file, so finding it on screen
+/// means the source pane read that file rather than matched on report text.
+const SOURCE_MARKER: &str = "// anchored-source-marker";
+
+/// A repository that anchors every reported path at its own root, with the
+/// scanned module two directories below it.
+///
+/// The `.git` marker is what lets config discovery climb out of the module to
+/// the repository config, which is the arrangement that makes the scan root and
+/// the baseline root differ. Returns the module and the request that scans it;
+/// the repository root is `dir`.
+fn anchored_repo(dir: &Path) -> (PathBuf, ScanRequest) {
+    let module = dir.join("modules/api");
+    fs::create_dir_all(module.join("src")).expect("the fixture tree is writable");
+    fs::create_dir_all(dir.join(".git")).expect("writable");
+    fs::write(dir.join(".git/HEAD"), b"ref: refs/heads/main\n").expect("writable");
+    fs::write(dir.join("siloscan.toml"), "anchor = \"config\"\n").expect("writable");
+    fs::write(dir.join("rules.yaml"), RULE).expect("writable");
+    fs::write(
+        module.join("src/a.rs"),
+        format!("{SOURCE_MARKER}\nlet key = \"needle-42\";\n").as_bytes(),
+    )
+    .expect("writable");
+
+    let request = ScanRequest::explicit(&module)
+        .with_rule_dirs(vec![dir.to_path_buf()])
+        .without_embedded_rules()
+        .without_cache();
+    (module, request)
+}
+
 /// The complete resolved report a scan of `request` produces, with the four
 /// markers the CLI appends. Written by the core writer itself, so the fixtures
 /// are the bytes the product actually saves.
 fn resolved_json(request: &ScanRequest, identity: &str, kind: ScopeKind, reached: bool) -> String {
+    resolved_json_with_levels(request, identity, kind, reached, 0)
+}
+
+/// The same, for a scope whose reported paths are measured `levels` directories
+/// above it - which is what config anchoring does.
+fn resolved_json_with_levels(
+    request: &ScanRequest,
+    identity: &str,
+    kind: ScopeKind,
+    reached: bool,
+    levels: u32,
+) -> String {
     let plan = ResolvedScanPlan::resolve(request).expect("the fixture request resolves");
     let resolved = plan.execute(&mut |_| {}).expect("the fixture scan runs");
     let (report, setup, context) = resolved.into_parts();
@@ -70,7 +114,7 @@ fn resolved_json(request: &ScanRequest, identity: &str, kind: ScopeKind, reached
         &report,
         &setup,
         &context,
-        &ScopeMetadata::new(identity.to_string(), kind, 0),
+        &ScopeMetadata::new(identity.to_string(), kind, levels),
         &OutcomeMetadata::new(Severity::Error, reached),
         None,
     )
@@ -366,6 +410,87 @@ fn a_rescan_reports_the_tree_as_it_is_now() {
     assert_eq!(session.status(), "0 new, 0 baselined, 0 suppressed");
 }
 
+/// A config-anchored module scan has two roots, and they are not the same
+/// directory. Sources are read from the module; fingerprints are measured from
+/// the config root, so that is where the baseline the ratchet writes has to go.
+/// Resolving both in the TUI is what produced the wrong one before this slice.
+#[test]
+fn a_config_anchored_live_session_separates_its_two_roots() {
+    let dir = tempfile::tempdir().expect("a temporary directory");
+    let (module, request) = anchored_repo(dir.path());
+
+    let mut session =
+        OpenSession::open(ReviewSession::Live { request }).expect("the tree resolves");
+    settle(&mut session);
+
+    assert_eq!(session.status(), "1 new, 0 baselined, 0 suppressed");
+    assert_eq!(
+        session.source_base(),
+        module,
+        "sources are read from the module that was scanned"
+    );
+    assert_eq!(
+        session.baseline_root(),
+        dir.path(),
+        "the baseline belongs where the fingerprints are measured from"
+    );
+}
+
+/// The caller cannot know how far above the scope a report's paths are measured
+/// from without reading the report, and it is forbidden a second parse of it. So
+/// it passes the scope's own directory and the session climbs the levels the
+/// report records.
+#[test]
+fn a_saved_session_climbs_to_the_base_its_report_records() {
+    let dir = tempfile::tempdir().expect("a temporary directory");
+    let (module, request) = anchored_repo(dir.path());
+
+    // Two directories from `modules/api` up to the config root, which is what
+    // the CLI records for this scope.
+    let report = write(
+        dir.path(),
+        "latest.json",
+        &resolved_json_with_levels(&request, IDENTITY, ScopeKind::Directory, true, 2),
+    );
+
+    let mut session = open_saved(report, &module, None).expect("the report opens");
+
+    assert_eq!(
+        session.source_base(),
+        dir.path(),
+        "the base is the config root, not the module the scope names"
+    );
+
+    // And the source pane reads through it: this line is in the module's file
+    // and nowhere in the report.
+    session.key(KeyEvent::from(KeyCode::Char('2')));
+    let text = render(&mut session);
+    assert!(
+        text.contains(SOURCE_MARKER),
+        "the source pane did not resolve the report's path:\n{text}"
+    );
+}
+
+/// A report measured from further up than the base can reach is refused. Any
+/// directory the climb happened to stop at would show one file's contents under
+/// another file's name.
+#[test]
+fn a_saved_session_refuses_a_base_it_cannot_climb() {
+    let dir = tempfile::tempdir().expect("a temporary directory");
+    let (module, request) = anchored_repo(dir.path());
+    let report = write(
+        dir.path(),
+        "deep.json",
+        &resolved_json_with_levels(&request, IDENTITY, ScopeKind::Directory, true, 400),
+    );
+
+    let error = open_saved(report, &module, None)
+        .err()
+        .expect("400 parents is not a base");
+
+    assert!(error.contains("400 directories above"), "{error}");
+}
+
 fn capability(session: &OpenSession, id: &str) -> String {
     let setup = session.setup().expect("a live session has setup");
     let state = setup
@@ -459,13 +584,10 @@ fn explicit_review_opens_a_marker_free_one_x_report() {
     let mut session = open_saved(report, dir.path(), None).expect("a 1.x report opens");
 
     assert!(session.is_read_only());
-    assert!(
-        session.status().contains("saved outcome unavailable"),
-        "{}",
-        session.status()
-    );
+    assert_eq!(session.notes(), "saved outcome unavailable");
     let text = render(&mut session);
     assert!(text.contains("read-only"), "the read-only banner:\n{text}");
+    assert!(text.contains("saved outcome unavailable"), "{text}");
 }
 
 /// Explicit `--report FILE`, complete four-marker v2: authoritative. The gate
@@ -482,14 +604,13 @@ fn explicit_review_takes_a_complete_resolved_report_as_authoritative() {
 
     let mut session = open_saved(report, dir.path(), None).expect("a resolved report opens");
 
+    assert_eq!(session.notes(), "saved outcome: fail-on error reached");
+    let text = render(&mut session);
+    assert!(text.contains("read-only"), "{text}");
     assert!(
-        session
-            .status()
-            .contains("saved outcome: fail-on error reached"),
-        "{}",
-        session.status()
+        text.contains("saved outcome: fail-on error reached"),
+        "{text}"
     );
-    assert!(render(&mut session).contains("read-only"));
 }
 
 /// Explicit `--report FILE`, marker-free output of the retained core writer:
@@ -512,11 +633,7 @@ fn explicit_review_opens_marker_free_core_writer_output() {
 
     let mut session = open_saved(report, dir.path(), None).expect("core writer output opens");
 
-    assert!(
-        session.status().contains("saved outcome unavailable"),
-        "{}",
-        session.status()
-    );
+    assert_eq!(session.notes(), "saved outcome unavailable");
     assert!(render(&mut session).contains("read-only"));
 }
 
@@ -705,11 +822,7 @@ fn an_unknown_setup_status_is_retained() {
 
     let session = open_saved(path, dir.path(), None).expect("a same-major addition still opens");
 
-    assert!(
-        session
-            .status()
-            .contains("saved outcome: fail-on error not reached")
-    );
+    assert_eq!(session.notes(), "saved outcome: fail-on error not reached");
 }
 
 /// The failure this distinction exists to prevent: a report that hid its
@@ -738,14 +851,21 @@ fn a_filtered_legacy_report_is_never_authoritatively_clean() {
 
     let mut session = open_saved(path, dir.path(), None).expect("a filtered 1.x report opens");
 
-    for note in [
-        "0 new, 0 baselined",
-        "saved outcome unavailable",
-        "filtered report: findings below error hidden",
-    ] {
-        assert!(session.status().contains(note), "{}", session.status());
-    }
-    assert!(render(&mut session).contains("0 new"));
+    assert_eq!(session.status(), "0 new, 0 baselined, 0 suppressed");
+    assert_eq!(
+        session.notes(),
+        "saved outcome unavailable | filtered report: findings below error hidden"
+    );
+
+    // On screen, at the size the status line would have clipped both notes:
+    // the board reads 0 new, and nothing on it may leave that standing alone.
+    let text = render(&mut session);
+    assert!(text.contains("0 new"), "{text}");
+    assert!(text.contains("saved outcome unavailable"), "{text}");
+    assert!(
+        text.contains("filtered report: findings below error hidden"),
+        "{text}"
+    );
 }
 
 /// The same report, saved by a v2 run whose gate was reached before filtering,
@@ -768,17 +888,18 @@ fn a_filtered_resolved_report_keeps_the_outcome_its_run_recorded() {
 
     let mut session = open_saved(path, dir.path(), None).expect("the report opens");
 
+    assert_eq!(session.status(), "0 new, 0 baselined, 0 suppressed");
+
+    // A board with nothing failing on it, drawn at 120x40, still says the run
+    // it came from failed its gate and why the rows are missing.
+    let text = render(&mut session);
+    assert!(text.contains("0 new"), "{text}");
     assert!(
-        session
-            .status()
-            .contains("saved outcome: fail-on error reached"),
-        "a report with nothing failing on screen still reports its gate: {}",
-        session.status()
+        text.contains("saved outcome: fail-on error reached"),
+        "a report with nothing failing on screen still reports its gate:\n{text}"
     );
     assert!(
-        session.status().contains("filtered report"),
-        "{}",
-        session.status()
+        text.contains("filtered report: findings below error hidden"),
+        "{text}"
     );
-    assert!(render(&mut session).contains("0 new"));
 }
