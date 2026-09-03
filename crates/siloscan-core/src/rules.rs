@@ -107,6 +107,15 @@ pub enum LoadError {
 
     #[error("{origin}: unknown duplication scope: {detail}")]
     BadDuplicationScope { origin: String, detail: String },
+
+    #[error("{origin}: unknown metric measure: {detail}")]
+    BadMetricMeasure { origin: String, detail: String },
+
+    #[error("{origin}: invalid metric maximum: {detail}")]
+    BadMetricMax { origin: String, detail: String },
+
+    #[error("{origin}: metric language has no node-kind table: {detail}")]
+    BadMetricLanguage { origin: String, detail: String },
 }
 
 // Raw schema. `deny_unknown_fields` does not compose with `serde(flatten)`, so
@@ -136,6 +145,7 @@ pub struct RawRule {
     pub boundary: Option<RawBoundary>,
     pub coverage: Option<RawCoverage>,
     pub duplication: Option<RawDuplication>,
+    pub metric: Option<RawMetric>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -199,6 +209,19 @@ pub struct RawDuplication {
     /// unknown value reports a scope error naming the rule rather than a
     /// generic deserialization failure.
     pub scope: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RawMetric {
+    /// `function-length`, `parameter-count`, `nesting-depth` or
+    /// `cyclomatic-complexity`. Kept as a string so an unknown value reports a
+    /// measure error naming the rule rather than a generic deserialization
+    /// failure, exactly as a duplication scope does.
+    pub measure: String,
+    /// Threshold the measure must exceed to report. Signed so a negative value
+    /// reports a range error naming the rule instead of a serde type error.
+    pub max: i64,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -409,6 +432,51 @@ impl fmt::Display for DuplicationScope {
     }
 }
 
+/// What a metric rule measures over one function-like node.
+///
+/// The definitions live with the engine that computes them, in
+/// [`crate::engines::metric`]; this is only the name a rule document writes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Measure {
+    /// Lines the function node spans, first and last included.
+    FunctionLength,
+    /// Parameters in the function's parameter list.
+    ParameterCount,
+    /// Deepest run of nesting constructs inside the function.
+    NestingDepth,
+    /// One plus the branch points inside the function.
+    CyclomaticComplexity,
+}
+
+impl Measure {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Measure::FunctionLength => "function-length",
+            Measure::ParameterCount => "parameter-count",
+            Measure::NestingDepth => "nesting-depth",
+            Measure::CyclomaticComplexity => "cyclomatic-complexity",
+        }
+    }
+
+    /// Parses a measure as written in a rule document. `None` means the value
+    /// is not one of the four measures.
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "function-length" => Some(Measure::FunctionLength),
+            "parameter-count" => Some(Measure::ParameterCount),
+            "nesting-depth" => Some(Measure::NestingDepth),
+            "cyclomatic-complexity" => Some(Measure::CyclomaticComplexity),
+            _ => None,
+        }
+    }
+}
+
+impl fmt::Display for Measure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// One language's tree-sitter query for an ast rule.
 ///
 /// The `source` is kept next to the compiled query because the engine builds
@@ -458,6 +526,11 @@ pub enum CompiledPayload {
         /// Density above which the gate reports, in percent.
         max_percent: f64,
         scope: DuplicationScope,
+    },
+    Metric {
+        measure: Measure,
+        /// A function reports when its measure is strictly greater than this.
+        max: u32,
     },
 }
 
@@ -662,6 +735,9 @@ fn compile_rule(raw: RawRule, origin: &str) -> Result<CompiledRule, LoadError> {
     if raw.duplication.is_some() {
         kinds.push("duplication");
     }
+    if raw.metric.is_some() {
+        kinds.push("metric");
+    }
 
     match kinds.len() {
         0 => {
@@ -717,6 +793,21 @@ fn compile_rule(raw: RawRule, origin: &str) -> Result<CompiledRule, LoadError> {
         compile_coverage(&raw.id, spec, origin)?
     } else if let Some(spec) = raw.duplication {
         compile_duplication(&raw.id, spec, origin)?
+    } else if let Some(spec) = raw.metric {
+        // A metric rule's `languages` is the ordinary rule-level filter, so it
+        // needs no envelope of its own; what it does need is that every name it
+        // carries is a language the engine has a node-kind table for.
+        if let Some(languages) = &languages {
+            for lang in languages {
+                if !crate::engines::metric::has_kinds(lang) {
+                    return Err(LoadError::BadMetricLanguage {
+                        origin: origin.to_string(),
+                        detail: format!("{}: {lang}", raw.id),
+                    });
+                }
+            }
+        }
+        compile_metric(&raw.id, spec, origin)?
     } else {
         // Unreachable: the payload count was checked above.
         return Err(LoadError::NoPayload {
@@ -858,6 +949,24 @@ fn compile_duplication(
         max_percent: spec.max_percent,
         scope,
     })
+}
+
+fn compile_metric(id: &str, spec: RawMetric, origin: &str) -> Result<CompiledPayload, LoadError> {
+    let measure = Measure::parse(&spec.measure).ok_or_else(|| LoadError::BadMetricMeasure {
+        origin: origin.to_string(),
+        detail: format!(
+            "{id}: {} (expected function-length, parameter-count, nesting-depth or \
+             cyclomatic-complexity)",
+            spec.measure
+        ),
+    })?;
+
+    let max = u32::try_from(spec.max).map_err(|_| LoadError::BadMetricMax {
+        origin: origin.to_string(),
+        detail: format!("{id}: {}", spec.max),
+    })?;
+
+    Ok(CompiledPayload::Metric { measure, max })
 }
 
 fn compile_ast(
@@ -1829,6 +1938,132 @@ rules:
         let err = load_str(src, "test").unwrap_err();
         assert!(matches!(err, LoadError::MultiplePayloads { .. }));
         assert!(err.to_string().contains("coverage, duplication"), "{err}");
+    }
+
+    #[test]
+    fn metric_accepts_every_measure() {
+        for (value, expected) in [
+            ("function-length", Measure::FunctionLength),
+            ("parameter-count", Measure::ParameterCount),
+            ("nesting-depth", Measure::NestingDepth),
+            ("cyclomatic-complexity", Measure::CyclomaticComplexity),
+        ] {
+            let src = format!(
+                "version: 1\nrules:\n  - id: a.b\n    severity: info\n    message: m\n    metric: {{ measure: {value}, max: 15 }}\n"
+            );
+            let rules = load_str(&src, "test").expect("should load");
+            match &rules[0].payload {
+                CompiledPayload::Metric { measure, max } => {
+                    assert_eq!(*measure, expected);
+                    assert_eq!(measure.as_str(), value);
+                    assert_eq!(measure.to_string(), value);
+                    assert_eq!(*max, 15);
+                }
+                other => panic!("expected a metric payload, got {other:?}"),
+            }
+            // No `languages` means every language with a node-kind table.
+            assert!(rules[0].languages.is_none());
+        }
+    }
+
+    #[test]
+    fn metric_unknown_measure_is_fatal() {
+        let src = r#"
+version: 1
+rules:
+  - id: a.b
+    severity: info
+    message: m
+    metric: { measure: halstead, max: 15 }
+"#;
+        let err = load_str(src, "test").unwrap_err();
+        assert!(matches!(err, LoadError::BadMetricMeasure { .. }));
+        assert!(err.to_string().contains("a.b: halstead"), "{err}");
+    }
+
+    #[test]
+    fn metric_negative_max_is_fatal() {
+        let src = r#"
+version: 1
+rules:
+  - id: a.b
+    severity: info
+    message: m
+    metric: { measure: nesting-depth, max: -1 }
+"#;
+        let err = load_str(src, "test").unwrap_err();
+        assert!(matches!(err, LoadError::BadMetricMax { .. }));
+        assert!(err.to_string().contains("a.b: -1"), "{err}");
+    }
+
+    #[test]
+    fn metric_missing_key_is_fatal() {
+        for payload in [
+            "{ measure: nesting-depth }",
+            "{ max: 3 }",
+            "{ measure: nesting-depth, max: 1.5 }",
+        ] {
+            let src = format!(
+                "version: 1\nrules:\n  - id: a.b\n    severity: info\n    message: m\n    metric: {payload}\n"
+            );
+            assert!(matches!(
+                load_str(&src, "test"),
+                Err(LoadError::Yaml { .. })
+            ));
+        }
+    }
+
+    /// A metric rule's `languages` is the ordinary rule-level filter, which is
+    /// why the ast rejection does not apply to it. What it must name is a
+    /// language the engine has a node-kind table for.
+    #[test]
+    fn metric_keeps_its_languages_filter() {
+        let src = r#"
+version: 1
+rules:
+  - id: a.b
+    severity: info
+    message: m
+    languages: ["rust", "python"]
+    metric: { measure: cyclomatic-complexity, max: 15 }
+"#;
+        let rules = load_str(src, "test").expect("should load");
+        assert_eq!(
+            rules[0].languages.as_deref(),
+            Some(["rust".to_string(), "python".to_string()].as_slice())
+        );
+    }
+
+    #[test]
+    fn metric_with_an_untabled_language_is_fatal() {
+        let src = r#"
+version: 1
+rules:
+  - id: a.b
+    severity: info
+    message: m
+    languages: ["rust", "cobol"]
+    metric: { measure: cyclomatic-complexity, max: 15 }
+"#;
+        let err = load_str(src, "test").unwrap_err();
+        assert!(matches!(err, LoadError::BadMetricLanguage { .. }));
+        assert!(err.to_string().contains("a.b: cobol"), "{err}");
+    }
+
+    #[test]
+    fn metric_with_another_payload_is_fatal() {
+        let src = r#"
+version: 1
+rules:
+  - id: a.b
+    severity: info
+    message: m
+    coverage: { min: 50 }
+    metric: { measure: nesting-depth, max: 3 }
+"#;
+        let err = load_str(src, "test").unwrap_err();
+        assert!(matches!(err, LoadError::MultiplePayloads { .. }));
+        assert!(err.to_string().contains("coverage, metric"), "{err}");
     }
 
     #[test]

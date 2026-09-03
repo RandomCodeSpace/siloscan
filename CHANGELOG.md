@@ -6,6 +6,15 @@ All notable changes to this project are documented here. The format follows
 
 ## Unreleased
 
+### Added
+
+- A `metric:` rule payload, with `measure: function-length | parameter-count |
+  nesting-depth | cyclomatic-complexity` and an integer `max`. It reports one
+  finding per function-like node whose measure exceeds `max`, on the function's
+  name so the fingerprint survives edits to the body, with the measured value
+  and the threshold appended to the rule's message. Ten languages, an optional
+  rule-level `languages` filter, and no rule in the embedded pack uses it yet.
+
 ### Changed
 
 - `siloscan-core`: `CompiledPayload::Ast` carries `Vec<AstQuery>` rather than
