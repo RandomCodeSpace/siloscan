@@ -129,7 +129,12 @@ impl Inventory {
     fn languages(&self) -> Vec<String> {
         let mut languages = BTreeSet::new();
         for path in self.files.values() {
-            let language = if path.extension().is_some() {
+            // A `.h` is C or C++ by its content, so it is the one extension
+            // that has to be read here; every other one decides on the path.
+            let decided_by_path = path
+                .extension()
+                .is_some_and(|extension| !extension.eq_ignore_ascii_case("h"));
+            let language = if decided_by_path {
                 crate::lang::detect_configured(path, "", Some(&self.language_overrides))
             } else {
                 match crate::walk::read_text(path) {
