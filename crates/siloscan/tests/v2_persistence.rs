@@ -29,7 +29,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 
 use siloscan_core::serde_json::Value;
 use tempfile::TempDir;
@@ -692,6 +692,93 @@ fn a_stale_temporary_is_left_alone_and_is_not_the_report() {
     let document: Result<Value, _> =
         siloscan_core::serde_json::from_slice(&fs::read(&report).expect("report"));
     assert!(document.is_ok(), "the committed report is unaffected");
+}
+
+/// An interrupted publication leaves a temporary and no report, and neither
+/// blocks the next scan nor becomes something review will open.
+///
+/// Killing a real scan part-way through its write is not deterministic - the
+/// window between creating the temporary and renaming it is microseconds long -
+/// so the state that interruption leaves is planted instead. That state is what
+/// the contract is about: a temporary in the scope directory with no committed
+/// report beside it.
+#[test]
+fn an_interrupted_publication_is_ignored_by_review_and_replaced_by_the_next_save() {
+    let host = Host::new();
+
+    let first_run = host.run(&[]);
+    let report = saved(&first_run);
+    let interrupted = report.with_file_name("latest.json.4242.0.tmp");
+    fs::remove_file(&report).expect("remove the committed report");
+    fs::write(&interrupted, b"{\"findings\": [").expect("interrupted temporary");
+
+    // Review never falls back to a temporary, a guessed newest file, or another
+    // scope: with no committed report this scope has none.
+    let review = host.run(&["review"]);
+    assert_eq!(review.status.code(), Some(2), "{}", stdout(&review));
+    assert!(
+        stderr(&review).contains("no saved report for this scope"),
+        "{}",
+        stderr(&review)
+    );
+
+    let second_run = host.run(&[]);
+
+    assert_eq!(saved(&second_run), report, "the next scan publishes normally");
+    let document: Result<Value, _> =
+        siloscan_core::serde_json::from_slice(&fs::read(&report).expect("report"));
+    assert!(document.is_ok(), "the replacement is a whole document");
+    assert!(
+        interrupted.is_file(),
+        "the temporary is another writer's to remove"
+    );
+}
+
+/// Two bare scans of one scope race for one slot and leave one whole report.
+///
+/// Publication is a rename over a same-directory temporary, so the loser's
+/// document is replaced by the winner's rather than interleaved with it.
+/// Neither run may fail for having lost: both are ordinary scans, so both exit
+/// on their findings.
+#[test]
+fn concurrent_scans_of_one_scope_leave_exactly_one_valid_report() {
+    let host = Host::new();
+
+    let mut children = Vec::new();
+    for _ in 0..2 {
+        let mut command = Command::new(SILOSCAN);
+        command.current_dir(&host.tree);
+        isolation::isolate(&mut command, &host.cache, &host.state, &host.home);
+        // Spawned rather than run to completion, so the two writers overlap.
+        // `Command::output` would serialize them and prove nothing.
+        command.stdout(Stdio::piped()).stderr(Stdio::piped());
+        children.push(command.spawn().expect("siloscan should start"));
+    }
+    let outputs: Vec<Output> = children
+        .into_iter()
+        .map(|child| child.wait_with_output().expect("siloscan should finish"))
+        .collect();
+
+    let mut report = None;
+    for output in &outputs {
+        assert!(
+            matches!(output.status.code(), Some(0) | Some(1)),
+            "a losing writer must not fail: {}",
+            stderr(output)
+        );
+        let saved = saved(output);
+        assert_eq!(*report.get_or_insert(saved.clone()), saved, "one slot");
+    }
+
+    let report = report.expect("both runs named a report");
+    let document: Result<Value, _> =
+        siloscan_core::serde_json::from_slice(&fs::read(&report).expect("report"));
+    assert!(document.is_ok(), "the surviving report is a whole document");
+    assert_eq!(
+        scope_files(&report),
+        vec![report.clone()],
+        "no temporary outlives its writer"
+    );
 }
 
 /// The persistence controls are pairwise exclusive, so one scan writes at most
