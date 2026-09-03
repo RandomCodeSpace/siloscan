@@ -120,7 +120,7 @@ pub fn save(root: &Path, findings: &[Finding]) -> Result<usize, String> {
 /// file beside it and is renamed into place, so a failed or interrupted write
 /// leaves whatever was already there untouched. On failure the temporary file
 /// is removed and nothing else is disturbed.
-fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
+pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
     let temp = write_temp(path, bytes)?;
     fs::rename(&temp, path).map_err(|e| {
         let _ = fs::remove_file(&temp);

@@ -66,6 +66,11 @@ pub fn accept_baseline(state: &mut AppState, row_idx: usize) {
 /// Merge the queued findings into the baseline on disk. Prior entries are
 /// preserved; the result is deduped by fingerprint and ordered exactly as
 /// `baseline::save` orders it, so the file stays byte-stable.
+///
+/// The file is replaced atomically through `baseline::write_atomic`, the same
+/// writer `baseline::save` uses: a write that fails part way through leaves the
+/// previous baseline whole, because a truncated one fails strict loading and
+/// wedges every later scan.
 pub fn persist_baseline(root: &Path, dirty: &[Finding]) -> Result<usize, String> {
     let mut entries: Vec<BaselineEntry> = baseline::load(root)?
         .map(|baseline| baseline.entries)
@@ -95,7 +100,7 @@ pub fn persist_baseline(root: &Path, dirty: &[Finding]) -> Result<usize, String>
     let mut json = serde_json::to_string_pretty(&baseline)
         .map_err(|e| format!("{}: serialization failed: {e}", path.display()))?;
     json.push('\n');
-    fs::write(&path, json).map_err(|e| format!("{}: io error: {e}", path.display()))?;
+    baseline::write_atomic(&path, json.as_bytes())?;
 
     Ok(count)
 }
@@ -112,6 +117,10 @@ fn entry(finding: &Finding) -> BaselineEntry {
 /// and mark the row suppressed in memory. The file is rewritten only when the
 /// line actually changes, and not at all when the language is unknown: writing
 /// a bare marker would corrupt the source.
+///
+/// The rewrite goes through `baseline::write_atomic`, so a write that fails part
+/// way through leaves the user's source file exactly as it was rather than
+/// truncated.
 ///
 /// A snapshot names paths that need not exist here, so the edit is refused with
 /// its reason rather than attempted against whatever happens to be on disk.
@@ -148,7 +157,7 @@ pub fn insert_suppression(state: &mut AppState, row_idx: usize) -> io::Result<()
             )
         })?;
     if edited != content {
-        fs::write(&path, edited)?;
+        baseline::write_atomic(&path, edited.as_bytes()).map_err(io::Error::other)?;
     }
 
     state.rows[row_idx].status = Status::Suppressed;
@@ -358,6 +367,84 @@ mod tests {
         // The verdict stands in memory and stays queued for the next write.
         assert_eq!(state.rows[0].status, Status::Baselined);
         assert_eq!(state.dirty_baseline.len(), 1);
+    }
+
+    /// Make `dir` unwritable, run `body`, and put the mode back before any
+    /// assertion can panic and leave the temporary directory undeletable.
+    ///
+    /// An unwritable directory is the injected failure: the atomic writer
+    /// cannot create its temporary file beside the target, so it fails before
+    /// the rename - the ENOSPC or interrupted case, from the caller's side.
+    /// Only a new directory entry is refused, so a writer that opened the
+    /// target in place would truncate it and report success instead.
+    #[cfg(unix)]
+    fn while_unwritable<T>(dir: &Path, body: impl FnOnce() -> T) -> T {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let mode = fs::metadata(dir).unwrap().permissions().mode();
+        fs::set_permissions(dir, fs::Permissions::from_mode(0o555)).unwrap();
+        let out = body();
+        fs::set_permissions(dir, fs::Permissions::from_mode(mode)).unwrap();
+        out
+    }
+
+    /// A baseline write that dies before the rename must leave the previous
+    /// baseline whole: a truncated one fails strict loading and wedges every
+    /// later scan.
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_baseline_write_leaves_the_previous_baseline_intact() {
+        let dir = tempfile::tempdir().unwrap();
+        baseline::save(dir.path(), &[finding("old.rule", "src/old.rs", 3, "bb")]).unwrap();
+
+        let path = dir.path().join(baseline::BASELINE_PATH);
+        let original = fs::read(&path).unwrap();
+
+        let dirty = vec![finding("a.one", "src/a.rs", 1, "aa")];
+        let err = while_unwritable(path.parent().unwrap(), || {
+            persist_baseline(dir.path(), &dirty).unwrap_err()
+        });
+
+        assert!(err.contains("io error"), "{err}");
+        assert_eq!(
+            fs::read(&path).unwrap(),
+            original,
+            "the baseline must be byte-identical after a failed write"
+        );
+        let baseline = baseline::load(dir.path()).unwrap().expect("still loadable");
+        assert_eq!(baseline.entries.len(), 1);
+        assert_eq!(baseline.entries[0].fingerprint, "bb");
+    }
+
+    /// The same guarantee for the other write: a suppression that fails must
+    /// not leave the user's source file truncated.
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_suppression_leaves_the_source_file_intact() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        fs::create_dir_all(&src).unwrap();
+        let file = src.join("a.rs");
+        fs::write(&file, "let a = 1;\nlet needle = 2;\n").unwrap();
+        let original = fs::read(&file).unwrap();
+
+        let mut state = state(
+            dir.path(),
+            vec![row(
+                finding("test.needle", "src/a.rs", 2, "aa"),
+                Status::New,
+            )],
+        );
+
+        let err = while_unwritable(&src, || insert_suppression(&mut state, 0).unwrap_err());
+
+        assert!(err.to_string().contains("io error"), "{err}");
+        assert_eq!(
+            fs::read(&file).unwrap(),
+            original,
+            "the source file must be byte-identical after a failed write"
+        );
+        assert_eq!(state.rows[0].status, Status::New);
     }
 
     #[test]
