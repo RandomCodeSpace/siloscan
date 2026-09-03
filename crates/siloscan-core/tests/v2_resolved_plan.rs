@@ -275,9 +275,10 @@ fn config_rule_directories_load_beside_the_command_line_ones() {
 
     let report = run(&request(tree.path(), &command_line));
 
-    // The loader sorts the files it finds bytewise across every directory, so
-    // the directory order decides which one a duplicate id is reported against
-    // and not the order the documents appear in.
+    // Reported by id, not in load order. Load order follows the absolute paths
+    // the loader opened, which differ per host - a config-declared directory
+    // arrives canonicalised and a `--rules` one does not - so a literal here
+    // would only be true on the machine that wrote it.
     let ids: Vec<&str> = report
         .setup
         .rule_sources
@@ -659,6 +660,42 @@ fn a_config_anchored_nested_module_reports_from_the_config_root() {
     assert_eq!(paths(&report), vec!["modules/api/src/a.rs"]);
     assert_eq!(report.context().anchoring().prefix(), "modules/api");
     assert_eq!(report.context().baseline_root(), tree.path());
+}
+
+/// The context reports the paths the caller asked for, not the paths the file
+/// system would rather call them.
+///
+/// Config discovery canonicalises before it walks, so the loaded config knows
+/// the link target and the long name; neither is what the caller typed. Both
+/// accessors here have to echo the request, including through
+/// `anchor = "config"`, where the baseline root is an ancestor of the scan root
+/// and the config is the only thing that knows where it is.
+#[cfg(unix)]
+#[test]
+fn the_context_echoes_the_requested_spelling_of_every_path() {
+    let tree = tempfile::tempdir().unwrap();
+    write(tree.path(), ".git/HEAD", "ref: refs/heads/main\n");
+    write(
+        tree.path(),
+        "siloscan.toml",
+        "anchor = \"config\"\ninclude = [\"modules/api/siloscan.toml\"]\n",
+    );
+    write(tree.path(), "modules/api/siloscan.toml", "");
+    write(tree.path(), "modules/api/src/a.rs", "let x = \"needle\";\n");
+    let rules = rules_dir(tree.path(), "rules", NEEDLE_RULE);
+
+    let elsewhere = tempfile::tempdir().unwrap();
+    let link = elsewhere.path().join("repo");
+    std::os::unix::fs::symlink(tree.path(), &link).unwrap();
+    let module = link.join("modules/api");
+
+    let plain = run(&request(&link, &rules));
+    assert_eq!(plain.context().scan_root(), link);
+    assert_eq!(plain.context().baseline_root(), link);
+
+    let nested = run(&request(&module, &rules));
+    assert_eq!(nested.context().scan_root(), module);
+    assert_eq!(nested.context().baseline_root(), link);
 }
 
 #[test]

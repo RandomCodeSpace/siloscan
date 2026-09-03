@@ -29,7 +29,7 @@ use std::collections::BTreeSet;
 use std::fmt;
 use std::fs;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use globset::GlobSet;
 use serde::Serialize;
@@ -303,7 +303,7 @@ impl ResolvedScanPlan {
         // bound to a path convention, and an anchor that cannot be honoured is
         // a setup error rather than a scan reporting the wrong paths.
         let anchoring = Anchoring::resolve(&root, config.as_ref()).map_err(ResolveError::new)?;
-        let baseline_root = baseline_root(&root, config.as_ref());
+        let baseline_root = baseline_root(&root, &anchoring, config.as_ref());
         let baseline = load_baseline(&baseline_root, request.baseline.as_deref())?;
         let cache = open_cache(&root, &rules, &request.cache, &anchoring);
 
@@ -685,8 +685,19 @@ fn state(id: &str, enabled: bool, status: CapabilityStatus, reason: &str) -> Cap
     }
 }
 
+/// Every rule document that produced the loaded set, the embedded pack first
+/// and the rest by their reported id.
+///
+/// Not in load order. The loader sorts the files it finds by absolute path, so
+/// load order depends on where the tree happens to sit and on whether a
+/// directory reached it canonicalised - a config-declared directory does, a
+/// `--rules` one does not, and on Windows that puts a `\\?\` path either side
+/// of a drive letter. Two machines scanning one tree have to produce one
+/// document, so the report is ordered by what the report itself says. Load
+/// order still decides which directory a duplicate id is reported against, and
+/// is untouched.
 fn rule_sources(root: &Path, rules: &RuleSet) -> Vec<RuleSource> {
-    rules
+    let mut sources: Vec<RuleSource> = rules
         .sources
         .iter()
         .map(|(origin, _)| {
@@ -702,7 +713,17 @@ fn rule_sources(root: &Path, rules: &RuleSet) -> Vec<RuleSource> {
                 }
             }
         })
-        .collect()
+        .collect();
+    sources.sort_by(|left, right| {
+        embedded_first(left)
+            .cmp(&embedded_first(right))
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    sources
+}
+
+fn embedded_first(source: &RuleSource) -> u8 {
+    u8::from(source.origin != "embedded")
 }
 
 /// A rule file's report identity: its path from the scan root when it is
@@ -986,15 +1007,51 @@ fn state_root(root: &Path) -> PathBuf {
 /// The directory the default `.siloscan/baseline.json` is read from: the scan
 /// root's state directory, and under `anchor = "config"` the config root, which
 /// is where the fingerprints are measured from.
-fn baseline_root(root: &Path, config: Option<&Config>) -> PathBuf {
-    match config {
-        Some(config)
-            if config.anchor == Anchor::Config && !config.config_root().as_os_str().is_empty() =>
-        {
-            config.config_root().to_path_buf()
-        }
-        _ => state_root(root),
+///
+/// Spelled the way the caller spelled the scan root. [`config::discover`]
+/// canonicalises before it walks, so a discovered config's own `config_root`
+/// names the host rather than the scan - a `\\?\` long path on Windows for a
+/// caller who asked for an 8.3 short one, and the link target on a path reached
+/// through a symbolic link. That directory is right and its spelling is not:
+/// this value is reported through [`ScanOutputContext::baseline_root`], and a
+/// context whose paths disagree with the request describes a scan nobody asked
+/// for.
+fn baseline_root(root: &Path, anchoring: &Anchoring, config: Option<&Config>) -> PathBuf {
+    let state = state_root(root);
+    let Some(config) = config else {
+        return state;
+    };
+    if config.anchor != Anchor::Config || config.config_root().as_os_str().is_empty() {
+        return state;
     }
+    // The anchoring prefix is the descent from the config root down to the
+    // directory scanned paths are measured from, so climbing that many levels
+    // out of the requested path lands on the config root - and gets there
+    // without asking the file system what anything is really called.
+    climb(&state, anchoring.prefix()).unwrap_or_else(|| config.config_root().to_path_buf())
+}
+
+/// `path` with as many trailing components removed as `descent` has, or `None`
+/// when the requested spelling has too few to climb - `siloscan .` run inside a
+/// module names its repository root only as `..`, and inventing that spelling
+/// would be worse than falling back to the one the config already carries.
+fn climb(path: &Path, descent: &str) -> Option<PathBuf> {
+    let mut base = path.to_path_buf();
+    for _ in descent.split('/').filter(|part| !part.is_empty()) {
+        // Only a real directory name can be climbed out of. `.` and `..` name a
+        // position rather than a component, and popping one would land on a
+        // directory the caller never named.
+        if !matches!(base.components().next_back(), Some(Component::Normal(_))) {
+            return None;
+        }
+        let parent = base.parent()?;
+        base = if parent.as_os_str().is_empty() {
+            PathBuf::from(".")
+        } else {
+            parent.to_path_buf()
+        };
+    }
+    Some(base)
 }
 
 /// An explicit baseline file must exist; the default location is optional.
