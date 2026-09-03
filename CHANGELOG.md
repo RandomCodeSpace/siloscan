@@ -13,11 +13,17 @@ All notable changes to this project are documented here. The format follows
   compiled query; `engines::ast::AstQueries` is new, and
   `engines::ast::scan_file` takes it as a second parameter.
 
+- `siloscan-core`: `ScanReport::graph` is populated only when a boundary rule
+  is loaded. A scan that parsed every file for its ast rules now leaves it
+  empty, because the import facts had no reader.
+
 ### Performance
 
 - The ast engine runs one tree-sitter query per language per file, holding
   every applicable rule's patterns, instead of one query - one full tree
   traversal - per rule.
+- Import facts are extracted only for a scan with a boundary rule. Walking a
+  parsed tree for them cost about as much as the parse itself.
 
 ## 2.0.0 - 2026-09-03
 
