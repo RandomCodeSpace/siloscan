@@ -33,7 +33,7 @@
 //! | Measure | Definition |
 //! | --- | --- |
 //! | `function-length` | `end_row - start_row + 1` of the function node, nested functions included: they are lines of this function's text. |
-//! | `parameter-count` | Counted children of the function's parameter list. |
+//! | `parameter-count` | Parameters in the function's parameter list, which is every named child that is not on the language's [`not_parameters`](Kinds::not_parameters) list. Go groups parameters sharing a type into one node with a `name` field each, so an entry counts once per name. |
 //! | `nesting-depth` | Deepest run of [`NESTING`](Kinds::nesting) nodes inside the function's own subtree; the body itself is depth 0. |
 //! | `cyclomatic-complexity` | `1 + ` the [`BRANCH`](Kinds::branches) nodes in the function's own subtree, where a [binary node](Kinds::binary) counts only when its `operator` field is one of the language's short-circuit operators. |
 //!
@@ -60,6 +60,23 @@
 //! - Typescript's `function_signature`, `method_signature` and
 //!   `abstract_method_signature` are absent on purpose: they have no body, so
 //!   there is nothing to measure.
+//! - An `elif` / `elsif` / `else if` chain is one nesting level deeper than the
+//!   `if` it continues, uniformly: the clause is a node inside its `if`, and it
+//!   is in NESTING for the languages that spell it as one. A ten-branch chain
+//!   is depth 2, not depth 10.
+//! - **The implicit receiver is not a parameter.** Rust's `self_parameter`, a
+//!   Go method's `receiver` — a separate field from `parameters` — and Java's
+//!   `receiver_parameter` are all excluded. Python's `self` *is* counted,
+//!   because in Python it is syntactically an ordinary first parameter and
+//!   nothing in the grammar distinguishes it; a Python threshold therefore has
+//!   to be read as one higher for methods than for functions.
+//! - Java counts `switch_label` and not `switch_rule`: an arrow switch's rule
+//!   holds a label as its first child, so counting both would count every arm
+//!   of an arrow switch twice and leave the two switch styles disagreeing about
+//!   the same code.
+//! - A function-like node that is another function-like node's `body` is not a
+//!   unit of its own. That is Ruby's `->() { }`, whose body is itself a
+//!   `block`; see [`is_unit`].
 
 use tree_sitter::{Node, Tree};
 
@@ -84,9 +101,17 @@ pub struct Kinds {
     /// Parameter-list nodes. Anything else found where one was expected is a
     /// single bare parameter and counts as one.
     pub parameter_lists: &'static [&'static str],
-    /// Child kinds of a parameter list that are parameters. Empty means every
-    /// named child counts.
-    pub parameters: &'static [&'static str],
+    /// Named children of a parameter list that are *not* parameters. Every
+    /// other named child is one.
+    ///
+    /// An exclusion list and not an inclusion list, because two of the
+    /// grammars hide their parameters behind a supertype: Rust's
+    /// `closure_parameters` holds `_pattern`, which is every pattern kind the
+    /// language has, and Python's `parameters` holds `_parameter`. Listing what
+    /// is not a parameter is short, and it fails in the safe direction — a
+    /// grammar that gains a parameter kind keeps counting rather than silently
+    /// dropping it.
+    pub not_parameters: &'static [&'static str],
 }
 
 /// Languages with a node-kind table, sorted. Every language the crate can parse
@@ -124,7 +149,7 @@ const C: Kinds = Kinds {
         "switch_statement",
     ],
     parameter_lists: &["parameter_list"],
-    parameters: &["parameter_declaration", "variadic_parameter"],
+    not_parameters: &["comment", "compound_statement"],
 };
 
 const CPP: Kinds = Kinds {
@@ -153,11 +178,7 @@ const CPP: Kinds = Kinds {
         "switch_statement",
     ],
     parameter_lists: &["parameter_list"],
-    parameters: &[
-        "parameter_declaration",
-        "optional_parameter_declaration",
-        "variadic_parameter_declaration",
-    ],
+    not_parameters: &["comment"],
 };
 
 const CSHARP: Kinds = Kinds {
@@ -197,7 +218,7 @@ const CSHARP: Kinds = Kinds {
         "switch_statement",
     ],
     parameter_lists: &["parameter_list"],
-    parameters: &["parameter"],
+    not_parameters: &["comment", "attribute_list"],
 };
 
 const GO: Kinds = Kinds {
@@ -223,7 +244,7 @@ const GO: Kinds = Kinds {
     ],
     // A method's `receiver` is a separate field and is not a parameter.
     parameter_lists: &["parameter_list"],
-    parameters: &["parameter_declaration", "variadic_parameter_declaration"],
+    not_parameters: &["comment"],
 };
 
 const JAVA: Kinds = Kinds {
@@ -233,8 +254,9 @@ const JAVA: Kinds = Kinds {
         "compact_constructor_declaration",
         "lambda_expression",
     ],
-    // `switch_label` is the old style and `switch_rule` the arrow style; a file
-    // uses one or the other.
+    // `switch_label` is the arm, in both switch styles: an arrow `switch_rule`
+    // holds one as its first child, so counting the rule as well would count
+    // every arrow arm twice.
     branches: &[
         "if_statement",
         "while_statement",
@@ -242,7 +264,6 @@ const JAVA: Kinds = Kinds {
         "for_statement",
         "enhanced_for_statement",
         "switch_label",
-        "switch_rule",
         "catch_clause",
         "ternary_expression",
     ],
@@ -259,9 +280,11 @@ const JAVA: Kinds = Kinds {
         "try_statement",
         "switch_expression",
     ],
-    parameter_lists: &["formal_parameters"],
-    // `receiver_parameter` is not a parameter.
-    parameters: &["formal_parameter", "spread_parameter"],
+    // A lambda writes its parameters three ways: `formal_parameters`,
+    // `inferred_parameters`, or one bare `identifier` that lands on the
+    // single-parameter path below.
+    parameter_lists: &["formal_parameters", "inferred_parameters"],
+    not_parameters: &["line_comment", "block_comment", "receiver_parameter"],
 };
 
 const JAVASCRIPT: Kinds = Kinds {
@@ -273,6 +296,8 @@ const JAVASCRIPT: Kinds = Kinds {
         "arrow_function",
         "method_definition",
     ],
+    // `switch_default` is a node of its own, and counts like every other
+    // language's wildcard arm.
     branches: &[
         "if_statement",
         "while_statement",
@@ -280,6 +305,7 @@ const JAVASCRIPT: Kinds = Kinds {
         "for_statement",
         "for_in_statement",
         "switch_case",
+        "switch_default",
         "catch_clause",
         "ternary_expression",
     ],
@@ -296,7 +322,7 @@ const JAVASCRIPT: Kinds = Kinds {
         "switch_statement",
     ],
     parameter_lists: &["formal_parameters"],
-    parameters: &[],
+    not_parameters: &["comment"],
 };
 
 const PYTHON: Kinds = Kinds {
@@ -321,17 +347,10 @@ const PYTHON: Kinds = Kinds {
         "except_clause",
         "try_statement",
         "with_statement",
+        "match_statement",
     ],
     parameter_lists: &["parameters", "lambda_parameters"],
-    // `positional_separator` and `keyword_separator` are not parameters.
-    parameters: &[
-        "identifier",
-        "default_parameter",
-        "typed_parameter",
-        "typed_default_parameter",
-        "list_splat_pattern",
-        "dictionary_splat_pattern",
-    ],
+    not_parameters: &["comment", "positional_separator", "keyword_separator"],
 };
 
 const RUBY: Kinds = Kinds {
@@ -355,10 +374,18 @@ const RUBY: Kinds = Kinds {
     binary: "binary",
     short_circuit: &["&&", "||", "and", "or"],
     nesting: &[
-        "if", "elsif", "unless", "while", "until", "for", "rescue", "case",
+        "if",
+        "elsif",
+        "unless",
+        "while",
+        "until",
+        "for",
+        "rescue",
+        "case",
+        "case_match",
     ],
     parameter_lists: &["method_parameters", "block_parameters", "lambda_parameters"],
-    parameters: &[],
+    not_parameters: &["comment"],
 };
 
 const RUST: Kinds = Kinds {
@@ -380,8 +407,14 @@ const RUST: Kinds = Kinds {
         "match_expression",
     ],
     parameter_lists: &["parameters", "closure_parameters"],
-    // `self_parameter` is not counted.
-    parameters: &["parameter", "variadic_parameter"],
+    // A typed closure parameter is a `parameter`; an untyped one is a bare
+    // pattern, so both have to count.
+    not_parameters: &[
+        "line_comment",
+        "block_comment",
+        "self_parameter",
+        "attribute_item",
+    ],
 };
 
 const TYPESCRIPT: Kinds = Kinds {
@@ -391,8 +424,7 @@ const TYPESCRIPT: Kinds = Kinds {
     short_circuit: JAVASCRIPT.short_circuit,
     nesting: JAVASCRIPT.nesting,
     parameter_lists: JAVASCRIPT.parameter_lists,
-    // Typescript wraps every parameter, bare identifiers included.
-    parameters: &["required_parameter", "optional_parameter"],
+    not_parameters: JAVASCRIPT.not_parameters,
 };
 
 /// The node-kind table for one language, or `None` when the engine has none.
@@ -526,7 +558,7 @@ fn measure_tree(tree: &Tree, kinds: &Kinds) -> Vec<Measured> {
     let mut cursor = tree.walk();
 
     while let Some(node) = stack.pop() {
-        if kinds.functions.contains(&node.kind()) {
+        if is_unit(node, kinds) {
             out.push(measure_function(node, kinds));
         }
         stack.extend(node.named_children(&mut cursor));
@@ -549,7 +581,7 @@ fn measure_function(node: Node<'_>, kinds: &Kinds) -> Measured {
     while let Some((current, current_depth)) = stack.pop() {
         for child in current.named_children(&mut cursor) {
             // A nested function is its own unit and is measured on its own.
-            if kinds.functions.contains(&child.kind()) {
+            if is_unit(child, kinds) {
                 continue;
             }
             if is_branch(child, kinds) {
@@ -575,6 +607,30 @@ fn measure_function(node: Node<'_>, kinds: &Kinds) -> Measured {
         depth,
         complexity: branches + 1,
     }
+}
+
+/// Whether this node is a unit to measure on its own.
+///
+/// Every function-like node is, except one that is another function-like node's
+/// `body`. That case is Ruby's, where a lambda's body is itself a `block` or a
+/// `do_block`: measuring both would leave the `lambda` unit trivial and report
+/// a long lambda twice, once on `->` and once on `{`. Folding the body into the
+/// lambda puts one finding on the `lambda` node, whose `lambda_parameters` are
+/// the parameters a reader would name. No other grammar gives a function-like
+/// node for a body.
+fn is_unit(node: Node<'_>, kinds: &Kinds) -> bool {
+    if !kinds.functions.contains(&node.kind()) {
+        return false;
+    }
+    let Some(parent) = node.parent() else {
+        return true;
+    };
+    if !kinds.functions.contains(&parent.kind()) {
+        return true;
+    }
+    parent
+        .child_by_field_name("body")
+        .is_none_or(|body| body.id() != node.id())
 }
 
 fn is_branch(node: Node<'_>, kinds: &Kinds) -> bool {
@@ -630,10 +686,39 @@ fn parameter_count(node: Node<'_>, kinds: &Kinds) -> u32 {
         // c# `x => x`.
         return 1;
     }
+    let mut count = 0;
     let mut cursor = list.walk();
-    list.named_children(&mut cursor)
-        .filter(|child| kinds.parameters.is_empty() || kinds.parameters.contains(&child.kind()))
-        .count() as u32
+    // A cursor and not `named_children`, because a Ruby block writes its
+    // block-local variables into the same list under a `locals` field, and a
+    // local is not a parameter.
+    if cursor.goto_first_child() {
+        loop {
+            let child = cursor.node();
+            if child.is_named()
+                && cursor.field_name() != Some("locals")
+                && !kinds.not_parameters.contains(&child.kind())
+            {
+                count += names(child);
+            }
+            if !cursor.goto_next_sibling() {
+                break;
+            }
+        }
+    }
+    count
+}
+
+/// How many parameters one entry of a parameter list is.
+///
+/// One, everywhere but Go, which groups parameters sharing a type into a single
+/// `parameter_declaration` carrying one `name` field per parameter:
+/// `func f(a, b, c int)` is one declaration and three parameters. An entry with
+/// no name at all — an unnamed parameter in a Go signature — is still one
+/// parameter.
+fn names(node: Node<'_>) -> u32 {
+    let mut cursor = node.walk();
+    let named = node.children_by_field_name("name", &mut cursor).count() as u32;
+    named.max(1)
 }
 
 /// The node holding the function's parameters: a list, or the single bare
@@ -768,7 +853,7 @@ mod tests {
                 language: "csharp",
                 path: "src/A.cs",
                 name: "Handle",
-                // 9 lines, 3 params, depth 2, complexity 1+if+foreach+&&+?: = 5
+                // 8 lines, 3 params, depth 2, complexity 1+if+foreach+&&+?: = 5
                 source: "class A {\n\
                          int Handle(int a, string b, object c) {\n\
                          if (a > 0 && b != null) {\n\
@@ -849,7 +934,7 @@ mod tests {
                 language: "python",
                 path: "src/a.py",
                 name: "handle",
-                // 7 lines, 3 params, depth 2, complexity 1+if+for+and+cond = 5
+                // 5 lines, 3 params, depth 2, complexity 1+if+for+and+cond = 5
                 source: "def handle(a, b, c):\n\
                          \x20   if a > 0 and b:\n\
                          \x20       for i in range(a):\n\
@@ -933,7 +1018,7 @@ mod tests {
                 .chain(std::iter::once(&kinds.binary))
                 .chain(kinds.nesting)
                 .chain(kinds.parameter_lists)
-                .chain(kinds.parameters);
+                .chain(kinds.not_parameters);
             for kind in named {
                 assert_ne!(
                     grammar.id_for_node_kind(kind, true),
@@ -962,6 +1047,36 @@ mod tests {
         assert!(!has_kinds("klingon"));
     }
 
+    /// `LANGUAGES` is what `ParseNeeds` reads to decide which files an
+    /// unfiltered metric rule wants parsed, so a language `kinds` answers for
+    /// but the list omits would never be parsed, and one the list carries but
+    /// `kinds` does not would parse files for nothing.
+    #[test]
+    fn languages_is_exactly_the_tabled_set() {
+        let mut sorted = LANGUAGES.to_vec();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.as_slice(), LANGUAGES.as_slice());
+
+        for language in LANGUAGES {
+            assert!(kinds(language).is_some(), "{language} is listed untabled");
+        }
+        // The other direction, over every name that can reach the engine: a
+        // file's language comes from `lang::detect`, whose whole output is the
+        // set of grammars this crate can parse.
+        for language in parsers::supported_languages() {
+            assert_eq!(
+                LANGUAGES.contains(&language),
+                kinds(language).is_some(),
+                "{language} disagrees between LANGUAGES and kinds()"
+            );
+        }
+        for language in ["", "klingon", "yaml", "json", "markdown", "toml"] {
+            assert!(kinds(language).is_none(), "{language} has a table");
+            assert!(!LANGUAGES.contains(&language));
+        }
+    }
+
     #[test]
     fn each_language_measures_its_fixture() {
         let enabled = parsers::supported_languages();
@@ -982,6 +1097,168 @@ mod tests {
             assert_measure(&fixture, "nesting-depth", fixture.depth);
             assert_measure(&fixture, "cyclomatic-complexity", fixture.complexity);
         }
+    }
+
+    /// Every measured unit of `source` as `(length, parameters, depth,
+    /// complexity)`, in source order, read straight off the engine. Panics
+    /// unless the source parses cleanly, so a fixture cannot pass on a broken
+    /// tree.
+    fn measures(language: &str, source: &str) -> Vec<(u32, u32, u32, u32)> {
+        let tree = parsers::parse(language, source).expect("tree");
+        assert!(
+            !tree.root_node().has_error(),
+            "{language}: fixture does not parse cleanly:\n{source}"
+        );
+        let kinds = kinds(language).expect("table");
+        measure_tree(&tree, kinds)
+            .into_iter()
+            .map(|one| (one.length, one.parameters, one.depth, one.complexity))
+            .collect()
+    }
+
+    /// The four measures of the one unit in `source`. The unit count is part of
+    /// the assertion: it is what makes the numbers unambiguous.
+    fn only_measure(language: &str, source: &str) -> (u32, u32, u32, u32) {
+        let mut all = measures(language, source);
+        assert_eq!(all.len(), 1, "{language}: expected one unit\n{source}");
+        all.remove(0)
+    }
+
+    /// The parameter count of the *inner* unit, for a closure or lambda that
+    /// can only be written inside a function.
+    fn inner_parameters(language: &str, source: &str) -> u32 {
+        let all = measures(language, source);
+        assert_eq!(all.len(), 2, "{language}: expected two units\n{source}");
+        all[1].1
+    }
+
+    fn only_complexity(language: &str, source: &str) -> u32 {
+        only_measure(language, source).3
+    }
+
+    fn only_parameters(language: &str, source: &str) -> u32 {
+        only_measure(language, source).1
+    }
+
+    fn only_depth(language: &str, source: &str) -> u32 {
+        only_measure(language, source).2
+    }
+
+    /// A `switch_rule` holds a `switch_label` as its first child, so counting
+    /// both would count every arm of an arrow switch twice and leave the two
+    /// switch styles disagreeing about the same code.
+    #[cfg(feature = "tree-sitter-java")]
+    #[test]
+    fn java_switch_styles_agree() {
+        let arrow = "class A {\n  int f(int a) {\n    switch (a) {\n      case 1 -> a = 1;\n      \
+                     case 2 -> a = 2;\n      default -> a = 3;\n    }\n    return a;\n  }\n}\n";
+        let colon = "class A {\n  int f(int a) {\n    switch (a) {\n      case 1: a = 1; break;\n  \
+                     case 2: a = 2; break;\n      default: a = 3;\n    }\n    return a;\n  }\n}\n";
+
+        assert_eq!(only_complexity("java", arrow), 4);
+        assert_eq!(only_complexity("java", colon), 4);
+    }
+
+    /// A Ruby lambda's body is itself a `do_block`, so measuring both would
+    /// leave the lambda trivial and report a branchy lambda on the `do` instead
+    /// of on the `->` that names it.
+    #[cfg(feature = "tree-sitter-ruby")]
+    #[test]
+    fn a_ruby_lambda_is_one_unit_on_its_arrow() {
+        let source = "pick = ->(a, b) do\n  if a > b\n    a\n  else\n    b\n  end\nend\n";
+        assert_eq!(only_measure("ruby", source), (7, 2, 1, 2));
+
+        let compiled = rules(&rule("metric.complexity", "cyclomatic-complexity", 1));
+        let found = scan(&compiled, "src/a.rb", "ruby", source);
+        assert_eq!(found.len(), 1, "{found:#?}");
+        assert_eq!(found[0].matched, "->");
+    }
+
+    /// Go groups parameters that share a type into one declaration carrying a
+    /// `name` field each, so counting declarations undercounts a signature.
+    #[cfg(feature = "tree-sitter-go")]
+    #[test]
+    fn go_counts_grouped_parameter_names() {
+        let source = "package main\n\nfunc f(a, b, c int, ctx string) {\n}\n";
+        assert_eq!(only_parameters("go", source), 4);
+    }
+
+    /// A typed closure parameter is a `parameter`; an untyped one is a bare
+    /// pattern under the `_pattern` supertype, and both are parameters.
+    #[cfg(feature = "tree-sitter-rust")]
+    #[test]
+    fn rust_counts_typed_and_untyped_closure_parameters() {
+        assert_eq!(
+            inner_parameters("rust", "fn m() {\n    let f = |a, b, c| a;\n}\n"),
+            3
+        );
+        assert_eq!(
+            inner_parameters("rust", "fn m() {\n    let f = |a: i32, b| a;\n}\n"),
+            2
+        );
+    }
+
+    /// A java lambda writes its parameters three ways.
+    #[cfg(feature = "tree-sitter-java")]
+    #[test]
+    fn java_lambda_parameters_are_counted_however_they_are_written() {
+        let inferred = "class A {\n  void m() {\n    var f = (a, b, c) -> a;\n  }\n}\n";
+        let bare = "class A {\n  void m() {\n    var f = x -> x;\n  }\n}\n";
+        let formal = "class A {\n  void m() {\n    var f = (int a, int b) -> a;\n  }\n}\n";
+
+        assert_eq!(inner_parameters("java", inferred), 3);
+        assert_eq!(inner_parameters("java", bare), 1);
+        assert_eq!(inner_parameters("java", formal), 2);
+    }
+
+    /// `switch_default` is a node of its own, and is an arm like any other.
+    #[cfg(feature = "tree-sitter-javascript")]
+    #[test]
+    fn a_javascript_switch_default_is_a_branch() {
+        let source = "function f(a) {\n  switch (a) {\n    case 1: return 1;\n    case 2: return \
+                      2;\n    default: return 3;\n  }\n}\n";
+        assert_eq!(only_complexity("javascript", source), 4);
+    }
+
+    /// The pattern-matching statement is a nesting level, the same way every
+    /// other language's switch statement is; its arms are not.
+    #[cfg(feature = "tree-sitter-python")]
+    #[test]
+    fn a_python_match_statement_is_a_nesting_level() {
+        let source = "def f(a):\n    match a:\n        case 1:\n            if a:\n                return \
+             1\n        case _:\n            return 0\n";
+        assert_eq!(only_depth("python", source), 2);
+    }
+
+    #[cfg(feature = "tree-sitter-ruby")]
+    #[test]
+    fn a_ruby_case_in_is_a_nesting_level() {
+        let source = "def f(a)\n  case a\n  in 1\n    if a\n      1\n    end\n  else\n    0\n  \
+                      end\nend\n";
+        assert_eq!(only_depth("ruby", source), 2);
+    }
+
+    /// A comment sits in the parameter list as a named child and is not a
+    /// parameter.
+    #[cfg(feature = "tree-sitter-javascript")]
+    #[test]
+    fn a_javascript_comment_is_not_a_parameter() {
+        assert_eq!(
+            only_parameters(
+                "javascript",
+                "function f(/* unused */ a) {\n  return a;\n}\n"
+            ),
+            1
+        );
+    }
+
+    #[cfg(feature = "tree-sitter-rust")]
+    #[test]
+    fn a_rust_comment_is_not_a_parameter() {
+        assert_eq!(
+            only_parameters("rust", "fn f(/* unused */ a: i32) -> i32 {\n    a\n}\n"),
+            1
+        );
     }
 
     #[cfg(feature = "tree-sitter-rust")]

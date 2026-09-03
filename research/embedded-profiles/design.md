@@ -469,8 +469,8 @@ miss most of a Rails codebase.
 | cpp | the c set plus `for_range_loop`, `catch_clause` | `binary_expression`: `&&`, `\|\|`, `and`, `or` |
 | csharp | `if_statement`, `while_statement`, `do_statement`, `for_statement`, `foreach_statement`, `switch_section`, `switch_expression_arm`, `catch_clause`, `when_clause`, `conditional_expression`, `conditional_access_expression` | `binary_expression`: `&&`, `\|\|`, `??` |
 | go | `if_statement`, `for_statement`, `expression_case`, `type_case`, `communication_case`, `default_case` | `binary_expression`: `&&`, `\|\|` |
-| java | `if_statement`, `while_statement`, `do_statement`, `for_statement`, `enhanced_for_statement`, `switch_label`, `switch_rule`, `catch_clause`, `ternary_expression` | `binary_expression`: `&&`, `\|\|` |
-| javascript | `if_statement`, `while_statement`, `do_statement`, `for_statement`, `for_in_statement`, `switch_case`, `catch_clause`, `ternary_expression` | `binary_expression`: `&&`, `\|\|`, `??` |
+| java | `if_statement`, `while_statement`, `do_statement`, `for_statement`, `enhanced_for_statement`, `switch_label`, `catch_clause`, `ternary_expression` | `binary_expression`: `&&`, `\|\|` |
+| javascript | `if_statement`, `while_statement`, `do_statement`, `for_statement`, `for_in_statement`, `switch_case`, `switch_default`, `catch_clause`, `ternary_expression` | `binary_expression`: `&&`, `\|\|`, `??` |
 | python | `if_statement`, `elif_clause`, `while_statement`, `for_statement`, `except_clause`, `case_clause`, `conditional_expression`, `if_clause` | `boolean_operator`: `and`, `or` |
 | ruby | `if`, `elsif`, `unless`, `while`, `until`, `for`, `when`, `in_clause`, `rescue`, `conditional`, `if_modifier`, `unless_modifier`, `while_modifier`, `until_modifier` | `binary`: `&&`, `\|\|`, `and`, `or` |
 | rust | `if_expression`, `while_expression`, `loop_expression`, `for_expression`, `match_arm` | `binary_expression`: `&&`, `\|\|` |
@@ -487,8 +487,11 @@ Notes that are decisions, not observations:
   convention as `switch_case`/`when`.
 - Go's four `*_case` kinds cover `switch`, type switches and `select`; `for` has
   no separate range form.
-- Java's `switch_label` (old style) and `switch_rule` (arrow style) are both
-  present, and a file uses one or the other.
+- Java counts `switch_label` and not `switch_rule`. The label is the arm in
+  both switch styles: an arrow `switch_rule` holds a `switch_label` as its first
+  child, so counting both would count every arm of an arrow switch twice and
+  leave the two styles disagreeing about the same code. Corrected during P2,
+  against a fixture that measures the same switch written both ways.
 - The `operator` field exists on the binary node in all ten grammars and its
   value is the operator's anonymous node kind, so the check is
   `node.child_by_field_name("operator").map(|n| n.kind())`.
