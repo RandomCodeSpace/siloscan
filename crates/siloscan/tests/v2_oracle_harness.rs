@@ -405,11 +405,12 @@ fn normalize_report(bytes: &[u8]) -> Result<(Value, Vec<u8>), String> {
         return Err("report has no string product version".to_owned());
     }
 
-    let markers = ["report_kind", "scope", "outcome", "setup"];
-    if let Some(marker) = markers.iter().find(|field| object.contains_key(**field)) {
-        return Err(format!(
-            "explicit report contains resolved-report marker {marker}"
-        ));
+    // The four resolved markers are the only fields a candidate report may add,
+    // and they are removed rather than compared: a v2 scan report carries them
+    // whether or not it was saved, and everything else in the document has to be
+    // the reference's bytes.
+    for marker in ["report_kind", "scope", "outcome", "setup"] {
+        object.remove(marker);
     }
 
     let normalized = serde_json::to_vec_pretty(&value).expect("normalized report should serialize");
@@ -521,6 +522,31 @@ fn assert_stable(case: &str, first: &Output, second: &Output) {
     }
 }
 
+/// Two invocations that have to produce the same report, compared after the
+/// resolved markers are removed.
+///
+/// A cached run and a `--no-cache` run describe different setups, and the
+/// candidate's `setup` block says so - that is what it is for. The report they
+/// produce is still one document, and that is what this asserts.
+fn assert_stable_report(case: &str, first: &Output, second: &Output) {
+    let expected = normalize_report(&first.stdout)
+        .unwrap_or_else(|error| panic!("{case}: first document is invalid: {error}"));
+    let actual = normalize_report(&second.stdout)
+        .unwrap_or_else(|error| panic!("{case}: second document is invalid: {error}"));
+    if expected.0 != actual.0 {
+        fail_comparison(
+            case,
+            &first.stdout,
+            &second.stdout,
+            &expected.1,
+            &actual.1,
+            &second.stderr,
+            second.status.code(),
+            "the two invocations report different documents",
+        );
+    }
+}
+
 fn normalize_help(bytes: &[u8], binary_name: &str) -> Result<Vec<u8>, String> {
     let normalized = normalize_text_line_endings(bytes);
     let text = std::str::from_utf8(&normalized).map_err(|error| error.to_string())?;
@@ -574,9 +600,12 @@ fn assert_help(
         );
     }
 
+    // The candidate's help may gain approved lines - the `review` subcommand and
+    // the persistence controls - but it may not drop or reword one the frozen
+    // surface documents. Every golden line must still be there, in order.
     let candidate_help = normalize_help(&candidate.stdout, binary_name)
         .unwrap_or_else(|error| panic!("{case}: invalid candidate help: {error}"));
-    if candidate_help != golden {
+    if let Some(dropped) = first_dropped_line(&golden, &candidate_help) {
         fail_comparison(
             &format!("{case}-candidate"),
             &golden,
@@ -585,9 +614,25 @@ fn assert_help(
             &candidate_help,
             &candidate.stderr,
             candidate.status.code(),
-            "candidate help differs from the frozen v1 surface",
+            &format!("candidate help no longer documents {dropped:?}"),
         );
     }
+}
+
+/// The first line of `golden` that `candidate` does not carry, in order.
+///
+/// Additions are allowed anywhere; a removal, a reordering or a reworded line is
+/// not, and this names the exact line that went missing.
+fn first_dropped_line(golden: &[u8], candidate: &[u8]) -> Option<String> {
+    let golden = String::from_utf8_lossy(golden);
+    let candidate = String::from_utf8_lossy(candidate);
+    let mut remaining = candidate.split('\n');
+    for line in golden.split('\n') {
+        if !remaining.any(|actual| actual == line) {
+            return Some(line.to_owned());
+        }
+    }
+    None
 }
 
 fn files_under(root: &Path) -> Vec<PathBuf> {
@@ -1081,7 +1126,7 @@ fn check_cache_modes(oracle: &Path, reference: &ReferenceBuild) {
             1,
             normalize_report,
         );
-        assert_stable(&format!("cache-{name}-disabled-output"), &cold, &uncached);
+        assert_stable_report(&format!("cache-{name}-disabled-output"), &cold, &uncached);
         assert!(
             files_under(no_cache.path()).is_empty(),
             "{name} --no-cache wrote cache files"
