@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import ntpath
 import os
 import platform
 import secrets
@@ -96,6 +97,25 @@ def findings_count(document: str) -> int:
     return len(findings)
 
 
+def check_member_path(name: str) -> str:
+    """Reject any member name that could write outside the extraction directory.
+
+    The contract is seven flat regular files, so anything absolute, nested, or
+    containing `..` is refused before a single byte is written.
+    """
+    normalized = name.replace("\\", "/")
+    if not normalized or normalized in (".", ".."):
+        raise GateError(f"archive holds an unusable member name: {name!r}")
+    if normalized.startswith("/") or ntpath.splitdrive(normalized)[0]:
+        raise GateError(f"archive holds an absolute member path: {name!r}")
+    parts = normalized.split("/")
+    if ".." in parts:
+        raise GateError(f"archive holds a traversing member path: {name!r}")
+    if len(parts) > 1:
+        raise GateError(f"archive holds a nested member path: {name!r}")
+    return normalized
+
+
 def extract(archive: Path, destination: Path) -> list[str]:
     """Extract into a fresh destination and return the member names."""
     if destination.exists():
@@ -103,15 +123,29 @@ def extract(archive: Path, destination: Path) -> list[str]:
     destination.mkdir(parents=True)
     if archive.name.endswith(".zip"):
         with zipfile.ZipFile(archive) as bundle:
-            names = bundle.namelist()
+            entries = bundle.infolist()
+            names = []
+            for entry in entries:
+                names.append(check_member_path(entry.filename))
+                if entry.is_dir():
+                    raise GateError(f"archive member {entry.filename!r} is a directory")
+                if (entry.external_attr >> 16) & 0o170000 == 0o120000:
+                    raise GateError(f"archive member {entry.filename!r} is a symbolic link")
             bundle.extractall(destination)
         return names
     with tarfile.open(archive, "r:gz") as bundle:
-        names = bundle.getnames()
+        members = bundle.getmembers()
+        names = []
+        for member in members:
+            names.append(check_member_path(member.name))
+            if not member.isfile():
+                raise GateError(f"archive member {member.name!r} is not a regular file")
         try:
-            bundle.extractall(destination, filter="data")
-        except TypeError:  # Python without the extraction filter argument.
-            bundle.extractall(destination)
+            bundle.extractall(destination, members=members, filter="data")
+        except TypeError:
+            # Python without the extraction filter. The checks above already
+            # refused absolute paths, traversal, links, devices and directories.
+            bundle.extractall(destination, members=members)
     return names
 
 
