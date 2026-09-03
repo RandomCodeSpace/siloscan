@@ -14,6 +14,7 @@ import json
 import sys
 import tarfile
 import tempfile
+import zipfile
 import unittest
 from pathlib import Path
 
@@ -114,6 +115,80 @@ class ArchiveGateTest(unittest.TestCase):
         members = [f"siloscan/{name}" for name in archive_gate.expected_members("")]
         with self.assertRaises(archive_gate.GateError):
             archive_gate.check_members(members, "")
+
+    def test_flat_member_names_are_accepted(self):
+        self.assertEqual(archive_gate.check_member_path("siloscan"), "siloscan")
+        self.assertEqual(archive_gate.check_member_path("README.md"), "README.md")
+
+    def test_escaping_member_names_are_refused(self):
+        for name in (
+            "../evil",
+            "a/../../evil",
+            "/etc/evil",
+            "C:/windows/evil",
+            "nested/evil",
+            "..",
+            "",
+        ):
+            with self.subTest(name=name), self.assertRaises(archive_gate.GateError):
+                archive_gate.check_member_path(name)
+
+    def _extract(self, archive: Path):
+        with tempfile.TemporaryDirectory() as directory:
+            return archive_gate.extract(archive, Path(directory) / "out")
+
+    def test_traversing_tar_member_is_refused_before_extraction(self):
+        with tempfile.TemporaryDirectory() as directory:
+            archive = Path(directory) / "evil.tar.gz"
+            with tarfile.open(archive, "w:gz") as bundle:
+                info = tarfile.TarInfo("../evil")
+                info.size = 0
+                bundle.addfile(info, io.BytesIO(b""))
+            with self.assertRaises(archive_gate.GateError):
+                self._extract(archive)
+            self.assertFalse((Path(directory).parent / "evil").exists())
+
+    def test_absolute_tar_member_is_refused(self):
+        with tempfile.TemporaryDirectory() as directory:
+            archive = Path(directory) / "absolute.tar.gz"
+            with tarfile.open(archive, "w:gz") as bundle:
+                info = tarfile.TarInfo("/tmp/evil")
+                info.size = 0
+                bundle.addfile(info, io.BytesIO(b""))
+            with self.assertRaises(archive_gate.GateError):
+                self._extract(archive)
+
+    def test_tar_symlink_member_is_refused(self):
+        with tempfile.TemporaryDirectory() as directory:
+            archive = Path(directory) / "link.tar.gz"
+            with tarfile.open(archive, "w:gz") as bundle:
+                info = tarfile.TarInfo("siloscan")
+                info.type = tarfile.SYMTYPE
+                info.linkname = "/etc/passwd"
+                bundle.addfile(info)
+            with self.assertRaises(archive_gate.GateError):
+                self._extract(archive)
+
+    def test_traversing_zip_member_is_refused(self):
+        with tempfile.TemporaryDirectory() as directory:
+            archive = Path(directory) / "evil.zip"
+            with zipfile.ZipFile(archive, "w") as bundle:
+                bundle.writestr("../evil", "payload")
+            with self.assertRaises(archive_gate.GateError):
+                self._extract(archive)
+
+    def test_a_contract_archive_extracts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            archive = root / "good.tar.gz"
+            with tarfile.open(archive, "w:gz") as bundle:
+                for name in sorted(archive_gate.expected_members("")):
+                    info = tarfile.TarInfo(name)
+                    info.size = 1
+                    bundle.addfile(info, io.BytesIO(b"x"))
+            names = archive_gate.extract(archive, root / "out")
+            archive_gate.check_members(names, "")
+            self.assertTrue((root / "out" / "siloscan").is_file())
 
     def test_findings_are_counted(self):
         document = json.dumps({"findings": [{"rule_id": "r"}, {"rule_id": "s"}]})
@@ -274,6 +349,82 @@ class CandidateManifestTest(unittest.TestCase):
             )
             with self.assertRaises(candidate_manifest.ManifestError):
                 candidate_manifest.package_records(crates, SHA, records)
+
+    def test_crate_filenames_split_on_the_version(self):
+        self.assertEqual(
+            candidate_manifest.split_crate_filename("siloscan-2.0.0"),
+            ("siloscan", "2.0.0"),
+        )
+        self.assertEqual(
+            candidate_manifest.split_crate_filename("siloscan-core-2.0.0"),
+            ("siloscan-core", "2.0.0"),
+        )
+        self.assertEqual(
+            candidate_manifest.split_crate_filename("siloscan-2.0.0-rc.1"),
+            ("siloscan", "2.0.0-rc.1"),
+        )
+        self.assertEqual(
+            candidate_manifest.split_crate_filename("siloscan-tui-2.0.0-rc.1"),
+            ("siloscan-tui", "2.0.0-rc.1"),
+        )
+
+    def test_a_filename_without_a_version_fails(self):
+        with self.assertRaises(candidate_manifest.ManifestError):
+            candidate_manifest.split_crate_filename("siloscan")
+
+    def test_prerelease_crate_records_keep_the_full_version(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            crates, records = root / "package", root / "records"
+            crates.mkdir()
+            (crates / "siloscan-core-2.0.0-rc.1.crate").write_bytes(
+                crate_bytes("siloscan-core", "2.0.0-rc.1", SHA)
+            )
+            candidate_manifest.package_records(crates, SHA, records)
+            loaded = candidate_manifest.load_records(records)
+            self.assertEqual(loaded[0]["name"], "siloscan-core")
+            self.assertEqual(loaded[0]["version"], "2.0.0-rc.1")
+
+    def test_a_matching_candidate_run_compares_clean(self):
+        manifest = self.build(complete_records())
+        other_run = dict(manifest, workflow_run={"id": "999"})
+        self.assertEqual(candidate_manifest.compare_manifests(manifest, other_run), [])
+
+    def test_a_candidate_for_another_commit_is_refused(self):
+        manifest = self.build(complete_records())
+        other = dict(manifest, candidate_sha=OTHER_SHA)
+        self.assertTrue(
+            any("qualified" in p for p in candidate_manifest.compare_manifests(other, manifest))
+        )
+
+    def test_a_candidate_at_another_version_is_refused(self):
+        manifest = self.build(complete_records())
+        other = dict(manifest, workspace_version="1.5.1")
+        self.assertTrue(candidate_manifest.compare_manifests(other, manifest))
+
+    def test_a_different_packaged_crate_is_refused(self):
+        manifest = self.build(complete_records())
+        packages = [dict(p) for p in manifest["packages"]]
+        packages[0]["sha256"] = "f" * 64
+        other = dict(manifest, packages=packages)
+        self.assertTrue(
+            any("packages differ" in p for p in candidate_manifest.compare_manifests(other, manifest))
+        )
+
+    def test_a_missing_archive_is_refused(self):
+        manifest = self.build(complete_records())
+        other = dict(manifest, archives=manifest["archives"][:2])
+        self.assertTrue(
+            any("archives differ" in p for p in candidate_manifest.compare_manifests(other, manifest))
+        )
+
+    def test_rebuilt_archive_bytes_do_not_break_the_comparison(self):
+        # Archives embed build mtimes, so two runs of one commit differ in
+        # digest; the comparison must key on target and name instead.
+        manifest = self.build(complete_records())
+        archives = [dict(a, sha256="e" * 64) for a in manifest["archives"]]
+        rebuilt = dict(manifest, archives=archives)
+        self.assertEqual(candidate_manifest.compare_manifests(manifest, rebuilt), [])
 
     def test_downloaded_assets_must_match_the_manifest(self):
         with tempfile.TemporaryDirectory() as directory:

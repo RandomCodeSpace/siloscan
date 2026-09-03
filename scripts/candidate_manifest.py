@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -111,7 +112,7 @@ def package_records(crate_dir: Path, sha: str, out_dir: Path) -> list[Path]:
     out_dir.mkdir(parents=True, exist_ok=True)
     for crate in crates:
         data = crate.read_bytes()
-        name, _, version = crate.stem.rpartition("-")
+        name, version = split_crate_filename(crate.stem)
         vcs_sha = vcs_sha_from_crate(data, name, version)
         if vcs_sha != sha:
             raise ManifestError(
@@ -131,6 +132,48 @@ def package_records(crate_dir: Path, sha: str, out_dir: Path) -> list[Path]:
         print(f"{crate.name}: sha256 {record['sha256']}, commit {vcs_sha}")
         written.append(destination)
     return written
+
+
+def split_crate_filename(stem: str) -> tuple[str, str]:
+    """Split `siloscan-2.0.0-rc.1` into its crate name and version.
+
+    A crate name may contain hyphens and so may a pre-release version, so the
+    split is at the first hyphen that starts the version number.
+    """
+    match = re.fullmatch(r"(?P<name>.+?)-(?P<version>\d[^-]*(?:-.*)?)", stem)
+    if not match:
+        raise ManifestError(f"cannot read a crate name and version from {stem!r}")
+    return match.group("name"), match.group("version")
+
+
+def compare_manifests(candidate: dict, release: dict) -> list[str]:
+    """Every way a tagged build can fail to be the qualified candidate.
+
+    Archive digests are deliberately not compared: a `.tar.gz` records the
+    mtimes of freshly built binaries, so two runs of the same commit produce
+    different archive bytes. `cargo package` output is reproducible for a
+    commit, so the packaged crates are compared exactly.
+    """
+    problems = []
+    if candidate["candidate_sha"] != release["candidate_sha"]:
+        problems.append(
+            f"candidate run qualified {candidate['candidate_sha']}, "
+            f"this run built {release['candidate_sha']}"
+        )
+    if candidate["workspace_version"] != release["workspace_version"]:
+        problems.append(
+            f"candidate run qualified version {candidate['workspace_version']}, "
+            f"this run built {release['workspace_version']}"
+        )
+    for field, key in (("archives", "name"), ("packages", "sha256")):
+        left = {(entry.get("target") or entry.get("name"), entry[key]) for entry in candidate[field]}
+        right = {(entry.get("target") or entry.get("name"), entry[key]) for entry in release[field]}
+        if left != right:
+            problems.append(
+                f"{field} differ from the qualified candidate: "
+                f"only in candidate={sorted(left - right)} only here={sorted(right - left)}"
+            )
+    return problems
 
 
 def check_records(records: list[dict], sha: str) -> None:
@@ -188,10 +231,23 @@ def main(argv: list[str] | None = None) -> int:
     check.add_argument("--records-dir", required=True, type=Path)
     check.add_argument("--sha", required=True)
 
+    compare = sub.add_parser("compare", help="match this run against a qualified candidate")
+    compare.add_argument("--candidate", required=True, type=Path)
+    compare.add_argument("--release", required=True, type=Path)
+
     args = parser.parse_args(argv)
 
     if args.command == "check-records":
         check_records(load_records(args.records_dir), args.sha)
+        return 0
+
+    if args.command == "compare":
+        problems = compare_manifests(
+            json.loads(args.candidate.read_text()), json.loads(args.release.read_text())
+        )
+        if problems:
+            raise ManifestError("; ".join(problems))
+        print("this run matches the qualified candidate manifest")
         return 0
 
     if args.command == "packages":
