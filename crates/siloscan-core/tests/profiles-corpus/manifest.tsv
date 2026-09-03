@@ -13,3 +13,17 @@
 # tree/ is byte-identical to the rule matrix's positive_example or
 # negative_example.
 path	line	expect	justification
+java/positive.java	3	reliability.java.self-comparison	both operands are the identical identifier, so the comparison is constant
+java/positive.java	8	reliability.java.string-literal-identity	`==` against a string literal compares references, not contents
+java/positive.java	13	reliability.java.identical-if-branches	both arms are the byte-identical block `{ return 1; }`
+java/negative.java	3	NONE	the operands are different identifiers, which is an ordinary comparison
+java/negative.java	8	NONE	`equals` compares contents, which is the correct spelling
+java/negative.java	13	NONE	the two arms return different values, so the condition decides something
+java/metric-over.java	2	maintainability.java.function-length	the method spans 121 lines, one over the profile's 120
+java/metric-over.java	125	maintainability.java.parameter-count	the method takes 8 parameters, one over the profile's 7
+java/metric-over.java	130	maintainability.java.nesting-depth	six nested if statements, one over the profile's 5
+java/metric-over.java	147	maintainability.java.cyclomatic-complexity	25 branches plus the entry path is 26, one over the profile's 25
+java/metric-under.java	2	NONE	the method spans exactly 120 lines, which is the profile's limit and not over it
+java/metric-under.java	124	NONE	seven parameters is exactly the profile's limit
+java/metric-under.java	129	NONE	five nested if statements is exactly the profile's limit
+java/metric-under.java	144	NONE	24 branches plus the entry path is 25, exactly the profile's limit

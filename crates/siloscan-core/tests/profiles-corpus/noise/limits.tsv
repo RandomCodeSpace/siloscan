@@ -26,3 +26,10 @@
 # and justifications stay in place, and the document's @N is bumped because a
 # rule id disappeared.
 rule_id	max_corpus	max_per_kloc	measured_at	ticket
+maintainability.java.cyclomatic-complexity	0	0.131858	2026-09-03	#78 P4b: max of commons-lang 0.1319, gson 0.1070, guava 0.0195
+maintainability.java.function-length	0	0.213002	2026-09-03	#78 P4b: max of commons-lang 0.2130, gson 0.0803, guava 0.0995
+maintainability.java.nesting-depth	0	0.347845	2026-09-03	#78 P4b: max of commons-lang 0.1319, gson 0.3478, guava 0.1132
+maintainability.java.parameter-count	0	0.226361	2026-09-03	#78 P4b: max of commons-lang 0.0203, gson 0.0000, guava 0.2264
+reliability.java.identical-if-branches	0	0.003903	2026-09-03	#78 P4b: max of commons-lang 0.0000, gson 0.0000, guava 0.0039
+reliability.java.self-comparison	0	0.000000	2026-09-03	#78 P4b: no finding on commons-lang, gson or guava
+reliability.java.string-literal-identity	0	0.000000	2026-09-03	#78 P4b: no finding on commons-lang, gson or guava
