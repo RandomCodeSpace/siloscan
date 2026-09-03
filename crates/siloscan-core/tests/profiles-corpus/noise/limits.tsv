@@ -81,3 +81,14 @@ maintainability.rust.function-length	0	0.7206	2026-09-03	#78 P4a
 maintainability.rust.parameter-count	0	0.0118	2026-09-03	#78 P4a
 maintainability.rust.nesting-depth	0	0.0901	2026-09-03	#78 P4a
 maintainability.rust.cyclomatic-complexity	0	0.1201	2026-09-03	#78 P4a
+# go, measured against cobra 1.10.2 and gin 1.12.0, with
+# maintainability.go.function-length raised once from 120 to 150 lines.
+reliability.go.self-comparison	0	0.0000	2026-09-03	#78 P4a
+reliability.go.self-assignment	0	0.0000	2026-09-03	#78 P4a
+reliability.go.append-result-discarded	0	0.0000	2026-09-03	#78 P4a
+reliability.go.defer-in-loop	0	0.2391	2026-09-03	#78 P4a
+reliability.go.identical-if-branches	0	0.0000	2026-09-03	#78 P4a
+maintainability.go.function-length	0	0.9561	2026-09-03	#78 P4a
+maintainability.go.parameter-count	0	0.0000	2026-09-03	#78 P4a
+maintainability.go.nesting-depth	0	0.1408	2026-09-03	#78 P4a
+maintainability.go.cyclomatic-complexity	0	0.3518	2026-09-03	#78 P4a

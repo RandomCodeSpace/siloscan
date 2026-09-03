@@ -116,3 +116,22 @@ rust/unimplemented-marker-positive.rs	2	reliability.rust.unimplemented-marker	to
 rust/unimplemented-marker-negative.rs	2	NONE	the macro is an ordinary one and not a placeholder
 rust/mem-forget-positive.rs	3	reliability.rust.mem-forget	the call is the mem::forget path, which skips the destructor
 rust/mem-forget-negative.rs	2	NONE	the call drops the value, which runs the destructor the rule is about
+# go
+go/function-length-over.go	3	maintainability.go.function-length	the function is 151 lines, one over the profile's 150
+go/function-length-under.go	3	NONE	the function is 150 lines, which the profile allows
+go/parameter-count-over.go	3	maintainability.go.parameter-count	the function takes 8 parameters, one over the profile's 7
+go/parameter-count-under.go	3	NONE	the function takes 7 parameters, which the profile allows
+go/nesting-depth-over.go	3	maintainability.go.nesting-depth	the loops nest 6 deep, one over the profile's 5
+go/nesting-depth-under.go	3	NONE	the loops nest 5 deep, which the profile allows
+go/cyclomatic-complexity-over.go	3	maintainability.go.cyclomatic-complexity	the decision count is 26, one over the profile's 25
+go/cyclomatic-complexity-under.go	3	NONE	the decision count is 25, which the profile allows
+go/self-comparison-positive.go	4	reliability.go.self-comparison	both operands are the identical identifier, so the comparison cannot decide anything
+go/self-comparison-negative.go	4	NONE	the operands are two different identifiers, which is an ordinary comparison
+go/self-assignment-positive.go	4	reliability.go.self-assignment	the assignment writes the variable back to itself and has no effect
+go/self-assignment-negative.go	4	NONE	the assignment reads a different variable, so it has an effect
+go/append-result-discarded-positive.go	4	reliability.go.append-result-discarded	the append call is an expression statement, so its result is dropped
+go/append-result-discarded-negative.go	4	NONE	the append result is assigned back to the slice
+go/defer-in-loop-positive.go	5	reliability.go.defer-in-loop	the defer sits in a loop body and runs only when the function returns
+go/defer-in-loop-negative.go	5	NONE	the call runs in the loop body rather than being deferred
+go/identical-if-branches-positive.go	4	reliability.go.identical-if-branches	both arms are byte-identical, which is the copy-paste shape the rule owns
+go/identical-if-branches-negative.go	4	NONE	the two arms differ, so the condition decides the value
