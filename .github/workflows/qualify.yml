@@ -1,0 +1,310 @@
+name: Qualify
+
+# Every release gate that creates no public release state: the three native
+# archives, the package and empty-root install gate, and the candidate
+# manifest that binds them all to one commit. candidate.yml calls this before a
+# tag exists and release.yml calls it after tagging, so a tag runs exactly the
+# gates the candidate passed.
+# Takes no input: every job checks out the caller's own GITHUB_SHA. A workflow
+# that could be handed an arbitrary ref would let a fork's code run with this
+# repository's shared build cache.
+on:
+  workflow_call:
+    outputs:
+      version:
+        description: The workspace version the candidate was qualified at.
+        value: ${{ jobs.manifest.outputs.version }}
+
+# Read-only throughout. Nothing here may touch a release, a tag, or a registry.
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  archives:
+    name: Archive gate (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+          - os: macos-latest
+            target: aarch64-apple-darwin
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # Every job in the chain proves for itself that it built this exact commit.
+      - name: Record the candidate identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          head="$(git rev-parse HEAD)"
+          if [ "$head" != "$GITHUB_SHA" ]; then
+            echo "checked out $head, candidate is $GITHUB_SHA" >&2
+            exit 1
+          fi
+          echo "archive gate ${{ matrix.target }} at $head" >> "$GITHUB_STEP_SUMMARY"
+      # The archive name is derived from the workspace version, so candidate and
+      # release runs produce identically named archives from identical sources.
+      - name: Read the workspace version
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(sed -n '/^\[workspace\.package\]/,/^\[/ s/^version = "\(.*\)"$/\1/p' Cargo.toml)"
+          test -n "$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master, 2026-07-16
+        with:
+          toolchain: stable
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - name: Install musl tools
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - name: Build
+        run: cargo build --locked --release --target ${{ matrix.target }} -p siloscan -p siloscan-tui
+      # The archives redistribute the third-party crates statically linked into
+      # the binaries built above, so their license terms have to travel with
+      # them. The file is generated from the resolved dependency graph for this
+      # exact target; a linked crate that yields no license text fails the job.
+      - name: Generate THIRD-PARTY-LICENSES
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          if command -v python3 >/dev/null 2>&1; then
+            python=python3
+          else
+            python=python
+          fi
+          "$python" scripts/third-party-licenses.py \
+            --target "$TARGET" \
+            --package siloscan \
+            --package siloscan-tui \
+            --output "target/$TARGET/release/THIRD-PARTY-LICENSES"
+          test -s "target/$TARGET/release/THIRD-PARTY-LICENSES"
+      - name: Package (unix)
+        if: runner.os != 'Windows'
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          cp LICENSE NOTICE README.md "target/$TARGET/release/"
+          cd "target/$TARGET/release"
+          tar czf "siloscan-v$VERSION-$TARGET.tar.gz" \
+            siloscan ss siloscan-tui LICENSE NOTICE THIRD-PARTY-LICENSES README.md
+      - name: Checksums (unix)
+        if: runner.os != 'Windows'
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          cd "target/$TARGET/release"
+          archive="siloscan-v$VERSION-$TARGET.tar.gz"
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "$archive" > "SHA256SUMS-$TARGET.txt"
+          else
+            shasum -a 256 "$archive" > "SHA256SUMS-$TARGET.txt"
+          fi
+          cat "SHA256SUMS-$TARGET.txt"
+      - name: Package (windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          Copy-Item LICENSE, NOTICE, README.md -Destination "target/$env:TARGET/release/"
+          cd "target/$env:TARGET/release"
+          Compress-Archive -Path siloscan.exe, ss.exe, siloscan-tui.exe, LICENSE, NOTICE, THIRD-PARTY-LICENSES, README.md -DestinationPath "siloscan-v$env:VERSION-$env:TARGET.zip"
+      - name: Checksums (windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          cd "target/$env:TARGET/release"
+          $archive = "siloscan-v$env:VERSION-$env:TARGET.zip"
+          $digest = (Get-FileHash -Algorithm SHA256 -Path $archive).Hash.ToLower()
+          "$digest  $archive" | Out-File -FilePath "SHA256SUMS-$env:TARGET.txt" -Encoding ascii
+          Get-Content "SHA256SUMS-$env:TARGET.txt"
+      # The consumer's view of the archive: verify the sibling checksum, extract
+      # outside target/, assert exactly the seven contract members, run
+      # --version and --help on all three extracted binaries, and scan a
+      # credential generated at runtime with the extracted siloscan.
+      - name: Archive gate
+        shell: bash
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          if command -v python3 >/dev/null 2>&1; then
+            python=python3
+          else
+            python=python
+          fi
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            archive="siloscan-v$VERSION-$TARGET.zip"
+          else
+            archive="siloscan-v$VERSION-$TARGET.tar.gz"
+          fi
+          mkdir -p "$RUNNER_TEMP/records"
+          "$python" scripts/archive_gate.py \
+            --archive "target/$TARGET/release/$archive" \
+            --checksums "target/$TARGET/release/SHA256SUMS-$TARGET.txt" \
+            --extract-root "$RUNNER_TEMP/extracted" \
+            --sha "$GITHUB_SHA" \
+            --target "$TARGET" \
+            --record "$RUNNER_TEMP/records/record-archive-$TARGET.json"
+      - name: Stage the archive artifact
+        shell: bash
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/artifact"
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            archive="siloscan-v$VERSION-$TARGET.zip"
+          else
+            archive="siloscan-v$VERSION-$TARGET.tar.gz"
+          fi
+          cp "target/$TARGET/release/$archive" "$RUNNER_TEMP/artifact/"
+          cp "target/$TARGET/release/SHA256SUMS-$TARGET.txt" "$RUNNER_TEMP/artifact/"
+          cp "$RUNNER_TEMP/records/record-archive-$TARGET.json" "$RUNNER_TEMP/artifact/"
+          ls -l "$RUNNER_TEMP/artifact"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: archive-${{ matrix.target }}
+          path: ${{ runner.temp }}/artifact
+          if-no-files-found: error
+          overwrite: true
+
+  package:
+    name: Package and empty-root install
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Record the candidate identity
+        run: |
+          set -euo pipefail
+          head="$(git rev-parse HEAD)"
+          if [ "$head" != "$GITHUB_SHA" ]; then
+            echo "checked out $head, candidate is $GITHUB_SHA" >&2
+            exit 1
+          fi
+          echo "package gate at $head" >> "$GITHUB_STEP_SUMMARY"
+      - name: Read the workspace version
+        id: meta
+        run: |
+          set -euo pipefail
+          version="$(sed -n '/^\[workspace\.package\]/,/^\[/ s/^version = "\(.*\)"$/\1/p' Cargo.toml)"
+          test -n "$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master, 2026-07-16
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      # The exact bytes the publish jobs later compare against the registry.
+      - name: Package the workspace
+        run: cargo package --locked --workspace
+      - name: Record the packaged crates
+        run: |
+          set -euo pipefail
+          python3 scripts/candidate_manifest.py packages \
+            --crate-dir target/package \
+            --sha "$GITHUB_SHA" \
+            --out-dir "$RUNNER_TEMP/records"
+      # One CLI install into an empty root has to yield both aliases.
+      - name: Install into an empty root
+        run: |
+          set -euo pipefail
+          root="$RUNNER_TEMP/install-root"
+          rm -rf "$root"
+          cargo install --locked --path crates/siloscan --root "$root"
+          ls -l "$root/bin"
+          test -x "$root/bin/siloscan"
+          test -x "$root/bin/ss"
+          "$root/bin/siloscan" --version
+          "$root/bin/ss" --version
+      - name: Stage the package artifact
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/artifact"
+          cp target/package/*.crate "$RUNNER_TEMP/artifact/"
+          cp "$RUNNER_TEMP"/records/record-package-*.json "$RUNNER_TEMP/artifact/"
+          ls -l "$RUNNER_TEMP/artifact"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: packages
+          path: ${{ runner.temp }}/artifact
+          if-no-files-found: error
+          overwrite: true
+
+  manifest:
+    name: Candidate manifest
+    runs-on: ubuntu-latest
+    needs: [archives, package]
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Read the workspace version
+        id: meta
+        run: |
+          set -euo pipefail
+          head="$(git rev-parse HEAD)"
+          if [ "$head" != "$GITHUB_SHA" ]; then
+            echo "checked out $head, candidate is $GITHUB_SHA" >&2
+            exit 1
+          fi
+          version="$(sed -n '/^\[workspace\.package\]/,/^\[/ s/^version = "\(.*\)"$/\1/p' Cargo.toml)"
+          test -n "$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          path: ${{ runner.temp }}/records
+      # Fails unless every archive and packaged crate names this one commit.
+      - name: Build the candidate manifest
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          set -euo pipefail
+          python3 scripts/candidate_manifest.py build \
+            --records-dir "$RUNNER_TEMP/records" \
+            --sha "$GITHUB_SHA" \
+            --version "$VERSION" \
+            --run-id "$GITHUB_RUN_ID" \
+            --run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --repository "$GITHUB_REPOSITORY" \
+            --output "$RUNNER_TEMP/candidate-manifest.json"
+          {
+            echo '### Candidate manifest'
+            echo '```json'
+            cat "$RUNNER_TEMP/candidate-manifest.json"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      # A workflow artifact only. The manifest is never committed.
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: candidate-manifest
+          path: ${{ runner.temp }}/candidate-manifest.json
+          if-no-files-found: error
+          overwrite: true
