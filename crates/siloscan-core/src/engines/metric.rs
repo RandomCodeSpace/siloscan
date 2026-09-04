@@ -76,9 +76,11 @@
 //!   the same code.
 //! - A function-like node that is another function-like node's `body` is not a
 //!   unit of its own. That is Ruby's `->() { }`, whose body is itself a
-//!   `block`; see [`is_unit`].
+//!   `block`; see [`measure_tree`].
 
-use tree_sitter::{Node, Tree};
+use std::num::NonZeroU16;
+
+use tree_sitter::{Language, Node, Tree};
 
 use super::{LineIndex, Occurrences, applies};
 use crate::findings::{Finding, fingerprint};
@@ -451,6 +453,7 @@ pub fn has_kinds(language: &str) -> bool {
 }
 
 /// One function-like node's four measures and the span a finding reports on.
+#[cfg_attr(test, derive(Debug, PartialEq, Eq))]
 struct Measured {
     /// Byte range of the name node, or of the first token when there is none.
     start: usize,
@@ -548,102 +551,175 @@ pub fn scan_file(
     hits.into_iter().map(|(_, finding)| finding).collect()
 }
 
-/// Measure every function-like node in the tree, in start-offset order.
-///
-/// The walk is an explicit stack rather than recursion: a source file's tree is
-/// as deep as its author made it, and a scanner must not overflow on one.
-fn measure_tree(tree: &Tree, kinds: &Kinds) -> Vec<Measured> {
-    let mut out = Vec::new();
-    let mut stack = vec![tree.root_node()];
-    let mut cursor = tree.walk();
-
-    while let Some(node) = stack.pop() {
-        if is_unit(node, kinds) {
-            out.push(measure_function(node, kinds));
-        }
-        stack.extend(node.named_children(&mut cursor));
-    }
-
-    out.sort_by_key(|measured| measured.start);
-    out
+/// What one node of the walk leaves behind for its children.
+#[derive(Clone, Copy)]
+struct Level {
+    /// Nesting depth of this node, counted from the innermost open unit. A
+    /// unit's own node is depth 0: its body is not nesting.
+    nesting: u32,
+    /// This node is function-like, so a `body` child of it is not a unit.
+    function: bool,
+    /// This node is the language's binary node inside an open unit, so its
+    /// `operator` child decides whether it branches.
+    binary: bool,
+    /// This node opened a unit, which leaving it closes again.
+    opened: bool,
 }
 
-fn measure_function(node: Node<'_>, kinds: &Kinds) -> Measured {
-    let report = name_node(node).unwrap_or_else(|| first_token(node));
-    let range = report.byte_range();
+/// Measure every function-like node in the tree, in start-offset order.
+///
+/// One [`TreeCursor`](tree_sitter::TreeCursor) makes one depth-first pass and
+/// computes all four measures on the way down. A stack of open units carries
+/// the counters, so every node is attributed to the innermost unit that
+/// encloses it and a nested function never inflates its parent: the moment a
+/// nested unit opens, the parent stops being credited, and it resumes when that
+/// unit closes.
+///
+/// A function-like node is a unit of its own except when it is another
+/// function-like node's `body`. That case is Ruby's, where a lambda's body is
+/// itself a `block` or a `do_block`: measuring both would leave the `lambda`
+/// unit trivial and report a long lambda twice, once on `->` and once on `{`.
+/// Folding the body into the lambda puts one finding on the `lambda` node,
+/// whose `lambda_parameters` are the parameters a reader would name. No other
+/// grammar gives a function-like node for a body.
+///
+/// The walk is iterative rather than recursive for the reason it always was: a
+/// source file's tree is as deep as its author made it, and a scanner must not
+/// overflow on one.
+fn measure_tree(tree: &Tree, kinds: &Kinds) -> Vec<Measured> {
+    let ids = Ids::resolve(&tree.language(), kinds);
 
-    let mut branches = 0u32;
-    let mut depth = 0u32;
-    // Depth of the function node itself is 0: its body is not nesting.
-    let mut stack = vec![(node, 0u32)];
-    let mut cursor = node.walk();
+    let mut out: Vec<Measured> = Vec::new();
+    let mut cursor = tree.walk();
+    // One entry per ancestor of the node being visited, innermost last.
+    let mut levels: Vec<Level> = Vec::new();
+    // Slot in `out` of each open unit, innermost last.
+    let mut open: Vec<usize> = Vec::new();
 
-    while let Some((current, current_depth)) = stack.pop() {
-        for child in current.named_children(&mut cursor) {
-            // A nested function is its own unit and is measured on its own.
-            if is_unit(child, kinds) {
-                continue;
+    loop {
+        let node = cursor.node();
+        let kind = node.kind_id();
+        let named = node.is_named();
+        let parent = levels.last().copied();
+        let mut level = Level {
+            nesting: parent.map_or(0, |above| above.nesting),
+            function: ids.functions.contains(&kind),
+            binary: false,
+            opened: false,
+        };
+
+        if level.function
+            // The cursor already knows which field it descended through, so
+            // the body test asks it rather than asking the parent for its
+            // `body` child.
+            && !(parent.is_some_and(|above| above.function)
+                && ids.body.is_some()
+                && cursor.field_id() == ids.body)
+        {
+            out.push(open_unit(node, kinds));
+            open.push(out.len() - 1);
+            level.opened = true;
+            level.nesting = 0;
+        } else if let Some(&slot) = open.last() {
+            if ids.nesting.contains(&kind) {
+                level.nesting += 1;
+                out[slot].depth = out[slot].depth.max(level.nesting);
             }
-            if is_branch(child, kinds) {
-                branches += 1;
+            if ids.branches.contains(&kind) {
+                out[slot].complexity += 1;
+            } else if kind == ids.binary {
+                level.binary = true;
+            } else if parent.is_some_and(|above| above.binary)
+                && ids.short_circuit.contains(&kind)
+                && ids.operator.is_some()
+                && cursor.field_id() == ids.operator
+            {
+                // The operator is an anonymous node in all ten grammars, and
+                // counting it here, on the way past, is what spares every
+                // binary node a field lookup of its own.
+                out[slot].complexity += 1;
             }
-            let child_depth = match kinds.nesting.contains(&child.kind()) {
-                true => {
-                    let deeper = current_depth + 1;
-                    depth = depth.max(deeper);
-                    deeper
-                }
-                false => current_depth,
-            };
-            stack.push((child, child_depth));
+        }
+
+        levels.push(level);
+        // Into named nodes only: an anonymous node is a token, and the walk
+        // this one replaced never looked inside one either.
+        if named && cursor.goto_first_child() {
+            continue;
+        }
+        loop {
+            let left = levels.pop().expect("one level per visited node");
+            if left.opened {
+                open.pop();
+            }
+            if cursor.goto_next_sibling() {
+                break;
+            }
+            if !cursor.goto_parent() {
+                out.sort_by_key(|measured| measured.start);
+                return out;
+            }
         }
     }
+}
 
+/// The measures a unit gets on entry: the two that are a lookup on the function
+/// node rather than a count over its subtree.
+fn open_unit(node: Node<'_>, kinds: &Kinds) -> Measured {
+    let report = name_node(node).unwrap_or_else(|| first_token(node));
+    let range = report.byte_range();
     Measured {
         start: range.start,
         end: range.end,
         length: (node.end_position().row - node.start_position().row + 1) as u32,
         parameters: parameter_count(node, kinds),
-        depth,
-        complexity: branches + 1,
+        depth: 0,
+        // Cyclomatic complexity is `1 + branches`; the walk adds the branches.
+        complexity: 1,
     }
 }
 
-/// Whether this node is a unit to measure on its own.
+/// One language's [`Kinds`] table resolved against the grammar that parsed the
+/// file: numeric node kinds rather than names.
 ///
-/// Every function-like node is, except one that is another function-like node's
-/// `body`. That case is Ruby's, where a lambda's body is itself a `block` or a
-/// `do_block`: measuring both would leave the `lambda` unit trivial and report
-/// a long lambda twice, once on `->` and once on `{`. Folding the body into the
-/// lambda puts one finding on the `lambda` node, whose `lambda_parameters` are
-/// the parameters a reader would name. No other grammar gives a function-like
-/// node for a body.
-fn is_unit(node: Node<'_>, kinds: &Kinds) -> bool {
-    if !kinds.functions.contains(&node.kind()) {
-        return false;
-    }
-    let Some(parent) = node.parent() else {
-        return true;
-    };
-    if !kinds.functions.contains(&parent.kind()) {
-        return true;
-    }
-    parent
-        .child_by_field_name("body")
-        .is_none_or(|body| body.id() != node.id())
+/// Reading a node's kind as a string costs a scan of that string, and every
+/// column below would then be a run of string comparisons on every node of the
+/// tree. Resolving the tables costs a few dozen lookups per file, once, and
+/// leaves the walk comparing integers. A kind the grammar does not have
+/// resolves to `0`, which is no node's kind, so it never matches — the same as
+/// a name no node carries.
+struct Ids {
+    functions: Vec<u16>,
+    branches: Vec<u16>,
+    nesting: Vec<u16>,
+    short_circuit: Vec<u16>,
+    binary: u16,
+    body: Option<NonZeroU16>,
+    operator: Option<NonZeroU16>,
 }
 
-fn is_branch(node: Node<'_>, kinds: &Kinds) -> bool {
-    if kinds.branches.contains(&node.kind()) {
-        return true;
+impl Ids {
+    fn resolve(language: &Language, kinds: &Kinds) -> Self {
+        let named = |names: &[&str]| {
+            names
+                .iter()
+                .map(|name| language.id_for_node_kind(name, true))
+                .collect()
+        };
+        Self {
+            functions: named(kinds.functions),
+            branches: named(kinds.branches),
+            nesting: named(kinds.nesting),
+            short_circuit: kinds
+                .short_circuit
+                .iter()
+                .map(|operator| language.id_for_node_kind(operator, false))
+                .collect(),
+            binary: language.id_for_node_kind(kinds.binary, true),
+            body: language.field_id_for_name("body"),
+            operator: language.field_id_for_name("operator"),
+        }
     }
-    if node.kind() != kinds.binary {
-        return false;
-    }
-    // The operator is an anonymous node in all ten grammars, so its kind is the
-    // operator's own text.
-    node.child_by_field_name("operator")
-        .is_some_and(|op| kinds.short_circuit.contains(&op.kind()))
 }
 
 /// The function's name node.
@@ -1342,5 +1418,163 @@ mod tests {
         let content = "fn wide(a: bool) -> i32 {\n    if a { 1 } else { 0 }\n}\n";
 
         assert!(scan(&compiled, "src/a.rs", "rust", content).is_empty());
+    }
+
+    /// The traversal [`measure_tree`] replaced, kept as the oracle it is
+    /// checked against: one explicit stack to find the units, and a second one
+    /// per unit to count over its subtree, every child reached through a
+    /// `named_children` iterator that resets a cursor and crosses the FFI
+    /// boundary per child. Every measured number is defined by this code; the
+    /// single-pass walk is only allowed to be faster.
+    fn measure_tree_by_stacks(tree: &Tree, kinds: &Kinds) -> Vec<Measured> {
+        let mut out = Vec::new();
+        let mut stack = vec![tree.root_node()];
+        let mut cursor = tree.walk();
+
+        while let Some(node) = stack.pop() {
+            if is_unit_by_lookup(node, kinds) {
+                out.push(measure_function_by_stacks(node, kinds));
+            }
+            stack.extend(node.named_children(&mut cursor));
+        }
+
+        out.sort_by_key(|measured| measured.start);
+        out
+    }
+
+    fn measure_function_by_stacks(node: Node<'_>, kinds: &Kinds) -> Measured {
+        let report = name_node(node).unwrap_or_else(|| first_token(node));
+        let range = report.byte_range();
+
+        let mut branches = 0u32;
+        let mut depth = 0u32;
+        let mut stack = vec![(node, 0u32)];
+        let mut cursor = node.walk();
+
+        while let Some((current, current_depth)) = stack.pop() {
+            for child in current.named_children(&mut cursor) {
+                if is_unit_by_lookup(child, kinds) {
+                    continue;
+                }
+                if is_branch_by_lookup(child, kinds) {
+                    branches += 1;
+                }
+                let child_depth = match kinds.nesting.contains(&child.kind()) {
+                    true => {
+                        let deeper = current_depth + 1;
+                        depth = depth.max(deeper);
+                        deeper
+                    }
+                    false => current_depth,
+                };
+                stack.push((child, child_depth));
+            }
+        }
+
+        Measured {
+            start: range.start,
+            end: range.end,
+            length: (node.end_position().row - node.start_position().row + 1) as u32,
+            parameters: parameter_count(node, kinds),
+            depth,
+            complexity: branches + 1,
+        }
+    }
+
+    fn is_unit_by_lookup(node: Node<'_>, kinds: &Kinds) -> bool {
+        if !kinds.functions.contains(&node.kind()) {
+            return false;
+        }
+        let Some(parent) = node.parent() else {
+            return true;
+        };
+        if !kinds.functions.contains(&parent.kind()) {
+            return true;
+        }
+        parent
+            .child_by_field_name("body")
+            .is_none_or(|body| body.id() != node.id())
+    }
+
+    fn is_branch_by_lookup(node: Node<'_>, kinds: &Kinds) -> bool {
+        if kinds.branches.contains(&node.kind()) {
+            return true;
+        }
+        if node.kind() != kinds.binary {
+            return false;
+        }
+        node.child_by_field_name("operator")
+            .is_some_and(|op| kinds.short_circuit.contains(&op.kind()))
+    }
+
+    /// A file far larger than any fixture, holding the shapes the two walks
+    /// could disagree about — a closure and a nested `fn` inside a function,
+    /// three levels of nesting, match arms, `&&` and `||` — repeated until the
+    /// tree is deep and wide enough for an attribution mistake to show.
+    fn a_large_rust_source() -> String {
+        let mut source = String::new();
+        for i in 0..64 {
+            source.push_str(&format!(
+                "fn outer_{i}(a: bool, b: Option<u8>, c: &[u8]) -> u32 {{\n    \
+                 let mut total = 0u32;\n    \
+                 if a && b.is_some() || c.is_empty() {{\n        \
+                 for byte in c {{\n            \
+                 while total < 8 {{\n                \
+                 match byte {{\n                    \
+                 0 => total += 1,\n                    \
+                 1 | 2 => total += 2,\n                    \
+                 _ => total += 3,\n                \
+                 }}\n            \
+                 }}\n        \
+                 }}\n    \
+                 }} else if let Some(v) = b {{\n        \
+                 total += u32::from(v);\n    \
+                 }}\n    \
+                 let inner = |x: u32, y: u32| -> u32 {{\n        \
+                 if x > y && y > 0 {{ x - y }} else {{ y - x }}\n    \
+                 }};\n    \
+                 fn helper_{i}(n: u32) -> u32 {{\n        \
+                 if n % 2 == 0 || n % 3 == 0 {{ n / 2 }} else {{ n * 3 + 1 }}\n    \
+                 }}\n    \
+                 total = inner(total, helper_{i}(total));\n    \
+                 total\n\
+                 }}\n"
+            ));
+        }
+        source
+    }
+
+    /// The single-pass walk is a performance change and nothing else: over
+    /// every fixture in this module and over a file far larger than any of
+    /// them, it must produce the same units with the same spans and the same
+    /// four numbers, in the same order, as the stack walk it replaced.
+    #[test]
+    fn the_single_pass_walk_measures_what_the_stack_walk_did() {
+        let enabled = parsers::supported_languages();
+        let mut sources: Vec<(&str, String)> = fixtures()
+            .into_iter()
+            .filter(|fixture| enabled.contains(&fixture.language))
+            .map(|fixture| (fixture.language, fixture.source.to_string()))
+            .collect();
+        if enabled.contains(&"rust") {
+            sources.push(("rust", a_large_rust_source()));
+        }
+        assert!(!sources.is_empty(), "no language of the engine is enabled");
+
+        for (language, source) in sources {
+            let tree = parsers::parse(language, &source).expect("tree");
+            assert!(
+                !tree.root_node().has_error(),
+                "{language}: source does not parse cleanly:\n{source}"
+            );
+            let kinds = kinds(language).expect("table");
+            let single = measure_tree(&tree, kinds);
+            assert!(!single.is_empty(), "{language}: nothing measured");
+            assert_eq!(
+                single,
+                measure_tree_by_stacks(&tree, kinds),
+                "{language}: the two walks disagree"
+            );
+        }
     }
 }
