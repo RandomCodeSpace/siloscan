@@ -32,6 +32,11 @@ siloscan . --format sarif      # GitHub code scanning
 siloscan baseline .            # accept current findings as debt
 ```
 
+A bare `siloscan` also loads the embedded reliability and maintainability
+profiles for the languages it detected, at `warning` and `info` severity;
+`--profiles none` turns them off. An invocation that names a path loads none of
+them unless it asks with `--profiles`.
+
 A bare `siloscan` saves one report per scan scope under this user's platform
 state directory, unless `--no-save` is given. Any invocation that names a path
 or a scan option writes nothing unless it adds `--save` or `--output FILE`.

@@ -38,16 +38,16 @@ siloscan
 ```
 
 ```text
-setup: 1 project unit; languages: rust; rules: default-secrets@1
-capabilities: cache enabled; coverage not configured; embedded-rules enabled; project-detection enabled; repository-config not configured; rule-directories not configured; scan-baseline not configured; symlink-following not configured
+setup: 1 project unit; languages: rust; rules: default-secrets@1, maintainability-rust@1, reliability-rust@1
+capabilities: cache enabled; coverage not configured; embedded-rules enabled; profiles enabled; project-detection enabled; repository-config not configured; rule-directories not configured; scan-baseline not configured; symlink-following not configured
 metrics: 8 lines, 3 code lines, 0 duplicated lines, 0.0% duplication
 Report: /home/you/.local/state/siloscan/reports/<scope-key>/latest.json
 Review: siloscan review
 ```
 
-That run detected the project, scanned it with the embedded secret rules, and
-saved the report it printed. Open that report in the terminal UI, without
-scanning again:
+That run detected the project, scanned it with the embedded secret rules and
+the profiles for the language it detected, and saved the report it printed.
+Open that report in the terminal UI, without scanning again:
 
 ```sh
 siloscan review
@@ -77,7 +77,8 @@ Archives are published for Linux x86-64, macOS arm64, and Windows x86-64.
 
 - detects the project from repository files alone, without running Cargo, npm,
   Go, Maven, or any other project tool, and without touching the network;
-- scans the current directory with the embedded secret pack;
+- scans the current directory with the embedded secret pack and with the
+  embedded profiles for the languages it detected;
 - prints the resolved setup, then the usual findings and metrics;
 - saves one report for that scan scope and names the command that opens it.
 
@@ -109,6 +110,64 @@ and a failed save exits `2` rather than claiming success.
 
 JSON reports now carry `report_kind`, `scope`, `outcome`, and `setup` fields,
 appended after the fields 1.x wrote. Nothing 1.x wrote has changed.
+
+### The profiles a bare run loads
+
+A profile is one rule document shipped inside the binary, for one family and
+one language. There are two families:
+
+- **Reliability** reports code that is likely to be a bug: a comparison whose
+  result is fixed, two branches of an `if` with the same body, a bare `except`
+  that also catches an interrupt, a mutable default argument shared by every
+  call. Every reliability rule is `warning`.
+- **Maintainability** reports code that is hard to work on rather than wrong:
+  a debugging aid left in, a function that is too long, too nested, takes too
+  many parameters, or has too many decision points. Every maintainability rule
+  is `info`.
+
+Nothing in either family is `error`, so no profile finding changes an exit
+status at the default threshold. There are 82 rules in 20 documents, covering
+Rust, Python, JavaScript, TypeScript, Go, Java, C, C++, C#, and Ruby.
+
+A bare run loads the documents for the languages detection reported and no
+others, so a Go-only repository never sees a Ruby rule id. The `rules:` line
+names each one by identity, `reliability-go@1` and `maintainability-go@1`, and
+findings carry rule ids in the same shape: `reliability.go.<rule>`.
+
+Four of the maintainability rules are measurements rather than patterns. Each
+one measures a function and reports the function's name when it is over the
+limit:
+
+| Measure | Limit |
+| --- | --- |
+| Function length, in lines | 150 for C, Go, and JavaScript; 120 for Rust, Python, Java, and C# |
+| Parameter count | 7 |
+| Nesting depth | 5 |
+| Cyclomatic complexity | 30 for C, 25 elsewhere |
+
+The limits are measured, not chosen: each was set on a pinned corpus of real
+repositories so that the rule reports rarely enough to stay readable. C++,
+Ruby, and TypeScript ship no function-length rule for the same reason. The
+JavaScript one excludes test trees by path, because a test suite body is a
+function to the grammar and not to a reader.
+
+Turn them off per run, or leave them off:
+
+| Flag | Effect |
+| --- | --- |
+| `--profiles none` | Load no profile; everything else about the scan is unchanged |
+| `--profiles auto` | Load the profiles for the detected languages, on any run |
+| `--profiles reliability-rust@1,...` | Load exactly these, whatever was detected |
+| `--no-default-rules` | Load no embedded document at all, secret pack included |
+
+Naming a path, or supplying any scan option, does not load profiles unless you
+ask: `siloscan .` and every 1.x command line report exactly what they reported
+before. Supplying `--profiles` is itself a scan option, so `siloscan
+--profiles auto` is an explicit run that also loads them.
+
+Profiles parse the source files they apply to, which a secret scan does not.
+On a cold cache that is the dominant cost of a bare run; a warm cache skips it
+along with the rest of the file.
 
 ## What it finds
 
