@@ -125,8 +125,8 @@ class ParseNoiseSet(unittest.TestCase):
         parsed = profile_noise.parse_noise_set(
             profile_noise.DEFAULT_NOISE_SET.read_text(encoding="utf-8")
         )
-        self.assertEqual(len(parsed), 29)
-        self.assertEqual(len({r.commit for r in parsed}), 29)
+        self.assertEqual(len(parsed), 33)
+        self.assertEqual(len({r.commit for r in parsed}), 33)
         self.assertEqual(len({r.language for r in parsed}), 10)
 
 
