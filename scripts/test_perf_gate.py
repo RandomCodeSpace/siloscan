@@ -3,8 +3,13 @@
 
 Every sample array here is synthetic. No binary is built, no scan is run, and
 nothing touches a cache or state root: this file only exercises the statistics,
-the per-cell verdicts, the twice-rule that ``--compare`` applies, and the lane
-argument table.
+the per-cell verdicts, the twice-rule that ``--compare`` applies, the lane
+argument table, and the two references the lanes are measured against with the
+per-lane budgets that come with them.
+
+The numbers in ``PerLaneVerdicts`` are the ones issue #89 measured, so the
+budget is asserted against what it was declared for rather than against a round
+number invented here.
 """
 
 from __future__ import annotations
@@ -75,26 +80,40 @@ class Statistics(unittest.TestCase):
 
 
 class Verdicts(unittest.TestCase):
+    """The decision is the same shape at every limit; the limit is the argument."""
+
     def test_a_faster_candidate_passes(self):
-        self.assertEqual(perf_gate.verdict(0.80, 0.01, None), "pass")
+        self.assertEqual(perf_gate.verdict(0.80, 0.01, None, 1.05), "pass")
 
     def test_the_ratio_limit_itself_passes(self):
-        self.assertEqual(perf_gate.verdict(1.05, 0.01, None), "pass")
+        self.assertEqual(perf_gate.verdict(1.05, 0.01, None, 1.05), "pass")
 
     def test_a_first_run_above_the_limit_is_only_suspected(self):
-        self.assertEqual(perf_gate.verdict(1.06, 0.01, None), "suspected")
+        self.assertEqual(perf_gate.verdict(1.06, 0.01, None, 1.05), "suspected")
 
     def test_a_rerun_above_the_limit_after_a_clean_first_run_stays_suspected(self):
-        self.assertEqual(perf_gate.verdict(1.30, 0.01, 1.00), "suspected")
+        self.assertEqual(perf_gate.verdict(1.30, 0.01, 1.00, 1.05), "suspected")
 
     def test_above_the_limit_in_both_runs_rejects(self):
-        self.assertEqual(perf_gate.verdict(1.06, 0.01, 1.06), "reject")
+        self.assertEqual(perf_gate.verdict(1.06, 0.01, 1.06, 1.05), "reject")
 
     def test_a_noisy_reference_invalidates_before_any_ratio_is_believed(self):
-        self.assertEqual(perf_gate.verdict(1.50, 0.21, 1.50), "invalid")
+        self.assertEqual(perf_gate.verdict(1.50, 0.21, 1.50, 1.05), "invalid")
 
     def test_the_mad_limit_itself_is_still_valid(self):
-        self.assertEqual(perf_gate.verdict(1.00, 0.20, None), "pass")
+        self.assertEqual(perf_gate.verdict(1.00, 0.20, None, 1.05), "pass")
+
+    def test_a_ratio_that_rejects_an_explicit_lane_passes_a_cold_bare_one(self):
+        # 2.4x is the measured cost of the flip on the cold lane. It is a
+        # rejection against v1.5.1 and inside the budget against v2.0.0.
+        self.assertEqual(perf_gate.verdict(2.40, 0.01, 2.40, 1.05), "reject")
+        self.assertEqual(perf_gate.verdict(2.40, 0.01, 2.40, 2.50), "pass")
+
+    def test_the_twice_rule_reads_the_prior_run_against_the_same_limit(self):
+        # Below the bare wall budget in both runs, so nothing to reject.
+        self.assertEqual(perf_gate.verdict(1.20, 0.01, 1.20, 1.25), "pass")
+        self.assertEqual(perf_gate.verdict(1.30, 0.01, 1.20, 1.25), "suspected")
+        self.assertEqual(perf_gate.verdict(1.30, 0.01, 1.30, 1.25), "reject")
 
 
 class Analysis(unittest.TestCase):
@@ -143,9 +162,9 @@ class Analysis(unittest.TestCase):
         self.assertEqual(
             perf_gate.overall(
                 [
-                    perf_gate.Cell("a", "seconds", 1, 1, 1.0, 0.0, "pass"),
-                    perf_gate.Cell("b", "seconds", 1, 2, 2.0, 0.0, "suspected"),
-                    perf_gate.Cell("c", "seconds", 1, 2, 2.0, 0.0, "reject"),
+                    perf_gate.Cell("a", "seconds", 1, 1, 1.0, 1.05, 0.0, "pass"),
+                    perf_gate.Cell("b", "seconds", 1, 2, 2.0, 1.05, 0.0, "suspected"),
+                    perf_gate.Cell("c", "seconds", 1, 2, 2.0, 1.05, 0.0, "reject"),
                 ]
             ),
             "reject",
@@ -271,30 +290,35 @@ class LaneTable(unittest.TestCase):
             self.assertNotIn("--no-cache", invocation.argv)
             self.assertEqual(invocation.argv[invocation.argv.index("--cache-dir") + 1], "/w/cache")
 
-    def test_every_bare_lane_runs_the_reference_with_no_argument_at_all(self):
+    def test_every_bare_lane_runs_from_inside_the_tree_with_no_path(self):
         for lane in perf_gate.LANES:
             if lane.mode != "bare":
                 continue
             invocation = perf_gate.lane_invocation(lane, "reference", Path("/bin/ref"), ROOTS)
-            self.assertEqual(invocation.argv, ("/bin/ref",), lane.name)
+            self.assertEqual(invocation.argv[0], "/bin/ref", lane.name)
             self.assertEqual(invocation.cwd, ROOTS.tree, lane.name)
 
-    def test_only_the_no_save_lanes_add_a_save_control_and_only_for_the_candidate(self):
-        added = {}
-        for lane in perf_gate.LANES:
-            if lane.mode != "bare":
-                continue
-            invocation = perf_gate.lane_invocation(lane, "candidate", Path("/bin/cand"), ROOTS)
-            added[lane.name] = invocation.argv[1:]
-        self.assertEqual(
-            added,
-            {
-                "bare_no_save_cold": ("--no-save",),
-                "bare_no_save_warm": ("--no-save",),
-                "bare_auto_save_first": (),
-                "bare_auto_save_warm": (),
-            },
-        )
+    def test_only_the_no_save_lanes_add_a_save_control_and_both_sides_get_it(self):
+        # The v2.0.0 reference has --no-save, so the lane is symmetric: a
+        # candidate that skipped a publication the reference performed would be
+        # measured against work it did not do.
+        for role in perf_gate.ROLES:
+            added = {}
+            for lane in perf_gate.LANES:
+                if lane.mode != "bare":
+                    continue
+                invocation = perf_gate.lane_invocation(lane, role, Path("/bin/x"), ROOTS)
+                added[lane.name] = invocation.argv[1:]
+            self.assertEqual(
+                added,
+                {
+                    "bare_no_save_cold": ("--no-save",),
+                    "bare_no_save_warm": ("--no-save",),
+                    "bare_auto_save_first": (),
+                    "bare_auto_save_warm": (),
+                },
+                role,
+            )
 
     def test_a_bare_lane_never_supplies_a_v1_scan_option(self):
         # --cache-dir would make the scan explicit, so bare lanes select their
@@ -320,6 +344,101 @@ class LaneTable(unittest.TestCase):
     def test_an_unknown_role_is_rejected(self):
         with self.assertRaises(ValueError):
             perf_gate.lane_invocation(perf_gate.LANES[0], "control", Path("/bin/x"), ROOTS)
+
+
+class References(unittest.TestCase):
+    """Which reference each lane is measured against, and at what budget."""
+
+    def test_the_explicit_lanes_keep_the_v1_5_1_reference(self):
+        for name in ("explicit_no_cache", "explicit_cold_cache", "explicit_warm_cache"):
+            self.assertEqual(perf_gate.LANES_BY_NAME[name].reference_role, "reference", name)
+
+    def test_every_bare_lane_is_measured_against_the_v2_0_0_reference(self):
+        for lane in perf_gate.LANES:
+            if lane.mode == "bare":
+                self.assertEqual(lane.reference_role, "bare_reference", lane.name)
+
+    def test_the_reference_role_is_one_of_the_two_binaries_the_gate_is_handed(self):
+        for lane in perf_gate.LANES:
+            self.assertIn(lane.reference_role, perf_gate.REFERENCE_ROLES, lane.name)
+
+    def test_the_declared_budget_of_every_lane_and_metric(self):
+        self.assertEqual(
+            {
+                lane.name: {metric: lane.ratio_limit(metric) for metric in perf_gate.METRICS}
+                for lane in perf_gate.LANES
+            },
+            {
+                "explicit_no_cache": {"seconds": 1.05, "peak_rss_kib": 1.05},
+                "explicit_cold_cache": {"seconds": 1.05, "peak_rss_kib": 1.05},
+                "explicit_warm_cache": {"seconds": 1.05, "peak_rss_kib": 1.05},
+                "bare_no_save_cold": {"seconds": 2.50, "peak_rss_kib": 1.10},
+                "bare_no_save_warm": {"seconds": 1.25, "peak_rss_kib": 1.10},
+                "bare_auto_save_first": {"seconds": 1.25, "peak_rss_kib": 1.10},
+                "bare_auto_save_warm": {"seconds": 1.25, "peak_rss_kib": 1.10},
+            },
+        )
+
+    def test_a_lane_that_never_reads_a_warm_cache_carries_the_cold_wall_budget(self):
+        for lane in perf_gate.LANES:
+            if lane.mode != "bare":
+                continue
+            expected = 1.25 if lane.cache == "warm" else 2.50
+            self.assertEqual(lane.ratio_limit("seconds"), expected, lane.name)
+
+    def test_an_unknown_metric_is_rejected(self):
+        with self.assertRaises(ValueError):
+            perf_gate.LANES[0].ratio_limit("watts")
+
+
+class PerLaneVerdicts(unittest.TestCase):
+    """The measured cost of the flip passes the bare lanes and would not pass
+    an explicit one, which is the whole point of the re-base."""
+
+    def cells(self, lane_name: str, reference, candidate) -> list[perf_gate.Cell]:
+        return perf_gate.analyze(
+            raw({lane_name: {"reference": flat(*reference), "candidate": flat(*candidate)}})
+        )
+
+    def test_the_cold_bare_lane_absorbs_the_measured_2_4x_wall_cost(self):
+        time_cell, rss_cell = self.cells("bare_no_save_cold", (1.80, 200_000), (4.32, 205_000))
+        self.assertAlmostEqual(time_cell.ratio, 2.4)
+        self.assertEqual(time_cell.limit, 2.50)
+        self.assertEqual(time_cell.verdict, "pass")
+        self.assertEqual(rss_cell.limit, 1.10)
+        self.assertEqual(rss_cell.verdict, "pass")
+
+    def test_the_same_ratio_on_an_explicit_lane_is_still_suspected(self):
+        time_cell, _ = self.cells("explicit_cold_cache", (1.80, 200_000), (4.32, 205_000))
+        self.assertEqual(time_cell.limit, 1.05)
+        self.assertEqual(time_cell.verdict, "suspected")
+
+    def test_the_warm_bare_lane_holds_the_tighter_wall_budget(self):
+        passing, _ = self.cells("bare_no_save_warm", (0.93, 156_000), (1.08, 158_000))
+        self.assertEqual(passing.limit, 1.25)
+        self.assertEqual(passing.verdict, "pass")
+        failing, _ = self.cells("bare_no_save_warm", (0.93, 156_000), (1.30, 158_000))
+        self.assertEqual(failing.verdict, "suspected")
+
+    def test_the_cold_wall_budget_does_not_loosen_peak_rss(self):
+        _, rss_cell = self.cells("bare_no_save_cold", (1.80, 200_000), (1.80, 240_000))
+        self.assertAlmostEqual(rss_cell.ratio, 1.2)
+        self.assertEqual(rss_cell.limit, 1.10)
+        self.assertEqual(rss_cell.verdict, "suspected")
+
+    def test_the_table_names_the_reference_and_the_limit_of_every_cell(self):
+        document = raw(
+            {
+                lane.name: {"reference": flat(1.0, 100.0), "candidate": flat(1.0, 100.0)}
+                for lane in perf_gate.LANES
+            }
+        )
+        table = perf_gate.format_table(perf_gate.analyze(document))
+        self.assertIn("v1.5.1", table)
+        self.assertIn("v2.0.0", table)
+        self.assertIn("2.50", table)
+        self.assertIn("1.25", table)
+        self.assertIn("1.10", table)
 
 
 class SampleRoots(unittest.TestCase):

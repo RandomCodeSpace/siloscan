@@ -1,9 +1,32 @@
 name: Performance
 
 # The fourteen paired performance cells: seven lanes, wall time and peak RSS
-# each. Both binaries are built here from this one checkout - the candidate
-# from the tree, the pinned v1.5.1 reference from the checkout's own object
-# store - so nothing measured came from a prior run.
+# each. All three binaries are built here from this one checkout - the candidate
+# from the tree, the pinned v1.5.1 and v2.0.0 references from the checkout's own
+# object store - so nothing measured came from a prior run.
+#
+# Two references, because the two invocation shapes are two different
+# contracts. An explicit invocation is a v1 command and is unchanged, so it is
+# still measured against v1.5.1 at 1.05 on both metrics. A bare invocation is
+# the v2 automatic journey, which since 2.1.0 resolves the embedded profiles
+# and parses every source file it admits; v1.5.1 parses nothing on a bare run,
+# so the bare lanes are re-based on v2.0.0 - the last release with profiles off
+# - under the budget issue #89 declared:
+#
+#   lane                  reference  cache   wall   peak RSS
+#   explicit_no_cache     v1.5.1     none    1.05   1.05
+#   explicit_cold_cache   v1.5.1     cold    1.05   1.05
+#   explicit_warm_cache   v1.5.1     warm    1.05   1.05
+#   bare_no_save_cold     v2.0.0     cold    2.50   1.10
+#   bare_no_save_warm     v2.0.0     warm    1.25   1.10
+#   bare_auto_save_first  v2.0.0     warm    1.25   1.10
+#   bare_auto_save_warm   v2.0.0     warm    1.25   1.10
+#
+# The wall budget splits on the cache because a cache hit skips the parse; peak
+# RSS does not, because parsing costs about 2% of it on every lane. Everything
+# else is unchanged: nine ABBA pairs per lane, medians, a reference MAD above
+# 20% invalidates the cell, no cell offsets another, and a cell above its own
+# limit in both runs rejects.
 #
 # CPU expectation: every sample runs on a standard GitHub-hosted ubuntu-latest
 # runner, 4 vCPU x86-64, and both binaries of a lane run on the same runner
@@ -15,9 +38,11 @@ name: Performance
 # would measure a configuration no user runs.
 #
 # No build cache is restored. The candidate build populates the Cargo registry
-# for the reference build, whose lockfile is a strict subset of the candidate's,
-# so the reference still builds `--locked --offline` exactly as the oracle
-# harness builds it.
+# for both reference builds, whose lockfiles are subsets of the candidate's -
+# v2.0.0's resolves to exactly the same package set, differing only in the
+# workspace crates' own versions, which are path dependencies and are never
+# fetched - so both references still build `--locked --offline` exactly as the
+# oracle harness builds the v1.5.1 one.
 #
 # Takes no input: the gate qualifies the caller's own GITHUB_SHA. A workflow
 # that could be handed a ref would let a fork's code run against this
@@ -31,8 +56,11 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   # The pinned v1.5.1 reference, identical to REFERENCE_COMMIT in
-  # crates/siloscan/tests/v2_oracle_harness.rs.
+  # crates/siloscan/tests/v2_oracle_harness.rs. The explicit lanes' comparator.
   REFERENCE_COMMIT: 880d211a463e97eb3c188f957e5592d88f36dcf8
+  # The pinned v2.0.0 reference: the release the bare lanes are re-based on,
+  # the last one whose bare run loads no embedded profile.
+  BARE_REFERENCE_COMMIT: 4e64965370b2689e17bd98863cf602811c3bdef2
 
 jobs:
   gate:
@@ -43,8 +71,9 @@ jobs:
     outputs:
       verdict: ${{ steps.gate.outputs.verdict }}
     steps:
-      # Full history: the reference is built from the pinned v1.5.1 commit in
-      # this checkout's own object store, exactly as the oracle harness does.
+      # Full history: both references are built from their pinned commits in
+      # this checkout's own object store, exactly as the oracle harness builds
+      # the v1.5.1 one.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
@@ -72,6 +101,17 @@ jobs:
             --manifest-path "$RUNNER_TEMP/reference/Cargo.toml" \
             --target-dir "$RUNNER_TEMP/reference-target" \
             -p siloscan --bins
+      - name: Build the pinned v2.0.0 bare reference
+        run: |
+          set -euo pipefail
+          git clone --quiet --no-checkout --local --no-hardlinks --no-tags \
+            "$GITHUB_WORKSPACE/.git" "$RUNNER_TEMP/bare-reference"
+          git -C "$RUNNER_TEMP/bare-reference" checkout --detach --force \
+            "$BARE_REFERENCE_COMMIT"
+          cargo build --locked --offline --release \
+            --manifest-path "$RUNNER_TEMP/bare-reference/Cargo.toml" \
+            --target-dir "$RUNNER_TEMP/bare-reference-target" \
+            -p siloscan --bins
       - name: Generate the scale tree
         run: |
           set -euo pipefail
@@ -87,6 +127,7 @@ jobs:
           set +e
           python3 scripts/perf_gate.py \
             --reference "$RUNNER_TEMP/reference-target/release/siloscan" \
+            --bare-reference "$RUNNER_TEMP/bare-reference-target/release/siloscan" \
             --candidate target/release/siloscan \
             --tree "$RUNNER_TEMP/scale" \
             --rules "$RUNNER_TEMP/scale-rules" \
@@ -116,10 +157,10 @@ jobs:
 
   # A suspected or invalidated first run repeats the complete pair once, on a
   # fresh runner. `--compare` then applies the twice-rule: the same lane and
-  # metric above 1.05 in both runs rejects the candidate, with no waiver and no
-  # offset. A cell that is clean this time passes; a cell that is above the
-  # limit for the first time here is suspected again and still fails the job,
-  # because the plan allows exactly one repeat.
+  # metric above that cell's own limit in both runs rejects the candidate, with
+  # no waiver and no offset. A cell that is clean this time passes; a cell that
+  # is above its limit for the first time here is suspected again and still
+  # fails the job, because the plan allows exactly one repeat.
   rerun:
     name: Fresh-runner rerun
     needs: gate
@@ -158,6 +199,17 @@ jobs:
             --manifest-path "$RUNNER_TEMP/reference/Cargo.toml" \
             --target-dir "$RUNNER_TEMP/reference-target" \
             -p siloscan --bins
+      - name: Build the pinned v2.0.0 bare reference
+        run: |
+          set -euo pipefail
+          git clone --quiet --no-checkout --local --no-hardlinks --no-tags \
+            "$GITHUB_WORKSPACE/.git" "$RUNNER_TEMP/bare-reference"
+          git -C "$RUNNER_TEMP/bare-reference" checkout --detach --force \
+            "$BARE_REFERENCE_COMMIT"
+          cargo build --locked --offline --release \
+            --manifest-path "$RUNNER_TEMP/bare-reference/Cargo.toml" \
+            --target-dir "$RUNNER_TEMP/bare-reference-target" \
+            -p siloscan --bins
       - name: Generate the scale tree
         run: |
           set -euo pipefail
@@ -172,6 +224,7 @@ jobs:
           set +e
           python3 scripts/perf_gate.py \
             --reference "$RUNNER_TEMP/reference-target/release/siloscan" \
+            --bare-reference "$RUNNER_TEMP/bare-reference-target/release/siloscan" \
             --candidate target/release/siloscan \
             --tree "$RUNNER_TEMP/scale" \
             --rules "$RUNNER_TEMP/scale-rules" \
