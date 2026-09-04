@@ -6,9 +6,10 @@
 //!
 //! Shipping a document is adding a file under
 //! `crates/siloscan-core/rules/profiles/` and one [`Profile`] here, and nothing
-//! else. Selection still defaults to [`ProfileSelection::None`], so a scan that
-//! does not ask for a profile loads none of these and every byte of its report
-//! is what it was.
+//! else. Which of them a scan loads is decided by its provenance:
+//! [`ProfileSelection::Auto`] for a bare run, so it reports the profiles of the
+//! languages it detected, and [`ProfileSelection::None`] for an invocation
+//! naming a `PATH`, so every byte of its report is what it was.
 
 /// One embedded profile document.
 ///
