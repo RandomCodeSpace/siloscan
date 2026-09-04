@@ -107,3 +107,65 @@ language, and only `reliability.*` and `maintainability.*` findings are counted:
 `--profiles` adds the profile documents to the secrets pack rather than
 replacing it. Nothing is cloned during `cargo test`: the harness reads the
 limits file and the manifest, and never the network.
+
+## Fixture code from other projects
+
+Permissive fixture snippets sourced from other projects live under `tree/<language>/external/<project>/`
+and keep their original file names. Only snippets under permissive licences qualify: **MIT, Apache-2.0,
+BSD-2-Clause, BSD-3-Clause, and ISC**. GPL, LGPL, AGPL, and source-available licences never qualify.
+
+Each imported snippet is attributed once in the root `NOTICE` with one stanza per source project
+stating the project name, URL, SPDX licence identifier, the path to the licence file in that project,
+the commit hash the snippet was taken from, and the list of files. The stanza format is:
+
+```
+<project>
+<url>
+
+<description of what was taken and how it is used>
+
+  url:       <https://github.com/...>
+  commit:    <hash>
+  licence:   <SPDX>
+  licence file: <path in upstream>
+  files:     <paths in the corpus>
+
+<licence text, if required>
+```
+
+Licences requiring notice preservation—Apache-2.0, BSD-2-Clause, BSD-3-Clause, and MIT—must have
+their full licence text copied into `tests/profiles-corpus/licenses/<project>-<SPDX>.txt`. ISC
+licences also require preservation; check the source for its notice requirement. The licence text
+must be verbatim from the upstream project at the pinned commit.
+
+Before a corpus commit importing new fixtures lands, verify:
+
+1. The NOTICE stanza is present in the root `NOTICE` file
+2. The licence text is present in `tests/profiles-corpus/licenses/` when required
+3. The commit hash is pinned (not a branch or tag)
+4. The file paths listed in the stanza match the `tree/` directory exactly
+5. The manifest rows point only at lines imported from the external source
+6. Modifications beyond truncation are noted in the stanza (none = unchanged)
+
+### Worked example: ruff
+
+The following stanza documents a hypothetical fixture from ruff's test suite:
+
+```
+ruff
+https://github.com/astral-sh/ruff
+
+Test case for Python linting patterns extracted from the ruff test suite.
+The snippet is reproduced verbatim from the upstream test case.
+
+  url:       https://github.com/astral-sh/ruff
+  commit:    ddd97b3cef4a186a934e97a5f74808056d124553
+  licence:   MIT
+  licence file: LICENSE
+  files:     tree/python/external/ruff/test_patterns.py
+
+The MIT licence text follows.
+```
+
+This stanza would be added to the root `NOTICE` and accompanied by the MIT licence text
+from ruff at that commit copied to `tests/profiles-corpus/licenses/ruff-MIT.txt`.

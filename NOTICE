@@ -48,3 +48,14 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+--------------------------------------------------------------------------------
+
+Profile corpus fixtures
+
+The embedded profile test corpus at `crates/siloscan-core/tests/profiles-corpus/`
+may include fixture code from other projects under permissive licences. When
+fixtures are imported, one NOTICE stanza per source project appears below,
+documenting the project, URL, licence, pinned commit, and included files.
+See `crates/siloscan-core/tests/profiles-corpus/README.md` for the convention
+and review checklist.
