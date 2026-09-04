@@ -4,7 +4,7 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## Unreleased
+## 2.1.0 - 2026-09-04
 
 ### Fixed
 
@@ -17,20 +17,58 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- Twenty embedded profile documents, one per (family, language) pair, carrying
+  82 rules across Rust, Python, JavaScript, TypeScript, Go, Java, C, C++, C#,
+  and Ruby. A reliability rule reports code likely to be a bug and is
+  `warning`; a maintainability rule reports code that is hard to work on and is
+  `info`. Nothing in either family is `error`, so no profile finding changes an
+  exit status at the default threshold. Each document is loaded under its own
+  identity - `reliability-rust@1`, `maintainability-go@1` - which is what the
+  `rules:` line and `setup.rule_sources` report and what the cache keys on.
+- `--profiles <auto|none|LIST>` selects them: `auto` loads every document whose
+  language the tree contains, `none` loads none, and a comma-separated list of
+  identities loads exactly those whatever was detected. An identity with no
+  document exits `2` and lists what is available. `--no-default-rules` still
+  disables every embedded document, profiles included.
+- A `profiles` capability on the setup report: `enabled` when a document
+  loaded, `not_configured` when nothing was there to load, and `skipped` when
+  `--no-default-rules` suppressed a selection that was asked for. A run that
+  selects no profile carries no such capability, which is why an explicit
+  invocation's report is still byte-identical to the one v1.5.1 wrote.
 - A `metric:` rule payload, with `measure: function-length | parameter-count |
   nesting-depth | cyclomatic-complexity` and an integer `max`. It reports one
   finding per function-like node whose measure exceeds `max`, on the function's
   name so the fingerprint survives edits to the body, with the measured value
-  and the threshold appended to the rule's message. Ten languages, an optional
-  rule-level `languages` filter, and no rule in the embedded pack uses it yet.
+  and the threshold appended to the rule's message. Ten languages, and an
+  optional rule-level `languages` filter. The maintainability profiles use it:
+  function length 150 for C, Go, and JavaScript and 120 for Rust, Python, Java,
+  and C#; parameter count 7; nesting depth 5; cyclomatic complexity 30 for C
+  and 25 elsewhere.
+- A profile corpus harness, `crates/siloscan-core/tests/profile_corpus.rs`,
+  with a per-language recall floor, a per-rule false-positive limit measured
+  against a pinned noise set, and load rules that refuse an unimplemented
+  predicate or a severity above `warning`. Every threshold above was set from
+  those measurements; 32 candidate rules were removed rather than tuned, each
+  with its reason recorded in its document.
 
 ### Changed
 
+- A bare `siloscan` loads the profiles for the languages it detected. Its
+  `rules:` line now names those identities after `default-secrets@1`, its
+  `capabilities:` line carries `profiles`, and its findings include profile
+  results. An invocation that names a `PATH`, or supplies any scan option, is
+  unchanged and loads no profile unless it asks with `--profiles`.
+- The bare performance lanes are re-based on the pinned v2.0.0 reference, the
+  last release whose bare run loads no profile, under a declared budget: wall
+  time 2.50 on the cold lane and 1.25 on the warm ones, peak RSS 1.10 on all
+  four. A bare run parses every source file it admits, which v1.5.1 does not do
+  at all, so the old comparison measured the feature rather than a regression.
+  The explicit lanes keep the pinned v1.5.1 reference at 1.05 on both metrics,
+  because an explicit invocation is unchanged.
 - `siloscan-core`: `CompiledPayload::Ast` carries `Vec<AstQuery>` rather than
   `Vec<(String, Arc<Query>)>`, so a rule's query source travels with its
   compiled query; `engines::ast::AstQueries` is new, and
   `engines::ast::scan_file` takes it as a second parameter.
-
 - `siloscan-core`: `ScanReport::graph` is populated only when a boundary rule
   is loaded. A scan that parsed every file for its ast rules now leaves it
   empty, because the import facts had no reader.

@@ -121,20 +121,18 @@ pub struct ScanRequest {
     follow_symlinks: bool,
     /// Which embedded profiles to load.
     ///
-    /// [`ProfileSelection::None`] for **both** [`ScanRequest::automatic`] and
-    /// [`ScanRequest::explicit`]. The design has the automatic default at
-    /// [`ProfileSelection::Auto`], and it is deliberately not that yet: the flip
-    /// changes the bare `setup:`/`capabilities:` lines and the paired
-    /// performance budget, and both need their own gate. It happens in the
-    /// package that ships the profile documents, not in the one that builds the
-    /// seam.
+    /// The provenance decides it: [`ProfileSelection::Auto`] for
+    /// [`ScanRequest::automatic`], [`ProfileSelection::None`] for
+    /// [`ScanRequest::explicit`]. A bare run is the whole product and gets the
+    /// profiles for the languages it detected; an invocation naming a `PATH` is
+    /// somebody's pipeline, and its output does not change under it unless it
+    /// asks with `--profiles`.
     profiles: ProfileSelection,
     /// The documents [`ProfileSelection`] picks from.
     ///
     /// [`profiles::REGISTRY`] in every real scan. It is a field so the tests
     /// can drive the whole selection, load and report path against documents of
-    /// their own while the shipped registry is still empty; see
-    /// [`ScanRequest::with_profile_registry`].
+    /// their own; see [`ScanRequest::with_profile_registry`].
     profile_registry: &'static [Profile],
     explicit_overrides: BTreeSet<String>,
 }
@@ -145,11 +143,16 @@ impl ScanRequest {
     /// There is no root argument because there was no argument. The root is
     /// `.` and cannot be anything else - detection never promotes a scan to a
     /// git, manifest, package or workspace root.
+    ///
+    /// Embedded profiles are [`ProfileSelection::Auto`] here and nowhere else.
     pub fn automatic() -> Self {
         Self::new(PathBuf::from("."), InvocationKind::Automatic)
     }
 
     /// A request naming `root`, including when the caller wrote `.`.
+    ///
+    /// Embedded profiles stay [`ProfileSelection::None`]: an explicit
+    /// invocation reports what it reported in v1 unless it asks otherwise.
     pub fn explicit(root: impl Into<PathBuf>) -> Self {
         let mut request = Self::new(root.into(), InvocationKind::Explicit);
         request.explicit_overrides.insert(OVERRIDE_PATH.to_string());
@@ -168,7 +171,10 @@ impl ScanRequest {
             cache: CacheRequest::default(),
             ignore: IgnoreOptions::default(),
             follow_symlinks: false,
-            profiles: ProfileSelection::None,
+            profiles: match invocation {
+                InvocationKind::Automatic => ProfileSelection::Auto,
+                InvocationKind::Explicit => ProfileSelection::None,
+            },
             profile_registry: profiles::REGISTRY,
             explicit_overrides: BTreeSet::new(),
         }
@@ -745,16 +751,13 @@ impl ScanSetupReport {
 
 /// The `profiles` capability, or nothing at all when no profile was asked for.
 ///
-/// The absence is the one deviation from the design's table, and it is what
-/// keeps this package's output diff empty. The bare human line prints every
-/// capability the report carries, unconditionally, so a `profiles` entry in any
-/// state adds a clause to a line `v2_journey` freezes exactly - and with both
-/// `ScanRequest::automatic` and `ScanRequest::explicit` defaulting to
-/// [`ProfileSelection::None`], every scan that exists today would carry it.
-/// Reporting the capability only once a selection was actually requested says
-/// the same thing about every scan that can ask for one, and says nothing about
-/// the scans that cannot. The package that flips the automatic default owns the
-/// line change, and can drop this guard with it.
+/// A bare run resolves [`ProfileSelection::Auto`] and always carries the
+/// capability: `enabled` where a detected language ships documents,
+/// `not_configured` where none does. An explicit run resolves
+/// [`ProfileSelection::None`] and carries nothing, which is what keeps its
+/// report the bytes v1.5.1 wrote. `--profiles none` is that same nothing said
+/// out loud, and it is recorded in `explicit_overrides` rather than here: a
+/// capability that is not part of the scan has no state to report.
 fn profiles_state(request: &ScanRequest, selected: &[&'static Profile]) -> Option<CapabilityState> {
     if request.profiles == ProfileSelection::None {
         return None;

@@ -457,13 +457,14 @@ fn has_capability(setup: &ScanSetupReport, id: &str) -> bool {
     setup.capabilities.iter().any(|state| state.id() == id)
 }
 
-/// The default, and the reason every existing report is byte-identical:
-/// nothing is selected and the capability is not reported at all, so no line
-/// and no document gains a clause. The provenance decides nothing here yet,
-/// which is the whole amendment - a registry full of documents that a
-/// `--profiles` nobody supplied still loads none of them.
+/// The explicit provenance, and the reason every v1 report is still
+/// byte-identical: nothing is selected and the capability is not reported at
+/// all, so no line and no document gains a clause. A registry full of documents
+/// that a `--profiles` nobody supplied still loads none of them here. The bare
+/// side of this decision is `v2_journey`, which cannot be asserted from a
+/// fixture root because an automatic request is the process working directory.
 #[test]
-fn profile_selection_defaults_to_none() {
+fn an_explicit_request_selects_no_profile() {
     let (tree, rules) = fixture();
     let setup = setup_of(&profile_request(tree.path(), &rules));
 

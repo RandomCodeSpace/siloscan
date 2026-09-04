@@ -6,6 +6,35 @@ independent cells the acceptance plan requires. Both binaries see the same
 scale tree, the same arguments where the arguments exist in both versions, the
 same output sink, and their own cache and state roots.
 
+Two references, because the two invocation shapes are two different contracts
+=============================================================================
+
+An explicit invocation is a v1 command, and 2.1.0 changed nothing about what it
+loads, so it is still measured against the pinned v1.5.1 reference at 1.05. A
+bare invocation is the v2 automatic journey, and since 2.1.0 it resolves
+``ProfileSelection::Auto`` and parses every source file it admits. v1.5.1 does
+no parsing at all on a bare run, so that comparison measures the feature rather
+than a regression: it was 6.1x before the engine work and 2.4x after, and no
+tuning turns either into 1.05. The bare lanes are therefore re-based on the
+pinned **v2.0.0** reference - the last release before the flip, profiles off -
+and given the budget issue #89 declared::
+
+    lane                  reference  cache   wall   peak RSS
+    explicit_no_cache     v1.5.1     none    1.05   1.05
+    explicit_cold_cache   v1.5.1     cold    1.05   1.05
+    explicit_warm_cache   v1.5.1     warm    1.05   1.05
+    bare_no_save_cold     v2.0.0     cold    2.50   1.10
+    bare_no_save_warm     v2.0.0     warm    1.25   1.10
+    bare_auto_save_first  v2.0.0     warm    1.25   1.10
+    bare_auto_save_warm   v2.0.0     warm    1.25   1.10
+
+The wall budget splits on the cache, because a cache hit skips the parse
+entirely: that is the whole distance between the cold lane's 2.4x and the warm
+lane's 1.16x measured in issue #89, and a single number covering both would
+either wave the warm lanes through or reject the cold one on the cost of the
+feature. Peak RSS does not split: parsing costs about 2% there on every lane,
+and 1.10 is a ceiling rather than a budget being spent.
+
 Each lane runs one untimed warm-up per binary and then nine paired samples in
 ABBA order, so a drifting runner biases both binaries in the same direction:
 
@@ -14,12 +43,13 @@ ABBA order, so a drifting runner biases both binaries in the same direction:
     pair 3  reference candidate
     ...
 
-Per cell the gate compares medians. A candidate/reference ratio at or below
-1.05 passes. Above 1.05 on a first run is *suspected* and the caller reruns the
-whole gate on a fresh runner with ``--compare``; the same lane and metric above
-1.05 twice *rejects*. A reference median absolute deviation above 20% of the
-reference median *invalidates* that cell: the runner was too noisy to decide.
-A faster cell never offsets a slower or larger one - every cell stands alone.
+Per cell the gate compares medians against that cell's own limit. A ratio at or
+below the limit passes. Above it on a first run is *suspected* and the caller
+reruns the whole gate on a fresh runner with ``--compare``; the same lane and
+metric above its limit twice *rejects*. A reference median absolute deviation
+above 20% of the reference median *invalidates* that cell: the runner was too
+noisy to decide. A faster cell never offsets a slower or larger one - every
+cell stands alone.
 
 Wall time is ``time.monotonic`` around the child. Peak RSS is ``ru_maxrss``
 from ``os.wait4`` on that one child, which is the kernel's own high-water mark
@@ -45,7 +75,14 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+# The explicit lanes' limit against v1.5.1: unchanged since v2.0.0, because an
+# explicit invocation is unchanged since v1.5.1.
 RATIO_LIMIT = 1.05
+# The bare lanes' limits against v2.0.0, declared in issue #89.
+BARE_WALL_LIMIT_COLD = 2.50
+BARE_WALL_LIMIT_WARM = 1.25
+BARE_RSS_LIMIT = 1.10
+
 MAD_LIMIT = 0.20
 DEFAULT_SAMPLES = 9
 
@@ -55,7 +92,11 @@ EXIT_REJECT = 2
 EXIT_ERROR = 3
 
 METRICS = ("seconds", "peak_rss_kib")
+# The two binaries of one lane's pairs. Which binary fills the reference side is
+# the lane's own answer; see ``Lane.reference_role``.
 ROLES = ("reference", "candidate")
+# The reference binaries the gate is handed, and the roles lanes name.
+REFERENCE_ROLES = ("reference", "bare_reference")
 
 # A scan that finds nothing exits 0 and a scan that finds something exits 1.
 # Anything else means the run did not do the work being measured.
@@ -66,12 +107,19 @@ OK_STATUS = (0, 1)
 class Lane:
     """One measured invocation pair.
 
-    ``mode`` selects the invocation shape. An explicit lane passes the scale
-    tree as a PATH plus the frozen oracle rules, which is a v1.5.1 command both
-    binaries accept unchanged. A bare lane runs the binary with no argument
-    from inside the tree, which is the v2 automatic journey; the reference has
-    no ``--no-save``, so its plain bare run is the comparator in all four bare
-    lanes and only the candidate carries a save control.
+    ``mode`` selects the invocation shape, and with it the reference binary. An
+    explicit lane passes the scale tree as a PATH plus the frozen oracle rules,
+    which is a v1.5.1 command both binaries accept unchanged. A bare lane runs
+    the binary with no argument from inside the tree, which is the v2 automatic
+    journey, so its reference is v2.0.0 - the shape does not exist in v1.5.1 in
+    any comparable form.
+
+    ``no_save`` adds ``--no-save`` to **both** sides. It used to be the
+    candidate's alone, because the v1.5.1 reference had no such flag and its
+    plain bare run was the only comparator available; the v2.0.0 reference has
+    it, so the lane is symmetric and no longer credits the candidate with a
+    publication the reference performed. ``--no-save`` is outside the v1 scan
+    options, so it does not make the run explicit.
 
     ``cache`` is ``none`` (``--no-cache``), ``cold`` (a fresh empty cache root
     for every sample) or ``warm`` (one cache root per binary, seeded by that
@@ -89,7 +137,33 @@ class Lane:
     mode: str
     cache: str
     state: str
-    candidate_no_save: bool
+    no_save: bool
+
+    @property
+    def reference_role(self) -> str:
+        """Which of the two reference binaries this lane measures against.
+
+        The invocation shape decides it and nothing else does: an explicit
+        command is the one v1.5.1 answers identically, and a bare run is the
+        one 2.1.0 changed. Deriving it here rather than listing it per lane
+        keeps a lane from claiming a reference its own arguments contradict.
+        """
+        return "bare_reference" if self.mode == "bare" else "reference"
+
+    def ratio_limit(self, metric: str) -> float:
+        """This lane's budget for ``metric``, as the module docstring tabulates.
+
+        A lane that never reads a warm cache pays the parse on every sample, so
+        it carries the cold wall budget; ``none`` is ``--no-cache`` and is cold
+        by construction.
+        """
+        if metric not in METRICS:
+            raise ValueError(f"unknown metric {metric}")
+        if self.reference_role == "reference":
+            return RATIO_LIMIT
+        if metric == "peak_rss_kib":
+            return BARE_RSS_LIMIT
+        return BARE_WALL_LIMIT_WARM if self.cache == "warm" else BARE_WALL_LIMIT_COLD
 
 
 LANES = (
@@ -119,7 +193,7 @@ LANES = (
     ),
     Lane(
         "bare_no_save_cold",
-        "Bare reference versus candidate --no-save, cold",
+        "Bare run, --no-save both sides, cold cache",
         "bare",
         "cold",
         "fresh",
@@ -127,7 +201,7 @@ LANES = (
     ),
     Lane(
         "bare_no_save_warm",
-        "Bare reference versus candidate --no-save, warm",
+        "Bare run, --no-save both sides, warm cache",
         "bare",
         "warm",
         "fresh",
@@ -135,7 +209,7 @@ LANES = (
     ),
     Lane(
         "bare_auto_save_first",
-        "Bare reference versus candidate auto-save, first publication",
+        "Bare run, auto-save, first publication",
         "bare",
         "warm",
         "fresh",
@@ -143,7 +217,7 @@ LANES = (
     ),
     Lane(
         "bare_auto_save_warm",
-        "Bare reference versus candidate auto-save, warm replacement",
+        "Bare run, auto-save, warm replacement",
         "bare",
         "warm",
         "warm",
@@ -186,7 +260,7 @@ def lane_invocation(lane: Lane, role: str, binary: Path, roots: Roots) -> Invoca
         cwd = roots.home
     elif lane.mode == "bare":
         argv = [str(binary)]
-        if lane.candidate_no_save and role == "candidate":
+        if lane.no_save:
             argv.append("--no-save")
         cwd = roots.tree
     else:
@@ -254,7 +328,13 @@ def measure(invocation: Invocation, stderr_log: Path) -> tuple[float, int]:
 def run_lane(
     lane: Lane, binaries: dict[str, Path], work: Path, tree: Path, rules: Path, samples: int
 ) -> dict[str, list[dict[str, float]]]:
-    """One untimed warm-up per binary, then ``samples`` paired ABBA samples."""
+    """One untimed warm-up per binary, then ``samples`` paired ABBA samples.
+
+    ``binaries`` is this lane's pair: its ``reference`` entry is whichever of
+    the two reference binaries ``Lane.reference_role`` named, so everything
+    below - the samples, the raw document, the cells - stays a two-role
+    comparison and the choice is made once, in ``run``.
+    """
     stderr_log = work / "stderr.log"
     results: dict[str, list[dict[str, float]]] = {role: [] for role in ROLES}
 
@@ -316,17 +396,20 @@ def ratio(candidate: float, reference: float) -> float:
     return candidate / reference
 
 
-def verdict(cell_ratio: float, reference_mad: float, prior_ratio: float | None) -> str:
-    """The plan's per-cell decision.
+def verdict(cell_ratio: float, reference_mad: float, prior_ratio: float | None, limit: float) -> str:
+    """The plan's per-cell decision, against that cell's own ``limit``.
 
     An invalid reference spread is decided first: a median taken from a runner
     that noisy carries no information about the candidate either way.
+
+    The twice-rule reads the prior run against the same limit, because a lane's
+    limit is a property of the lane and not of the run.
     """
     if reference_mad > MAD_LIMIT:
         return "invalid"
-    if cell_ratio <= RATIO_LIMIT:
+    if cell_ratio <= limit:
         return "pass"
-    if prior_ratio is not None and prior_ratio > RATIO_LIMIT:
+    if prior_ratio is not None and prior_ratio > limit:
         return "reject"
     return "suspected"
 
@@ -338,6 +421,7 @@ class Cell:
     reference: float
     candidate: float
     ratio: float
+    limit: float
     reference_mad: float
     verdict: str
 
@@ -362,6 +446,7 @@ def analyze(raw: dict, prior: dict | None = None) -> list[Cell]:
             candidate = median(cell_values(raw, lane.name, "candidate", metric))
             spread = mad_fraction(cell_values(raw, lane.name, "reference", metric))
             value = ratio(candidate, reference)
+            limit = lane.ratio_limit(metric)
             cells.append(
                 Cell(
                     lane.name,
@@ -369,8 +454,9 @@ def analyze(raw: dict, prior: dict | None = None) -> list[Cell]:
                     reference,
                     candidate,
                     value,
+                    limit,
                     spread,
-                    verdict(value, spread, prior_ratios.get((lane.name, metric))),
+                    verdict(value, spread, prior_ratios.get((lane.name, metric)), limit),
                 )
             )
     return cells
@@ -394,17 +480,31 @@ def exit_code(cells: list[Cell]) -> int:
 
 
 def format_table(cells: list[Cell]) -> str:
-    header = ("cell", "lane", "metric", "reference", "candidate", "ratio", "ref MAD", "verdict")
+    header = (
+        "cell",
+        "lane",
+        "against",
+        "metric",
+        "reference",
+        "candidate",
+        "ratio",
+        "limit",
+        "ref MAD",
+        "verdict",
+    )
     rows = [header]
     for number, cell in enumerate(cells, start=1):
+        lane = LANES_BY_NAME[cell.lane]
         rows.append(
             (
                 str(number),
                 cell.lane,
+                "v2.0.0" if lane.reference_role == "bare_reference" else "v1.5.1",
                 "wall time" if cell.metric == "seconds" else "peak RSS",
                 f"{cell.reference:.3f}" if cell.metric == "seconds" else f"{cell.reference:.0f}",
                 f"{cell.candidate:.3f}" if cell.metric == "seconds" else f"{cell.candidate:.0f}",
                 f"{cell.ratio:.3f}",
+                f"{cell.limit:.2f}",
                 f"{cell.reference_mad * 100:.1f}%",
                 cell.verdict,
             )
@@ -421,7 +521,11 @@ def format_table(cells: list[Cell]) -> str:
 
 
 def run(args: argparse.Namespace) -> dict:
-    binaries = {"reference": args.reference.resolve(), "candidate": args.candidate.resolve()}
+    binaries = {
+        "reference": args.reference.resolve(),
+        "bare_reference": args.bare_reference.resolve(),
+        "candidate": args.candidate.resolve(),
+    }
     tree = args.tree.resolve()
     rules = args.rules.resolve()
     work = args.work.resolve()
@@ -429,26 +533,38 @@ def run(args: argparse.Namespace) -> dict:
     work.mkdir(parents=True)
 
     raw = {
-        "schema": 1,
+        "schema": 2,
         "samples": args.samples,
-        "ratio_limit": RATIO_LIMIT,
         "mad_limit": MAD_LIMIT,
         "tree": str(tree),
         "binaries": {
             role: {"path": str(path), "sha256": sha256_file(path)}
             for role, path in binaries.items()
         },
+        "lane_references": {lane.name: lane.reference_role for lane in LANES},
+        "ratio_limits": {
+            lane.name: {metric: lane.ratio_limit(metric) for metric in METRICS} for lane in LANES
+        },
         "lanes": {},
     }
     for lane in LANES:
-        print(f"lane {lane.name}: {lane.title}", flush=True)
-        raw["lanes"][lane.name] = run_lane(lane, binaries, work, tree, rules, args.samples)
+        print(f"lane {lane.name}: {lane.title} (against {lane.reference_role})", flush=True)
+        pair = {"reference": binaries[lane.reference_role], "candidate": binaries["candidate"]}
+        raw["lanes"][lane.name] = run_lane(lane, pair, work, tree, rules, args.samples)
     return raw
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--reference", type=Path, required=True, help="pinned v1.5.1 binary")
+    parser.add_argument(
+        "--reference", type=Path, required=True, help="pinned v1.5.1 binary, for the explicit lanes"
+    )
+    parser.add_argument(
+        "--bare-reference",
+        type=Path,
+        required=True,
+        help="pinned v2.0.0 binary, for the bare lanes",
+    )
     parser.add_argument("--candidate", type=Path, required=True, help="candidate binary")
     parser.add_argument("--tree", type=Path, required=True, help="generated scale tree")
     parser.add_argument("--rules", type=Path, required=True, help="frozen oracle scale rules")

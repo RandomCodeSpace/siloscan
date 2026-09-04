@@ -12,7 +12,7 @@
 //! The two bare-mode lines are asserted whole:
 //!
 //! ```text
-//! setup: 1 project unit; languages: rust; rules: default-secrets@1
+//! setup: 1 project unit; languages: rust; rules: default-secrets@1, maintainability-rust@1, reliability-rust@1
 //! capabilities: cache enabled; coverage not configured; ...
 //! ```
 //!
@@ -20,6 +20,17 @@
 //! stops being reported, a rule pack that starts calling itself something else,
 //! or a detector that stops naming a language would otherwise change what every
 //! user sees with no test failing.
+//!
+//! # The profiles are part of the bare contract
+//!
+//! Since 2.1.0 a bare run resolves `ProfileSelection::Auto`, so the `rules:`
+//! clause names the profile documents for the languages the fixture detected
+//! and the `profiles` capability appears on the line below. Both are computed
+//! from the fixture's own `languages` against the shipped registry rather than
+//! listed per fixture, so the assertions stay whole-line equalities: what is
+//! frozen is that a bare run in a Rust tree loads the Rust profiles and nothing
+//! else, not that some line matched some pattern. An explicit `PATH` still
+//! loads none of them, which is `v2_oracle_harness`'s job.
 //!
 //! # The credential
 //!
@@ -400,32 +411,77 @@ fn document(path: &Path) -> Value {
     siloscan_core::serde_json::from_slice(&bytes).expect("the saved report should be JSON")
 }
 
+/// The languages the fixture's setup line lists, as the detector reports them.
+///
+/// The `languages:` clause is the list, comma-joined; `none` is the empty list
+/// and not a language.
+fn detected_languages(ecosystem: &Ecosystem) -> Vec<&'static str> {
+    match ecosystem.languages {
+        "none" => Vec::new(),
+        list => list.split(", ").collect(),
+    }
+}
+
+/// The profile identities a bare run in this fixture loads.
+///
+/// Exactly what `ProfileSelection::Auto` resolves: every registry entry whose
+/// language the detector reported, ordered by identity. Derived from the
+/// fixture's own languages rather than listed per fixture, so a registry that
+/// grows a family or a language is reflected here without a second edit - and
+/// a fixture whose detected languages change fails on the `languages:` clause
+/// of the same line.
+fn profile_identities(ecosystem: &Ecosystem) -> Vec<&'static str> {
+    let languages = detected_languages(ecosystem);
+    let mut identities: Vec<&'static str> = siloscan_core::profiles::REGISTRY
+        .iter()
+        .filter(|profile| languages.contains(&profile.language()))
+        .map(|profile| profile.identity())
+        .collect();
+    identities.sort_unstable();
+    identities
+}
+
 /// The setup line a fixture must print, built the way the binary builds it.
+///
+/// `rules:` names the embedded pack and then every selected profile document,
+/// which is the order `setup.rule_sources` puts them in: embedded first, then
+/// by id, and `default-secrets@1` sorts before both families.
 fn setup_line(ecosystem: &Ecosystem) -> String {
     let units = match ecosystem.units {
         0 => "no project units".to_string(),
         1 => "1 project unit".to_string(),
         count => format!("{count} project units"),
     };
+    let mut rules = vec![EMBEDDED_PACK];
+    rules.extend(profile_identities(ecosystem));
     format!(
-        "setup: {units}; languages: {}; rules: {EMBEDDED_PACK}",
-        ecosystem.languages
+        "setup: {units}; languages: {}; rules: {}",
+        ecosystem.languages,
+        rules.join(", ")
     )
 }
 
 /// The capability line a fixture must print.
 ///
-/// Every capability this scanner has, in the order the report sorts them.
-/// Detection is the only one that differs between fixtures: a tree with no
-/// manifest configures nothing for it to read.
+/// Every capability this scanner has, in the order the report sorts them. Two
+/// of them differ between fixtures, and for the same reason: a tree with no
+/// manifest configures nothing for detection to read, and a tree whose detected
+/// languages ship no profile document has no profile to load. They are not the
+/// same condition - a detected language without documents would enable one and
+/// not the other - so each is derived from what it actually depends on.
 fn capability_line(ecosystem: &Ecosystem) -> String {
     let detection = match ecosystem.units {
         0 => "not configured",
         _ => "enabled",
     };
+    let profiles = match profile_identities(ecosystem).is_empty() {
+        true => "not configured",
+        false => "enabled",
+    };
     format!(
         "capabilities: cache enabled; coverage not configured; embedded-rules enabled; \
-         project-detection {detection}; repository-config not configured; \
+         profiles {profiles}; project-detection {detection}; \
+         repository-config not configured; \
          rule-directories not configured; scan-baseline not configured; \
          symlink-following not configured"
     )
@@ -527,12 +583,16 @@ fn the_bare_journey_detects_scans_saves_and_says_how_to_review() {
                 Some(ecosystem.units),
                 "{case}"
             );
+            let mut expected_sources = vec![siloscan_core::serde_json::json!(
+                { "id": EMBEDDED_PACK, "origin": "embedded" }
+            )];
+            expected_sources.extend(profile_identities(ecosystem).into_iter().map(|identity| {
+                siloscan_core::serde_json::json!({ "id": identity, "origin": "embedded" })
+            }));
             assert_eq!(
                 setup["rule_sources"],
-                siloscan_core::serde_json::json!([
-                    { "id": EMBEDDED_PACK, "origin": "embedded" }
-                ]),
-                "{case}: only the embedded pack loads"
+                Value::Array(expected_sources),
+                "{case}: the embedded pack and the detected languages' profiles load"
             );
         }
     }
