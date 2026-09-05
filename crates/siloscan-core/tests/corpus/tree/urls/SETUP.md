@@ -26,3 +26,20 @@ Real values come from the credential store. The deploy templates render:
 
 Replace the placeholder before first boot; the service refuses to start on the
 literal value.
+
+## Placeholder forms
+
+Every URL below carries a stand-in where the password goes. They are copied out
+of the upstream quickstarts verbatim and none of them is a credential; the
+operator replaces the value before first boot.
+
+    postgres://admin:password@db.example.com:5432/app
+    postgres://admin:example@db.example.com:5432/app
+    postgres://admin:secret@db.example.com:5432/app
+    postgres://admin:placeholder@db.example.com:5432/app
+    postgres://admin:xxxxxxxx@db.example.com:5432/app
+    postgres://admin:your-db-password-here@db.example.com:5432/app
+    postgres://admin:insert-password-here@db.example.com:5432/app
+    postgres://admin:PASSWORD@db.example.com:5432/app
+    postgres://admin:REPLACE_ME@db.example.com:5432/app
+    postgres://admin:<password>@db.example.com:5432/app
