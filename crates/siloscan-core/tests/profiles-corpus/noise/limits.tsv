@@ -89,6 +89,8 @@ maintainability.cpp.container-size-zero-comparison	0	0.091009	2026-09-05	#103 cp
 maintainability.cpp.implicit-converting-constructor	0	0.477794	2026-09-05	#103 cpp: max of fmt 0.4778, nlohmann/json 0.3381, abseil-cpp 0.4497
 maintainability.cpp.named-unsafe-cast	0	0.301781	2026-09-05	#103 cpp: max of fmt 0.2275, nlohmann/json 0.0188, abseil-cpp 0.3018
 maintainability.cpp.redundant-virtual-with-override	0	0.000000	2026-09-05	#103 cpp: max of fmt 0.0000, nlohmann/json 0.0000, abseil-cpp 0.0000
+maintainability.cpp.incomplete-special-members	0	0.201188	2026-09-05	#103 cpp rescued: max of fmt 0.0228, nlohmann/json 0.0000, abseil-cpp 0.2012
+reliability.cpp.throw-escaping-destructor	0	0.000000	2026-09-05	#103 cpp rescued: max of fmt 0.0000, nlohmann/json 0.0000, abseil-cpp 0.0000
 maintainability.csharp.cyclomatic-complexity	0	0.384109	2026-09-03	#78 P4b: max of AutoMapper 0.0208, Dapper 0.2483, Newtonsoft.Json 0.3841
 maintainability.csharp.function-length	0	0.668381	2026-09-05	#122: max of AutoMapper 0.0416, Dapper 0.3476, Newtonsoft.Json 0.3615, dotnet/eShop 0.6684; twelve of the thirteen findings on eShop are Entity Framework migration scaffolds
 maintainability.csharp.nesting-depth	0	0.248263	2026-09-03	#78 P4b: max of AutoMapper 0.0000, Dapper 0.2483, Newtonsoft.Json 0.1958
@@ -105,6 +107,9 @@ reliability.csharp.self-assignment	0	0.000000	2026-09-05	#103 csharp: max of New
 reliability.csharp.self-comparison	0	0.000000	2026-09-03	#78 P4b: no finding on AutoMapper, Dapper or Newtonsoft.Json
 reliability.csharp.sync-over-async-getresult	0	0.049653	2026-09-05	#103 csharp: max of Newtonsoft.Json 0.0000, Dapper 0.0497, AutoMapper 0.0000, eShop 0.0000
 reliability.csharp.throw-in-finally	0	0.000000	2026-09-05	#103 csharp: max of Newtonsoft.Json 0.0000, Dapper 0.0000, AutoMapper 0.0000, eShop 0.0000
+reliability.csharp.thread-sleep-in-async	0	0.000000	2026-09-05	#103 csharp rescued: max of Newtonsoft.Json 0.0000, Dapper 0.0000, AutoMapper 0.0000, eShop 0.0000
+reliability.csharp.async-without-await	0	0.000000	2026-09-05	#103 csharp rescued: max of Newtonsoft.Json 0.0000, Dapper 0.0000, AutoMapper 0.0000, eShop 0.0000
+reliability.csharp.unreachable-after-return	0	0.000000	2026-09-05	#103 csharp rescued: max of Newtonsoft.Json 0.0000, Dapper 0.0000, AutoMapper 0.0000, eShop 0.0000
 maintainability.ruby.cyclomatic-complexity	0	0.338735	2026-09-03	#78 P4b: max of puma 0.3387, rails 0.0108, sinatra 0.0000
 maintainability.ruby.nesting-depth	0	0.112912	2026-09-03	#78 P4b: max of puma 0.1129, rails 0.0054, sinatra 0.0563
 maintainability.ruby.parameter-count	0	0.338735	2026-09-03	#78 P4b: max of puma 0.3387, rails 0.1454, sinatra 0.0000
@@ -124,6 +129,7 @@ reliability.ruby.deprecated-exists	0	0.000000	2026-09-05	#103 ruby: max of sinat
 reliability.ruby.ineffective-access-modifier	0	0.056332	2026-09-05	#103 ruby: max of sinatra 0.0563, puma 0.0000, rails 0.0135
 reliability.ruby.empty-ensure	0	0.000000	2026-09-05	#103 ruby: max of sinatra 0.0000, puma 0.0000, rails 0.0000
 maintainability.ruby.redundant-string-coercion	0	0.000000	2026-09-05	#103 ruby: max of sinatra 0.0000, puma 0.0000, rails 0.0000
+reliability.ruby.missing-respond-to-missing	0	0.225327	2026-09-05	#103 ruby rescued: max of sinatra 0.2253, puma 0.0000, rails 0.0511
 # rust, measured against ripgrep 15.2.0, tokio 1.40.0 and serde 1.0.229.
 # max_per_kloc is the highest of the three, rounded up to the four decimals
 # this file carries: the gate compares the unrounded rate, so rounding down
