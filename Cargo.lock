@@ -1548,7 +1548,7 @@ dependencies = [
 
 [[package]]
 name = "siloscan"
-version = "2.1.0"
+version = "2.2.0"
 dependencies = [
  "clap",
  "objc2-foundation",
@@ -1561,7 +1561,7 @@ dependencies = [
 
 [[package]]
 name = "siloscan-core"
-version = "2.1.0"
+version = "2.2.0"
 dependencies = [
  "getrandom 0.4.3",
  "globset",
@@ -1591,7 +1591,7 @@ dependencies = [
 
 [[package]]
 name = "siloscan-tui"
-version = "2.1.0"
+version = "2.2.0"
 dependencies = [
  "crossterm",
  "ratatui",

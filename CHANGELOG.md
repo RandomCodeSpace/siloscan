@@ -4,7 +4,7 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## Unreleased
+## 2.2.0 - 2026-09-05
 
 ### Added
 
@@ -18,6 +18,81 @@ All notable changes to this project are documented here. The format follows
   `await` that belongs to a nested function; an unknown predicate name, a wrong
   argument count, a sub-pattern that does not compile and an unknown stop kind
   are load errors that name the rule.
+- One hundred and thirty-four profile rules, from the per-language pitfall
+  lists and from a re-examination of candidates the 2.1.0 work had dropped.
+  With the five removals below, the twenty embedded documents now carry 211
+  rules rather than 82: 27 for JavaScript, 22 each for TypeScript and Go, 21
+  each for Rust and C, 20 each for Java, C++, and Ruby, and 19 each for Python
+  and C#. Every added rule was measured on its own language's pinned
+  repositories with at least five of its findings read before it shipped. The
+  policy it was measured against is 0.25 findings per kLOC for a `warning` rule
+  and 1.0 for an `info` rule, on each pinned repository rather than across
+  them, with one `paths` exclusion allowed to bring a rule under its ceiling
+  before it is removed instead.
+- `scripts/profile_noise.py --rules DIR`, repeatable, passes each directory
+  through to the scan the harness runs, so a rule document that is not embedded
+  yet is measured over the same 33 pinned repositories on the same terms as a
+  shipped one. The directories appear in the command line the run records in
+  its header, so a result file says what was measured.
+
+### Changed
+
+- `reliability.ruby.rescue-exception`, `reliability.ruby.rescue-modifier`,
+  `reliability.rust.unimplemented-marker`, and
+  `reliability.c.assignment-in-condition` are `info` rather than `warning`. A
+  reliability rule is `warning` by default, and one whose measured noise is
+  over the 0.25 warning ceiling but under the 1.0 info ceiling now ships as
+  `info` rather than being removed, which is what these four measured. Eleven
+  of the 211 rules are reliability rules at `info`. Nothing in either family is
+  `error`, so no profile finding changes an exit status at the default
+  threshold.
+- `reliability-python`, `maintainability-python`, and `reliability-csharp` are
+  loaded as `@2`; the other seventeen documents stay at `@1`. The identity is
+  what the `rules:` line and `setup.rule_sources` report and what the cache
+  keys on, so a cache entry written against the 2.1.0 document is not read
+  against this one. `--profiles auto` and a bare run pick up the new identities
+  by themselves; an explicit `--profiles reliability-python@1` no longer
+  resolves, and exits `2` naming the identity and listing what is available.
+- The pinned noise set is 33 repositories rather than 29, and every rule was
+  re-measured over all of them. Go gains prometheus/client_golang v1.24.1,
+  which is heavy in error handling where cobra and gin are 36 and 98 files of
+  it; TypeScript gains mantine 9.6.0, because zod, rxjs, and nest carry no
+  meaningful `.tsx` and React idioms could not be measured without it; C# gains
+  dotnet/eShop dotnet8 for logging and service code three libraries do not
+  have; and Python gains boto v2.13.2, a 2013 tree with no ruff configuration,
+  because the rest of the pinned Python set is ruff-maintained and reads zero
+  on a ruff-derived rule.
+
+### Removed
+
+- `reliability.python.bare-except`. 68 findings on boto v2.13.2, 0.8198 per
+  kLOC against the 0.25 warning ceiling. Every finding read is a real bare
+  `except:` in shipping library code, so the rule is right and the repository
+  is simply pre-2015 Python; 50 of the 68 are under `boto/` itself, so
+  excluding tests still leaves 0.7113 and no `paths` class carries the breach.
+- `reliability.python.mutable-default-argument`. 24 findings on boto, 0.2893
+  per kLOC, every one a genuine `=[]` or `={}` default. 16 are under `boto/`
+  and 0.1929 per kLOC on their own, and excluding tests alone leaves 0.2652,
+  still over the warning ceiling.
+- `maintainability.python.parameter-count`. 239 findings on boto, 2.8812 per
+  kLOC against the 1.0 info ceiling. The findings are not wrong, they are what
+  a keyword-argument-per-API-field SDK looks like, and 211 of the 239 are under
+  `boto/` itself at 2.5436 per kLOC on their own, so no path class carries the
+  breach and a threshold high enough to accept boto would stop the rule saying
+  anything on the other three Python repositories. Python is now the one
+  language with no parameter-count rule.
+- `reliability.csharp.async-void`. 8 findings on dotnet/eShop, 0.4113 per kLOC
+  against the 0.25 warning ceiling. All eight are `async void` overrides of
+  MAUI framework virtuals - `OnStart`, `OnAppearing`, `OnHandlerChanged`,
+  `OnPropertyChanged`, `ApplyQueryAttributes` - or a `BindableProperty` changed
+  callback. An override cannot change its return type, so the rule is asking
+  for something the code cannot give, and every finding sits in `src/ClientApp`
+  with no narrower path class inside it.
+- `reliability.csharp.empty-catch`. 10 findings on eShop, 0.5141 per kLOC. Nine
+  are the same `catch (InvalidOperationException) {}` around `AbortAnimation`
+  in one file, `VisualElementExtensions.cs`. The catches are genuinely empty,
+  but one file's idiom carries the whole breach and no `paths` class excludes
+  it.
 
 ### Fixed
 

@@ -117,22 +117,38 @@ A profile is one rule document shipped inside the binary, for one family and
 one language. There are two families:
 
 - **Reliability** reports code that is likely to be a bug: a comparison whose
-  result is fixed, two branches of an `if` with the same body, a bare `except`
-  that also catches an interrupt, a mutable default argument shared by every
-  call. Every reliability rule is `warning`.
+  result is fixed, two branches of an `if` with the same body, a `return`
+  inside a `finally`, a `defer` in a loop. A reliability rule is `warning` by
+  default, and one whose measured noise sits between the warning ceiling and
+  the info ceiling ships as `info` instead of being dropped.
 - **Maintainability** reports code that is hard to work on rather than wrong:
   a debugging aid left in, a function that is too long, too nested, takes too
   many parameters, or has too many decision points. Every maintainability rule
   is `info`.
 
+Eleven reliability rules are `info` on that measurement:
+`reliability.c.assignment-in-condition`,
+`reliability.csharp.case-insensitive-tolower-comparison`,
+`reliability.csharp.gc-collect`, `reliability.csharp.rethrow-only-catch`,
+`reliability.go.errors-new-sprintf`,
+`reliability.go.redundant-boolean-comparison`,
+`reliability.python.open-without-encoding`,
+`reliability.ruby.rescue-exception`, `reliability.ruby.rescue-modifier`,
+`reliability.rust.unimplemented-marker`, and
+`reliability.rust.unnecessary-unwrap`.
+
 Nothing in either family is `error`, so no profile finding changes an exit
-status at the default threshold. There are 82 rules in 20 documents, covering
+status at the default threshold. There are 211 rules in 20 documents, covering
 Rust, Python, JavaScript, TypeScript, Go, Java, C, C++, C#, and Ruby.
 
 A bare run loads the documents for the languages detection reported and no
 others, so a Go-only repository never sees a Ruby rule id. The `rules:` line
 names each one by identity, `reliability-go@1` and `maintainability-go@1`, and
-findings carry rule ids in the same shape: `reliability.go.<rule>`.
+findings carry rule ids in the same shape: `reliability.go.<rule>`. A document
+revised since it shipped carries a higher number: `reliability-python@2`,
+`maintainability-python@2`, and `reliability-csharp@2` are at `@2`, and the
+other seventeen are at `@1`. A named identity that no longer resolves, such as
+`reliability-python@1`, exits `2` and lists what is available.
 
 Four of the maintainability rules are measurements rather than patterns. Each
 one measures a function and reports the function's name when it is over the
@@ -141,15 +157,18 @@ limit:
 | Measure | Limit |
 | --- | --- |
 | Function length, in lines | 150 for C, Go, and JavaScript; 120 for Rust, Python, Java, and C# |
-| Parameter count | 7 |
+| Parameter count | 7; Python ships no parameter-count rule |
 | Nesting depth | 5 |
 | Cyclomatic complexity | 30 for C, 25 elsewhere |
 
 The limits are measured, not chosen: each was set on a pinned corpus of real
 repositories so that the rule reports rarely enough to stay readable. C++,
-Ruby, and TypeScript ship no function-length rule for the same reason. The
-JavaScript one excludes test trees by path, because a test suite body is a
-function to the grammar and not to a reader.
+Ruby, and TypeScript ship no function-length rule for the same reason, and
+Python ships no parameter-count rule: on boto it reported 2.8812 findings per
+kLOC against a ceiling of 1.0, which is what a keyword-argument-per-API-field
+SDK looks like rather than a defect, and no path class carried the breach. The
+JavaScript function-length rule excludes test trees by path, because a test
+suite body is a function to the grammar and not to a reader.
 
 Turn them off per run, or leave them off:
 
