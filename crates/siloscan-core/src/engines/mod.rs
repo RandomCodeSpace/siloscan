@@ -1,3 +1,4 @@
+pub mod presence;
 pub mod regex;
 pub mod secret;
 
