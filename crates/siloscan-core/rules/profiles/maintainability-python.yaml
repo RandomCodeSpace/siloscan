@@ -20,6 +20,16 @@
 # is the idiom behind the rule's findings and is not a finding a reviewer
 # wants. With the exclusion the rule measures 0.1835 per kLOC on black and
 # 0.0603 on boto against the 1.0 info ceiling.
+#
+# f-string-without-placeholder stays absent. It was re-examined under #103
+# against the has-descendant predicates added under #114 and is not rescued by
+# them. What the rule needs is the python pitfall list's P3, parent-kind
+# exclusion: report a lone `(string)` with an f prefix and no brace, but not
+# one that is a fragment of a `concatenated_string`, where the placeholders
+# live in a sibling fragment and the leading fragment is correct. Both new
+# predicates search the captured node's own subtree and neither reaches an
+# ancestor, so the exclusion cannot be written as a negated sub-pattern and
+# the rule still reports the dominant idiom.
 version: 1
 rules:
   - id: maintainability.python.function-length

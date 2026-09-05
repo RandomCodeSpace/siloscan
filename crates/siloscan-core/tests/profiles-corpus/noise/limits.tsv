@@ -226,6 +226,8 @@ reliability.javascript.new-wrapper-object	0	0.000000	2026-09-05	#103 javascript:
 reliability.javascript.setter-returns-value	0	0.000000	2026-09-05	#103 javascript: max of express 0.000000, lodash 0.000000, axios 0.000000
 reliability.javascript.unreachable-after-return	0	0.000000	2026-09-05	#103 javascript: max of express 0.000000, lodash 0.000000, axios 0.000000
 maintainability.javascript.nested-ternary-in-consequence	0	0.693892	2026-09-05	#103 javascript: max of express 0.000000, lodash 0.693892, axios 0.067988
+reliability.javascript.async-function-without-await	0	0.101982	2026-09-05	#103 javascript rescued: max of express 0.000000, lodash 0.000000, axios 0.101982, with test trees excluded by path
+reliability.javascript.getter-without-return	0	0.000000	2026-09-05	#103 javascript rescued: max of express 0.000000, lodash 0.000000, axios 0.000000
 # typescript, measured against zod 3.23.8, rxjs 7.8.1 and nest 12.0.1. There is
 # no maintainability.typescript.function-length row because there is no such
 # rule: at 150 with the same exclusion it still measured 2.0765 per kLOC on
@@ -256,3 +258,4 @@ maintainability.typescript.var-declaration	0	0.013662	2026-09-05	#103 typescript
 maintainability.typescript.require-import	0	0.040984	2026-09-05	#103 typescript: max of zod 0.000000, rxjs 0.040984, nest 0.000000, mantine 0.002766
 maintainability.typescript.unnecessary-type-constraint	0	0.000000	2026-09-05	#103 typescript: max of zod 0.000000, rxjs 0.000000, nest 0.000000, mantine 0.000000
 maintainability.typescript.literal-type-assertion	0	0.000000	2026-09-05	#103 typescript: max of zod 0.000000, rxjs 0.000000, nest 0.000000, mantine 0.000000
+reliability.typescript.switch-case-fallthrough	0	0.000000	2026-09-05	#103 typescript rescued: max of zod 0.000000, rxjs 0.000000, nest 0.000000, mantine 0.000000

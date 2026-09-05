@@ -533,6 +533,11 @@ javascript/nested-ternary-in-consequence-positive.js	2	maintainability.javascrip
 javascript/nested-ternary-in-consequence-positive.js	5	maintainability.javascript.nested-ternary-in-consequence	a ternary is nested in the consequence of another ternary
 javascript/nested-ternary-in-consequence-negative.js	2	NONE	the nesting is in the alternative, which reads as a chain, or there is no nesting
 javascript/nested-ternary-in-consequence-negative.js	5	NONE	the nesting is in the alternative, which reads as a chain, or there is no nesting
+# javascript, #103 rescued by the #114 has-descendant predicates
+javascript/async-function-without-await-positive.js	1	reliability.javascript.async-function-without-await	the async function body holds no await, so the promise it returns wraps a value nothing waited for
+javascript/async-function-without-await-negative.js	1	NONE	the async function awaits before it returns
+javascript/getter-without-return-positive.js	1	reliability.javascript.getter-without-return	the getter body holds no return, so reading the property yields undefined
+javascript/getter-without-return-negative.js	1	NONE	the getter returns the backing field
 # typescript, #103 pitfall list
 typescript/throw-non-error-literal-positive.ts	2	reliability.typescript.throw-non-error-literal	an object literal is thrown, so the caught value carries no stack trace
 typescript/throw-non-error-literal-negative.ts	2	NONE	an Error instance is thrown, which is the shape every catch expects
@@ -570,3 +575,7 @@ typescript/unnecessary-type-constraint-negative.ts	1	NONE	extends string is a re
 typescript/literal-type-assertion-positive.ts	1	maintainability.typescript.literal-type-assertion	a literal asserted to its own literal type, which as const says once
 typescript/literal-type-assertion-negative.ts	1	NONE	as const is the spelling the rule is arguing for
 typescript/literal-type-assertion-negative.ts	2	NONE	1 as 2 is the near miss the capture-to-capture comparison has to reject
+# typescript, #103 rescued by the #114 has-descendant predicates
+typescript/switch-case-fallthrough-positive.ts	3	reliability.typescript.switch-case-fallthrough	the case runs a statement and never breaks, returns, throws or continues, and another case follows it to fall into
+typescript/switch-case-fallthrough-negative.ts	3	NONE	the case ends in a break, so control leaves the switch
+typescript/switch-case-fallthrough-positive.tsx	4	reliability.typescript.switch-case-fallthrough	the same fallthrough inside a component that returns jsx, so the sub-pattern is compiled and run against the tsx grammar

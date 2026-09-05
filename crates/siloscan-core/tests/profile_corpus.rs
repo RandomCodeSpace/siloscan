@@ -711,6 +711,12 @@ fn wrong_language(identity: &str, language: &str, rule: &CompiledRule) -> Vec<St
     }
 }
 
+/// The general predicates `engines::ast` implements itself, so a rule may use
+/// them. Spelled here rather than imported because they are private to that
+/// module; the load error a misspelling raises names the rule, so a drift
+/// between the two lists cannot pass silently.
+const SUBTREE_PREDICATES: [&str; 2] = ["has-descendant?", "not-has-descendant?"];
+
 /// Predicates a rule's AST queries use that the engine does not implement.
 ///
 /// `engines::ast` runs `QueryCursor::matches`, which applies the text
@@ -721,6 +727,10 @@ fn wrong_language(identity: &str, language: &str, rule: &CompiledRule) -> Vec<St
 /// narrowed at all: it matches every node its pattern reaches. So it is refused
 /// here, at load, rather than shipped as a rule that means something other than
 /// what it says.
+///
+/// The exception is [`SUBTREE_PREDICATES`], the two general predicates
+/// `engines::ast` reads out of the combined query itself and evaluates after
+/// tree-sitter hands over a match. Those do narrow the rule.
 fn unimplemented_predicates(identity: &str, rule: &CompiledRule) -> Vec<String> {
     let CompiledPayload::Ast { queries } = &rule.payload else {
         return Vec::new();
@@ -729,7 +739,11 @@ fn unimplemented_predicates(identity: &str, rule: &CompiledRule) -> Vec<String> 
     for ast in queries {
         let (language, query) = (&ast.language, &ast.query);
         for pattern in 0..query.pattern_count() {
-            for predicate in query.general_predicates(pattern) {
+            for predicate in query
+                .general_predicates(pattern)
+                .iter()
+                .filter(|predicate| !SUBTREE_PREDICATES.contains(&predicate.operator.as_ref()))
+            {
                 failures.push(format!(
                     "{identity}: rule {} query for {language} pattern {pattern} uses #{}, \
                      which the engine ignores at match time",
