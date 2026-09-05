@@ -14,6 +14,25 @@
 #                            above a broader catch so the narrow type is not
 #                            swallowed, which is deliberate. TP:FP is 0:6.
 # reliability-java.yaml records the other three.
+#
+# The two maintainability rows that list dispositioned "needs primitive" stayed
+# out even with the #114 predicates in hand. reliability-java.yaml carries the
+# one row from the same set that came in:
+#   switch-without-default   inside the `info` ceiling at 0.1338 per kLOC on
+#                            gson, but all five findings are the exhaustive
+#                            switch over an enum, three of them followed by a
+#                            throw for the value that cannot occur, so a
+#                            `default` would be dead code. TP:FP is 0:5, and the
+#                            class is an idiom rather than a path, so no
+#                            exclusion reaches it.
+#   parameter-reassigned     not expressible. The rule compares the assignment's
+#                            target with the parameter name, and a
+#                            `#has-descendant?` sub-pattern's captures are
+#                            private to it: the sub-pattern is compiled as a
+#                            query of its own, so naming the outer capture in
+#                            its `#eq?` is a load error, `Invalid capture name`.
+#                            Without the comparison the rule reports every
+#                            assignment to a local under any method.
 version: 1
 rules:
   - id: maintainability.java.function-length

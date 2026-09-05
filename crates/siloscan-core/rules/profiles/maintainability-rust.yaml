@@ -19,6 +19,13 @@
 #   needless-return      0.0823 per kLOC on tokio, and four of the seven findings
 #                        are the `#[cfg]`-attributed pair of returns, where the
 #                        keyword is what carries the attribute.
+#
+# empty-if-body is the maintainability half of the rust pitfall list's
+# needs-primitive rows, rescued by the #114 predicates. The absent-field
+# question it asked for is answered from the other side: an `if` has an
+# `else_clause` in its own subtree exactly when it has an `else`, so
+# `#not-has-descendant?` over the expression says what no field negation could.
+# It reports nothing on ripgrep, tokio or serde.
 version: 1
 rules:
   - id: maintainability.rust.dbg-macro
@@ -74,3 +81,10 @@ rules:
     metric:
       measure: cyclomatic-complexity
       max: 25
+  - id: maintainability.rust.empty-if-body
+    severity: info
+    message: "this if has an empty body and no else, so it evaluates a condition and discards the answer"
+    ast:
+      rust: |
+        ((if_expression consequence: (block "{" . "}")) @report
+          (#not-has-descendant? @report "(else_clause) @e"))
