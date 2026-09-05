@@ -5,6 +5,7 @@
 //! reported in source order so identical input produces identical facts.
 
 use std::collections::BTreeMap;
+use std::path::Path;
 use std::sync::OnceLock;
 
 use serde::{Deserialize, Serialize};
@@ -51,16 +52,31 @@ pub struct Graph {
     pub files: BTreeMap<String, FileFacts>,
 }
 
-/// Extract facts for `content`, already parsed as `lang` into `tree`.
-/// Unknown or unavailable languages yield empty facts.
+/// Extract facts for `content`, already parsed as `lang` into `tree`, with no
+/// path to choose a grammar by. Unknown or unavailable languages yield empty
+/// facts.
+///
+/// TypeScript is the one language with two grammars, so for every other
+/// language this is [`extract_file`]. A `.tsx` file has to go through
+/// [`extract_file`] to be read by the grammar it was parsed with.
 pub fn extract(lang: &str, content: &str, tree: &Tree) -> FileFacts {
+    extract_file(lang, Path::new(""), content, tree)
+}
+
+/// Extract facts for `content`, read from `path` and already parsed as `lang`
+/// into `tree` by [`crate::parsers::parse_file`].
+///
+/// The queries are selected by `crate::parsers::grammar_name`, so they are
+/// compiled against the same grammar the tree was parsed with; the facts still
+/// carry the language, which is `typescript` for a `.tsx` file.
+pub fn extract_file(lang: &str, path: &Path, content: &str, tree: &Tree) -> FileFacts {
     let mut facts = FileFacts {
         language: lang.to_string(),
         imports: Vec::new(),
         decls: Vec::new(),
     };
 
-    let Some(compiled) = compiled(lang) else {
+    let Some(compiled) = compiled(crate::parsers::grammar_name(lang, path)) else {
         return facts;
     };
 
@@ -184,9 +200,9 @@ struct Compiled {
 impl Compiled {
     /// `None` when the grammar is not in this build or a query fails to
     /// compile, which yields empty facts instead of failing the scan.
-    fn new(lang: &str) -> Option<Compiled> {
-        let language = crate::parsers::language(lang)?;
-        let (imports, decls) = queries(lang)?;
+    fn new(grammar: &str) -> Option<Compiled> {
+        let language = crate::parsers::language(grammar)?;
+        let (imports, decls) = queries(grammar)?;
         Some(Compiled {
             imports: Query::new(&language, imports).ok()?,
             decls: Query::new(&language, decls).ok()?,
@@ -194,9 +210,11 @@ impl Compiled {
     }
 }
 
-/// Languages that have queries, sorted; one cache slot each. A language whose
-/// grammar is not in this build simply never produces a `Compiled`.
-const LANGUAGES: [&str; 10] = [
+/// Grammars that have queries, sorted; one cache slot each. A grammar that is
+/// not in this build simply never produces a `Compiled`. These are grammar
+/// names rather than language names: `tsx` is the second grammar of
+/// `typescript` and never appears as a language anywhere.
+const LANGUAGES: [&str; 11] = [
     "c",
     "cpp",
     "csharp",
@@ -206,23 +224,27 @@ const LANGUAGES: [&str; 10] = [
     "python",
     "ruby",
     "rust",
+    "tsx",
     "typescript",
 ];
 
-/// The compiled queries for `lang`, compiled on first use and kept for the rest
-/// of the process.
-fn compiled(lang: &str) -> Option<&'static Compiled> {
+/// The compiled queries for `grammar`, compiled on first use and kept for the
+/// rest of the process.
+fn compiled(grammar: &str) -> Option<&'static Compiled> {
     static COMPILED: [OnceLock<Option<Compiled>>; LANGUAGES.len()] =
         [const { OnceLock::new() }; LANGUAGES.len()];
 
-    let index = LANGUAGES.iter().position(|known| *known == lang)?;
-    COMPILED[index].get_or_init(|| Compiled::new(lang)).as_ref()
+    let index = LANGUAGES.iter().position(|known| *known == grammar)?;
+    COMPILED[index]
+        .get_or_init(|| Compiled::new(grammar))
+        .as_ref()
 }
 
-/// The `(imports, decls)` query sources for `lang`, when its grammar is
-/// compiled in.
-fn queries(lang: &str) -> Option<(&'static str, &'static str)> {
-    match lang {
+/// The `(imports, decls)` query sources for `grammar`, when it is compiled in.
+/// `tsx` shares typescript's: the two grammars disagree about `<T>x` and about
+/// nothing an import or a declaration is written with.
+fn queries(grammar: &str) -> Option<(&'static str, &'static str)> {
+    match grammar {
         #[cfg(feature = "tree-sitter-c")]
         "c" => Some((C_IMPORTS, C_DECLS)),
         #[cfg(feature = "tree-sitter-cpp")]
@@ -242,7 +264,7 @@ fn queries(lang: &str) -> Option<(&'static str, &'static str)> {
         #[cfg(feature = "tree-sitter-rust")]
         "rust" => Some((RUST_IMPORTS, RUST_DECLS)),
         #[cfg(feature = "tree-sitter-typescript")]
-        "typescript" => Some((TYPESCRIPT_IMPORTS, TYPESCRIPT_DECLS)),
+        "typescript" | "tsx" => Some((TYPESCRIPT_IMPORTS, TYPESCRIPT_DECLS)),
         _ => None,
     }
 }
@@ -622,6 +644,34 @@ export function main(): void {}
                 ("run", "method"),
                 ("main", "function"),
             ]
+        );
+    }
+
+    /// A `.tsx` file is a typescript file read by the tsx grammar. Under the
+    /// plain typescript grammar the JSX below is a broken type assertion whose
+    /// recovery eats the `require` on the line after it.
+    #[cfg(feature = "tree-sitter-typescript")]
+    #[test]
+    fn extracts_tsx() {
+        let source = "\
+import { Client } from './client';
+
+export function Badge({ label }: { label: string }) {
+  const icon = <img src=\"/icon.png\" alt=\"\" />;
+  const os = require('node:os');
+  return <span className=\"badge\">{icon}{label}{os.type()}</span>;
+}
+";
+        let path = Path::new("src/Badge.tsx");
+        let tree = crate::parsers::parse_file("typescript", path, source).expect("tree");
+        assert!(!tree.root_node().has_error());
+
+        let facts = extract_file("typescript", path, source, &tree);
+        assert_eq!(facts.language, "typescript");
+        assert_eq!(imports(&facts), ["./client", "node:os"]);
+        assert_eq!(
+            decls(&facts),
+            [("Badge", "function"), ("icon", "const"), ("os", "const")]
         );
     }
 

@@ -182,3 +182,5 @@ typescript/debugger-statement-positive.ts	2	reliability.typescript.debugger-stat
 typescript/debugger-statement-negative.ts	2	NONE	the function carries no debugger statement
 typescript/constant-condition-positive.ts	2	reliability.typescript.constant-condition	the condition is a boolean literal, so the branch is decided at author time
 typescript/constant-condition-negative.ts	2	NONE	the condition is a parameter, so the branch is decided at run time
+typescript/jsx-self-assignment.tsx	3	reliability.typescript.self-assignment	the assignment writes the variable back to itself; it sits inside a component whose JSX only the tsx grammar parses, and the plain typescript grammar swallows this line into the misparse
+typescript/jsx-self-assignment.tsx	2	NONE	an ordinary self-closing JSX element, which no profile rule owns

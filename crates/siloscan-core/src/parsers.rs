@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use tree_sitter::{Language, Parser, Tree};
 
 /// Every language this crate can support, sorted; the ones actually available
@@ -15,8 +17,14 @@ const KNOWN: [&str; 10] = [
     "typescript",
 ];
 
-/// Map a language name emitted by [`crate::lang::detect`] to its grammar.
-/// Returns `None` for unknown names and for grammars whose feature is off.
+/// Map a language name emitted by [`crate::lang::detect`], or an internal
+/// grammar name returned by [`grammar_name`], to its grammar. Returns `None`
+/// for unknown names and for grammars whose feature is off.
+///
+/// `"tsx"` is one of those internal names. It is a grammar, not a language: it
+/// is deliberately absent from `KNOWN` and from [`supported_languages`], so
+/// nothing user-visible - a report, `--profiles auto`, a metrics row, a corpus
+/// directory - ever names it.
 pub fn language(lang: &str) -> Option<Language> {
     match lang {
         #[cfg(feature = "tree-sitter-c")]
@@ -39,7 +47,30 @@ pub fn language(lang: &str) -> Option<Language> {
         "rust" => Some(tree_sitter_rust::LANGUAGE.into()),
         #[cfg(feature = "tree-sitter-typescript")]
         "typescript" => Some(tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()),
+        #[cfg(feature = "tree-sitter-typescript")]
+        "tsx" => Some(tree_sitter_typescript::LANGUAGE_TSX.into()),
         _ => None,
+    }
+}
+
+/// The grammar `path` has to be parsed with, given the language detected for
+/// it. Every language but TypeScript is its own grammar and comes back
+/// unchanged; a `.tsx` file comes back as `"tsx"`.
+///
+/// tree-sitter-typescript ships two grammars because neither dialect contains
+/// the other: `<T>x` is a type assertion in `.ts` and the opening of a JSX
+/// element in `.tsx`, so a grammar that parses one has to reject the other.
+/// Choosing by extension is what lets the language label stay `typescript`
+/// everywhere while `.tsx` files are still read by a grammar that knows JSX.
+pub fn grammar_name<'a>(lang: &'a str, path: &Path) -> &'a str {
+    let tsx = lang == "typescript"
+        && path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("tsx"));
+    match tsx {
+        true => "tsx",
+        false => lang,
     }
 }
 
@@ -50,6 +81,13 @@ pub fn parse(lang: &str, content: &str) -> Option<Tree> {
     let mut parser = Parser::new();
     parser.set_language(&language).ok()?;
     parser.parse(content, None)
+}
+
+/// Parse `content`, read from `path`, as `lang`, with the grammar
+/// [`grammar_name`] picks for that path. Prefer this to [`parse`] wherever the
+/// file's path is in hand.
+pub fn parse_file(lang: &str, path: &Path, content: &str) -> Option<Tree> {
+    parse(grammar_name(lang, path), content)
 }
 
 /// The languages available in this build, sorted.
@@ -100,6 +138,53 @@ mod tests {
     fn parses_python() {
         let tree = parse("python", "def f():\n    return 1\n").expect("python tree");
         assert_eq!(tree.root_node().kind(), "module");
+        assert!(!tree.root_node().has_error());
+    }
+
+    #[cfg(feature = "tree-sitter-typescript")]
+    #[test]
+    fn tsx_is_a_grammar_and_not_a_language() {
+        assert!(language("tsx").is_some());
+        assert!(!KNOWN.contains(&"tsx"));
+        assert!(!supported_languages().contains(&"tsx"));
+    }
+
+    #[cfg(feature = "tree-sitter-typescript")]
+    #[test]
+    fn the_grammar_follows_the_extension() {
+        assert_eq!(grammar_name("typescript", Path::new("a/b.tsx")), "tsx");
+        assert_eq!(grammar_name("typescript", Path::new("a/b.TSX")), "tsx");
+        assert_eq!(
+            grammar_name("typescript", Path::new("a/b.ts")),
+            "typescript"
+        );
+        assert_eq!(grammar_name("typescript", Path::new("b")), "typescript");
+        // Only typescript has two grammars; nothing else is redirected.
+        assert_eq!(
+            grammar_name("javascript", Path::new("a/b.tsx")),
+            "javascript"
+        );
+    }
+
+    /// The two grammars are disjoint, which is why the path has to pick one.
+    #[cfg(feature = "tree-sitter-typescript")]
+    #[test]
+    fn jsx_parses_in_a_tsx_path_and_not_in_a_ts_one() {
+        let jsx = "const App = () => <div className=\"a\">{x}</div>;\n";
+        let tree = parse_file("typescript", Path::new("src/App.tsx"), jsx).expect("tsx tree");
+        assert!(!tree.root_node().has_error());
+
+        let tree = parse_file("typescript", Path::new("src/App.ts"), jsx).expect("ts tree");
+        assert!(tree.root_node().has_error());
+
+        // And the type assertion the tsx grammar cannot read still parses when
+        // the path says `.ts`.
+        let tree = parse_file(
+            "typescript",
+            Path::new("src/a.ts"),
+            "const y = <number>x;\n",
+        )
+        .expect("tree");
         assert!(!tree.root_node().has_error());
     }
 

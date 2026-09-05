@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::path::Path;
 
 use tree_sitter::{Node, Query, QueryCursor, QueryMatch, StreamingIterator, Tree};
 
@@ -10,15 +11,15 @@ use crate::rules::{CompiledPayload, CompiledRule};
 /// capture of a match is reported.
 const REPORT_CAPTURE: &str = "report";
 
-/// One combined tree-sitter query per language, carrying every ast rule's
-/// patterns for that language.
+/// One combined tree-sitter query per grammar, carrying every ast rule's
+/// patterns for that grammar's language.
 ///
 /// One query per rule means one full tree traversal per rule; one query holding
 /// every rule's patterns walks the tree once. `owners` maps a pattern index of
 /// the combined query back to the rule that contributed it.
 #[derive(Debug)]
 pub struct AstQueries {
-    languages: Vec<CombinedQuery>,
+    grammars: Vec<CombinedQuery>,
     /// Length of the `rules` slice `build` was given. `scan_file` indexes that
     /// slice with the indices recorded here, so it must be handed the same one.
     rules_len: usize,
@@ -26,7 +27,11 @@ pub struct AstQueries {
 
 #[derive(Debug)]
 struct CombinedQuery {
-    language: String,
+    /// The grammar this query is compiled against, which is the rule's language
+    /// for every language but TypeScript. A typescript rule set yields two of
+    /// these, `typescript` and `tsx`, and [`scan_file`] picks between them by
+    /// the file's path. This field is the lookup key and nothing else reads it.
+    grammar: String,
     query: Query,
     /// Rule indices into the `rules` slice `build` was given, in load order.
     rules: Vec<usize>,
@@ -50,7 +55,7 @@ struct Pending {
 }
 
 impl AstQueries {
-    /// Build the combined query of every ast rule in `rules`, per language.
+    /// Build the combined query of every ast rule in `rules`, per grammar.
     ///
     /// Compiling the concatenation is expected to succeed once each rule's own
     /// query has compiled: tree-sitter parses a query as a sequence of
@@ -89,21 +94,28 @@ impl AstQueries {
             }
         }
 
-        let mut languages = Vec::with_capacity(pending.len());
+        let mut grammars = Vec::with_capacity(pending.len());
         for one in pending {
-            languages.push(compile_combined(one, rules)?);
+            // A typescript rule set is compiled twice, once per grammar: the
+            // same sources and the same owners, so a `.tsx` file is measured by
+            // exactly the rules a `.ts` file is. See `parsers::grammar_name`
+            // for why the two grammars cannot be one.
+            if one.language == "typescript" {
+                grammars.push(compile_combined(&one, rules, "tsx")?);
+            }
+            grammars.push(compile_combined(&one, rules, &one.language)?);
         }
 
         Ok(AstQueries {
-            languages,
+            grammars,
             rules_len: rules.len(),
         })
     }
 
-    fn get(&self, language: &str) -> Option<&CombinedQuery> {
-        self.languages
+    fn get(&self, grammar: &str) -> Option<&CombinedQuery> {
+        self.grammars
             .iter()
-            .find(|combined| combined.language == language)
+            .find(|combined| combined.grammar == grammar)
     }
 }
 
@@ -113,22 +125,33 @@ fn concatenate(sources: &[String]) -> String {
     sources.join("\n")
 }
 
-fn compile_combined(pending: Pending, rules: &[CompiledRule]) -> Result<CombinedQuery, String> {
-    let language = crate::parsers::language(&pending.language).ok_or_else(|| {
-        format!(
-            "the ast language {} no longer resolves to a parser",
-            pending.language
-        )
-    })?;
+/// Compile `pending`'s patterns against `grammar`, which is the pending
+/// language's own name except for the second, `tsx`, compilation of a
+/// typescript rule set. A failure under either grammar fails the load and names
+/// the grammar it failed under.
+fn compile_combined(
+    pending: &Pending,
+    rules: &[CompiledRule],
+    grammar: &str,
+) -> Result<CombinedQuery, String> {
+    let language = crate::parsers::language(grammar)
+        .ok_or_else(|| format!("the ast grammar {grammar} no longer resolves to a parser"))?;
 
     let query = match Query::new(&language, &concatenate(&pending.sources)) {
         Ok(query) => query,
-        Err(error) => return Err(attribute(&pending, rules, &language, &error.to_string())),
+        Err(error) => {
+            return Err(attribute(
+                pending,
+                rules,
+                grammar,
+                &language,
+                &error.to_string(),
+            ));
+        }
     };
     if query.pattern_count() != pending.owners.len() {
         return Err(format!(
-            "the combined {} ast query holds {} patterns where its rules contribute {}",
-            pending.language,
+            "the combined {grammar} ast query holds {} patterns where its rules contribute {}",
             query.pattern_count(),
             pending.owners.len()
         ));
@@ -136,10 +159,10 @@ fn compile_combined(pending: Pending, rules: &[CompiledRule]) -> Result<Combined
     let report = query.capture_index_for_name(REPORT_CAPTURE);
 
     Ok(CombinedQuery {
-        language: pending.language,
+        grammar: grammar.to_string(),
         query,
-        rules: pending.rules,
-        owners: pending.owners,
+        rules: pending.rules.clone(),
+        owners: pending.owners.clone(),
         report,
     })
 }
@@ -154,23 +177,20 @@ fn compile_combined(pending: Pending, rules: &[CompiledRule]) -> Result<Combined
 fn attribute(
     pending: &Pending,
     rules: &[CompiledRule],
+    grammar: &str,
     language: &tree_sitter::Language,
     error: &str,
 ) -> String {
     for upto in 1..=pending.sources.len() {
         if Query::new(language, &concatenate(&pending.sources[..upto])).is_err() {
             return format!(
-                "the combined {} ast query failed to compile at rule {}: {error}",
-                pending.language,
+                "the combined {grammar} ast query failed to compile at rule {}: {error}",
                 rules[pending.rules[upto - 1]].id
             );
         }
     }
 
-    format!(
-        "the combined {} ast query failed to compile: {error}",
-        pending.language
-    )
+    format!("the combined {grammar} ast query failed to compile: {error}")
 }
 
 /// Run every applicable ast rule over one file's pre-parsed tree, in a single
@@ -202,7 +222,11 @@ pub fn scan_file(
     let (Some(language), Some(tree)) = (language, tree) else {
         return Vec::new();
     };
-    let Some(combined) = queries.get(language) else {
+    // The query is picked by grammar and the envelope by language: a `.tsx`
+    // file is read by the tsx grammar and is still a typescript file to every
+    // rule's `languages:` filter.
+    let Some(combined) = queries.get(crate::parsers::grammar_name(language, Path::new(path_rel)))
+    else {
         return Vec::new();
     };
 
@@ -313,7 +337,7 @@ mod tests {
     }
 
     fn scan(compiled: &[CompiledRule], path: &str, lang: &str, content: &str) -> Vec<Finding> {
-        let tree = parsers::parse(lang, content).expect("tree");
+        let tree = parsers::parse_file(lang, std::path::Path::new(path), content).expect("tree");
         let queries = AstQueries::build(compiled).expect("queries should combine");
         scan_file(compiled, &queries, path, Some(lang), content, Some(&tree))
     }
@@ -670,6 +694,36 @@ rules:
                 ("rust.two", "dbg"),
             ]
         );
+    }
+
+    /// A `.tsx` file is a typescript file whose grammar is `tsx`. The plain
+    /// typescript grammar reads the JSX here as a broken type assertion and
+    /// swallows the statement after it, so this rule reports nothing at all
+    /// under the mapping that sent every `.tsx` file to that grammar.
+    #[cfg(feature = "tree-sitter-typescript")]
+    #[test]
+    fn a_typescript_rule_fires_after_jsx_in_a_tsx_file() {
+        let compiled = rules(
+            r#"
+version: 1
+rules:
+  - id: typescript.self-assignment
+    severity: warning
+    message: m
+    ast:
+      typescript: '((assignment_expression left: (identifier) @l right: (identifier) @r) @report (#eq? @l @r))'
+"#,
+        );
+        let content = "export function Badge({ label }: { label: string }) {\n  const icon = <img src=\"/icon.png\" alt=\"\" />;\n  label = label;\n  return <span className=\"badge\">{icon}{label}</span>;\n}\n";
+
+        let found = scan(&compiled, "src/Badge.tsx", "typescript", content);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].matched, "label = label");
+        assert_eq!(found[0].line, 3);
+
+        // The same rule set, one grammar per path: the `.ts` reading of the
+        // same bytes is a misparse and reports nothing.
+        assert!(scan(&compiled, "src/Badge.ts", "typescript", content).is_empty());
     }
 
     /// Two rules whose reported nodes tie on the start offset: `foo` is both
