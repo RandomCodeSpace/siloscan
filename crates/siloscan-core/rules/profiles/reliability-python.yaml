@@ -21,6 +21,33 @@
 #                             a genuine `=[]` or `={}` default. 16 are under
 #                             boto/ and 0.1929 per kLOC on their own;
 #                             excluding tests alone leaves 0.2652, still over.
+#
+# Three candidates from the #103 python pitfall list (#106) are deliberately
+# absent, each removed on the measurement recorded here rather than re-tuned.
+# All three were measured over requests 2.34.2, flask 3.1.2, black 26.5.1 and
+# boto v2.13.2 under the 2.2 policy:
+#   singleton-equality-comparison  141 findings on boto, 1.6998 per kLOC
+#                                  against the 0.25 warning ceiling. The six
+#                                  read are all genuine `== None` where `is`
+#                                  was meant, but they are spread over 52 files
+#                                  of the library itself, so no path class
+#                                  carries the breach.
+#   duplicate-definition           509 findings on black, 4.2444 per kLOC. All
+#                                  509 are under tests/data/, where every
+#                                  formatter fixture repeats its whole module
+#                                  below a `# output` marker, and the five read
+#                                  are all false positives. Excluding the test
+#                                  tree takes the rate to zero on all four
+#                                  repositories, along with the four genuine
+#                                  shadowed test methods the rule finds on
+#                                  boto, so the exclusion would leave nothing
+#                                  measured.
+#   duplicate-dict-key             not measurable. The query pairs every two
+#                                  `pair` siblings of a dict literal, which
+#                                  costs 0.25 s at 250 keys, 15 s at 1000 and
+#                                  123 s at 2000; black's
+#                                  profiling/dict_huge.py holds about 41,000
+#                                  and the scan does not finish.
 version: 1
 rules:
   - id: reliability.python.self-comparison
@@ -33,3 +60,63 @@ rules:
     message: "both arms of this if have the same body, so the condition decides nothing"
     ast:
       python: "((if_statement consequence: (block) @a alternative: (else_clause body: (block) @b)) @report (#eq? @a @b))"
+  - id: reliability.python.is-literal-comparison
+    severity: warning
+    message: "an identity test against a literal depends on whether the interpreter interned that value"
+    ast:
+      python: "(comparison_operator [\"is\" \"is not\"] [(string) (integer) (float)] @report)"
+  - id: reliability.python.self-assignment
+    severity: warning
+    message: "this assignment writes a local to itself and has no effect"
+    ast:
+      python: "((function_definition body: (block (expression_statement (assignment left: (identifier) @l right: (identifier) @r) @report))) (#eq? @l @r))"
+  - id: reliability.python.implicit-string-concat-in-collection
+    severity: warning
+    message: "two adjacent string literals join into one element here, which is usually a missing comma"
+    ast:
+      python: "((list (concatenated_string) @report) (#not-match? @report \"\\n\"))\n((set (concatenated_string) @report) (#not-match? @report \"\\n\"))\n((tuple (concatenated_string) @report) (#not-match? @report \"\\n\"))"
+  - id: reliability.python.raise-not-implemented
+    severity: warning
+    message: "this raises the NotImplemented sentinel rather than NotImplementedError, so it fails with a TypeError"
+    ast:
+      python: "((raise_statement (identifier) @report) (#eq? @report \"NotImplemented\"))\n((raise_statement (call function: (identifier) @report)) (#eq? @report \"NotImplemented\"))"
+  - id: reliability.python.return-in-finally
+    severity: warning
+    message: "a jump out of a finally block discards whatever exception the try raised"
+    ast:
+      python: "(finally_clause (block [(return_statement) (break_statement) (continue_statement)] @report))"
+  - id: reliability.python.missing-self-parameter
+    severity: warning
+    message: "the first parameter of this method is not the instance, so every call through an instance fills the wrong slot"
+    ast:
+      python: "((class_definition body: (block (function_definition parameters: (parameters . (identifier) @p)) @report)) (#not-any-of? @p \"self\" \"cls\" \"mcs\" \"mcls\" \"metacls\"))"
+  - id: reliability.python.comparison-against-bare-literal
+    severity: warning
+    message: "the right operand of this or is a bare literal, so the condition is always true"
+    ast:
+      python: "(boolean_operator left: (comparison_operator) operator: \"or\" right: [(integer) (float) (string)] @report)"
+  - id: reliability.python.subprocess-shell-true
+    severity: warning
+    message: "shell=True runs the command line through a shell, so any interpolated value is shell syntax"
+    ast:
+      python: "((call arguments: (argument_list (keyword_argument name: (identifier) @k value: (true)))) @report (#eq? @k \"shell\"))"
+  - id: reliability.python.yaml-load-without-loader
+    severity: warning
+    message: "yaml.load without an explicit loader builds arbitrary python objects from the document"
+    ast:
+      python: "((call function: (attribute object: (identifier) @o attribute: (identifier) @m) arguments: (argument_list) @args) @report (#eq? @o \"yaml\") (#eq? @m \"load\") (#not-match? @args \"Loader\"))"
+  - id: reliability.python.open-without-encoding
+    severity: info
+    message: "this text-mode open names no encoding, so it reads a different file under a different locale"
+    ast:
+      python: "((call function: (identifier) @f arguments: (argument_list) @args) @report (#eq? @f \"open\") (#not-match? @args \"encoding\") (#not-match? @args \"[\\\"'][rwxa+]*b[rwxa+]*[\\\"']\"))"
+  - id: reliability.python.unreachable-after-return
+    severity: warning
+    message: "this statement follows a return in the same block and can never run"
+    ast:
+      python: "((block (return_statement) . (_) @report) (#not-match? @report \"^#\"))"
+  - id: reliability.python.assert-on-tuple
+    severity: warning
+    message: "a non-empty tuple is always true, so this assert can never fail"
+    ast:
+      python: "(assert_statement . (tuple) @report)"

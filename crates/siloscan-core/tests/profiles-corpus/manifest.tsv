@@ -362,6 +362,37 @@ python/self-comparison-negative.py	2	NONE	the operands are two different identif
 python/bare-except-negative.py	4	NONE	the except clause names an exception type
 python/identical-if-branches-positive.py	2	reliability.python.identical-if-branches	both arms are byte-identical, which is the copy-paste shape the rule owns
 python/identical-if-branches-negative.py	2	NONE	the two arms differ, so the condition decides the value
+python/is-literal-comparison-positive.py	2	reliability.python.is-literal-comparison	`is` against a string literal tests interning rather than equality
+python/is-literal-comparison-positive.py	4	reliability.python.is-literal-comparison	`is not` against an integer literal is the same identity test negated
+python/is-literal-comparison-negative.py	2	NONE	the operand is None, the singleton an identity test is for
+python/self-assignment-positive.py	2	reliability.python.self-assignment	both sides of the assignment are the same local name, so it does nothing
+python/self-assignment-negative.py	2	NONE	the assignment reads a different name, which is an ordinary binding
+python/implicit-string-concat-in-collection-positive.py	3	reliability.python.implicit-string-concat-in-collection	the two adjacent literals join into one list element, which is a missing comma
+python/implicit-string-concat-in-collection-negative.py	6	NONE	the wrapped concatenation spans lines and is parenthesised, which is the deliberate long-message idiom
+python/raise-not-implemented-positive.py	2	reliability.python.raise-not-implemented	the raise names the NotImplemented sentinel rather than the exception
+python/raise-not-implemented-positive.py	6	reliability.python.raise-not-implemented	the same sentinel called rather than named
+python/raise-not-implemented-negative.py	2	NONE	NotImplementedError is the exception an abstract method wants
+python/return-in-finally-positive.py	5	reliability.python.return-in-finally	the return in the finally block discards whatever the try raised
+python/return-in-finally-negative.py	5	NONE	the finally block only calls a cleanup method
+python/missing-self-parameter-positive.py	2	reliability.python.missing-self-parameter	the method's first parameter is not the instance
+python/missing-self-parameter-negative.py	6	NONE	the staticmethod is a decorated definition, which the pattern does not reach
+python/comparison-against-bare-literal-positive.py	2	reliability.python.comparison-against-bare-literal	the right operand of the or is a bare integer, so the branch is always taken
+python/comparison-against-bare-literal-negative.py	2	NONE	both arms of the or are comparisons
+python/subprocess-shell-true-positive.py	5	reliability.python.subprocess-shell-true	the call passes shell=True, so the command line is shell syntax
+python/subprocess-shell-true-negative.py	5	NONE	shell=False keeps the command off a shell
+python/yaml-load-without-loader-positive.py	5	reliability.python.yaml-load-without-loader	yaml.load is called with no loader argument
+python/yaml-load-without-loader-negative.py	6	NONE	the call names a safe loader
+python/open-without-encoding-positive.py	2	reliability.python.open-without-encoding	the read-mode open names no encoding
+python/open-without-encoding-positive.py	7	reliability.python.open-without-encoding	the write-mode open names no encoding either
+python/open-without-encoding-negative.py	5	NONE	the call names an encoding
+python/unreachable-after-return-positive.py	3	reliability.python.unreachable-after-return	the assignment directly follows a return in the same block
+python/unreachable-after-return-negative.py	2	NONE	the node after the return is a trailing comment, not a statement
+python/assert-on-tuple-positive.py	2	reliability.python.assert-on-tuple	the assert's condition is a non-empty tuple, which is always true
+python/assert-on-tuple-negative.py	2	NONE	the tuple is the assert's message operand, not its condition
+python/lambda-assignment-positive.py	1	maintainability.python.lambda-assignment	the lambda is bound to a name and stays anonymous in tracebacks
+python/lambda-assignment-negative.py	5	NONE	the lambda is passed as an argument rather than assigned
+python/star-import-positive.py	1	maintainability.python.star-import	the import is a wildcard, so the namespace depends on the other module
+python/star-import-negative.py	1	NONE	the import names one symbol
 # javascript
 javascript/function-length-over.js	1	maintainability.javascript.function-length	the function is 151 lines, one over the profile's 150
 javascript/function-length-under.js	1	NONE	the function is 150 lines, which the profile allows
