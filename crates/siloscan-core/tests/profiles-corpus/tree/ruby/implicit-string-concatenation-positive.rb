@@ -1,0 +1,1 @@
+NAMES = ['alpha' 'beta', 'gamma']

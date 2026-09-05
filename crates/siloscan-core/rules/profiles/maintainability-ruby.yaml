@@ -3,6 +3,10 @@
 # are this repository's, chosen conservatively so the first run of a real tree
 # stays readable.
 #
+# redundant-string-coercion is the document's one query rule, written against
+# tree-sitter-ruby's own node-types.json; no pattern or message text is taken
+# from another analyser.
+#
 # Identity: maintainability-ruby@1. See crates/siloscan-core/src/profiles.rs.
 #
 # function-length is deliberately absent. The engine counts Ruby's `do_block`
@@ -37,3 +41,10 @@ rules:
     metric:
       measure: cyclomatic-complexity
       max: 25
+
+  - id: maintainability.ruby.redundant-string-coercion
+    severity: info
+    message: 'Interpolation already calls to_s, so this explicit call adds nothing.'
+    ast:
+      ruby: |
+        (interpolation (call method: (identifier) @m .) @report (#eq? @m "to_s"))

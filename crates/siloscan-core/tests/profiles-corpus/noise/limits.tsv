@@ -93,6 +93,17 @@ reliability.ruby.identical-if-branches	0	0.000000	2026-09-03	#78 P4b: no finding
 reliability.ruby.rescue-exception	0	0.846836	2026-09-05	#122: severity to info; max of puma 0.8468, rails 0.1157, sinatra 0.2817
 reliability.ruby.rescue-modifier	0	0.846836	2026-09-05	#122: severity to info; max of puma 0.8468, rails 0.3984, sinatra 0.1690
 reliability.ruby.self-assignment	0	0.010768	2026-09-03	#78 P4b: max of puma 0.0000, rails 0.0108, sinatra 0.0000
+reliability.ruby.nested-method-definition	0	0.000000	2026-09-05	#103 ruby: max of sinatra 0.0000, puma 0.0000, rails 0.0000
+reliability.ruby.duplicate-hash-key	0	0.000000	2026-09-05	#103 ruby: max of sinatra 0.0000, puma 0.0000, rails 0.0000
+reliability.ruby.duplicate-case-condition	0	0.000000	2026-09-05	#103 ruby: max of sinatra 0.0000, puma 0.0000, rails 0.0000
+reliability.ruby.shadowed-rescue	0	0.000000	2026-09-05	#103 ruby: max of sinatra 0.0000, puma 0.0000, rails 0.0000
+reliability.ruby.debugger-call	0	0.000000	2026-09-05	#103 ruby: max of sinatra 0.0000, puma 0.0000, rails 0.0000
+reliability.ruby.literal-condition	0	0.000000	2026-09-05	#103 ruby: max of sinatra 0.0000, puma 0.0000, rails 0.0000
+reliability.ruby.implicit-string-concatenation	0	0.000000	2026-09-05	#103 ruby: max of sinatra 0.0000, puma 0.0000, rails 0.0000
+reliability.ruby.deprecated-exists	0	0.000000	2026-09-05	#103 ruby: max of sinatra 0.0000, puma 0.0000, rails 0.0000
+reliability.ruby.ineffective-access-modifier	0	0.056332	2026-09-05	#103 ruby: max of sinatra 0.0563, puma 0.0000, rails 0.0135
+reliability.ruby.empty-ensure	0	0.000000	2026-09-05	#103 ruby: max of sinatra 0.0000, puma 0.0000, rails 0.0000
+maintainability.ruby.redundant-string-coercion	0	0.000000	2026-09-05	#103 ruby: max of sinatra 0.0000, puma 0.0000, rails 0.0000
 # rust, measured against ripgrep 15.2.0, tokio 1.40.0 and serde 1.0.229.
 # max_per_kloc is the highest of the three, rounded up to the four decimals
 # this file carries: the gate compares the unrounded rate, so rounding down
