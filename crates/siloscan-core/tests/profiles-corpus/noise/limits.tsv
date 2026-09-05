@@ -84,6 +84,16 @@ maintainability.rust.function-length	0	0.7206	2026-09-03	#78 P4a
 maintainability.rust.parameter-count	0	0.0118	2026-09-03	#78 P4a
 maintainability.rust.nesting-depth	0	0.0901	2026-09-03	#78 P4a
 maintainability.rust.cyclomatic-complexity	0	0.1201	2026-09-03	#78 P4a
+# rust, the 2.2 pitfall list under #103, measured against the same three
+# repositories at six decimals.
+reliability.rust.static-mut	0	0.000000	2026-09-05	#103 rust: max of ripgrep 0.0000, tokio 0.0000, serde 0.0000
+reliability.rust.transmute-call	0	0.023519	2026-09-05	#103 rust: max of ripgrep 0.0000, tokio 0.0235, serde 0.0000
+reliability.rust.self-comparison-ordering	0	0.000000	2026-09-05	#103 rust: max of ripgrep 0.0000, tokio 0.0000, serde 0.0000
+reliability.rust.unreachable-after-return	0	0.011760	2026-09-05	#103 rust: max of ripgrep 0.0000, tokio 0.0118, serde 0.0000
+maintainability.rust.bool-literal-comparison	0	0.028203	2026-09-05	#103 rust: max of ripgrep 0.0282, tokio 0.0000, serde 0.0000
+maintainability.rust.let-and-return	0	0.056405	2026-09-05	#103 rust: max of ripgrep 0.0564, tokio 0.0353, serde 0.0000
+maintainability.rust.wildcard-import	0	0.258702	2026-09-05	#103 rust: max of ripgrep 0.0846, tokio 0.2587, serde 0.1501
+maintainability.rust.blanket-lint-allow	0	0.000000	2026-09-05	#103 rust: max of ripgrep 0.0000, tokio 0.0000, serde 0.0000
 # go, measured against cobra 1.10.2 and gin 1.12.0, with
 # maintainability.go.function-length raised once from 120 to 150 lines.
 reliability.go.self-comparison	0	0.0000	2026-09-03	#78 P4a

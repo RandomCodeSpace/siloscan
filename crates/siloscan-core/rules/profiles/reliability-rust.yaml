@@ -14,6 +14,27 @@
 # `info` reports. Downgrading is not tuning: the query is unchanged and the
 # measured row in tests/profiles-corpus/noise/limits.tsv still records what it
 # always did.
+#
+# Four candidates from the 2.2 rust pitfall list are deliberately absent, each
+# removed on a measurement over the pinned noise set rather than re-tuned:
+#   unsafe-send-sync-impl     1.2700 per kLOC on tokio, over the warning gate.
+#                             The 108 findings sit in sync, runtime, util, loom,
+#                             io, task, signal and process and in two sibling
+#                             crates, so no one path exclusion brings it back
+#                             inside the gate.
+#   unchecked-access          0.6350 per kLOC on tokio, over the warning gate.
+#                             Excluding the test tree leaves 42 findings and
+#                             0.4939, still over. Of six findings read, three are
+#                             `File::set_len` calls, a safe filesystem API the
+#                             query cannot tell from `Vec::set_len`.
+#   match-same-arms           1.1281 per kLOC on ripgrep, over the info gate, and
+#                             all six findings read are the variant-dispatch
+#                             idiom, where the two arms bind payloads of
+#                             different types and cannot be merged.
+#   uninitialized-memory      0.0588 per kLOC on tokio, inside the gate, but all
+#                             five findings are `mem::zeroed()` for a #[repr(C)]
+#                             libc struct in one FFI test, where the all-zero
+#                             value is valid and is how the C API is cleared.
 version: 1
 rules:
   - id: reliability.rust.self-comparison
@@ -41,3 +62,23 @@ rules:
     message: "mem::forget skips the value's destructor and leaks whatever it owns"
     ast:
       rust: "((call_expression function: (scoped_identifier path: (identifier) @p name: (identifier) @f) @report (#eq? @p \"mem\") (#eq? @f \"forget\")))"
+  - id: reliability.rust.static-mut
+    severity: warning
+    message: "this static is mutable and shared with no synchronisation"
+    ast:
+      rust: "(static_item (mutable_specifier)) @report"
+  - id: reliability.rust.transmute-call
+    severity: warning
+    message: "transmute reinterprets the bytes of a value with no check that the target type accepts them"
+    ast:
+      rust: "((call_expression function: (scoped_identifier name: (identifier) @f)) @report (#eq? @f \"transmute\"))\n((call_expression function: (generic_function function: (scoped_identifier name: (identifier) @g))) @report (#eq? @g \"transmute\"))"
+  - id: reliability.rust.self-comparison-ordering
+    severity: warning
+    message: "both operands of this comparison are the same identifier, so its result is fixed"
+    ast:
+      rust: "((binary_expression left: (identifier) @l operator: [\"!=\" \"<\" \">\" \"<=\" \">=\"] right: (identifier) @r) @report (#eq? @l @r))"
+  - id: reliability.rust.unreachable-after-return
+    severity: warning
+    message: "this statement follows a return in the same block and never runs"
+    ast:
+      rust: "(block (expression_statement (return_expression)) . [(expression_statement) (let_declaration)] @report)"
