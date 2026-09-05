@@ -180,7 +180,7 @@ reliability.go.self-boolean-operand	0	0.000000	2026-09-05	#103 go: max of cobra 
 reliability.go.self-assignment-field	0	0.000000	2026-09-05	#103 go: max of cobra 0.0000, gin 0.0000, client_golang 0.0000
 reliability.go.duplicate-switch-case	0	0.000000	2026-09-05	#103 go: max of cobra 0.0000, gin 0.0000, client_golang 0.0000
 reliability.go.duplicate-else-if-condition	0	0.000000	2026-09-05	#103 go: max of cobra 0.0000, gin 0.0000, client_golang 0.0000
-reliability.go.error-string-comparison	0	0.061031	2026-09-05	#103 go: max of cobra 0.0000, gin 0.0000, client_golang 0.0610
+reliability.go.error-string-comparison	0	0.061032	2026-09-05	#103 reconcile: max of prometheus/client_golang 0.061031
 reliability.go.empty-error-branch	0	0.000000	2026-09-05	#103 go: max of cobra 0.0000, gin 0.0000, client_golang 0.0000
 reliability.go.redundant-boolean-comparison	0	0.079675	2026-09-05	#103 go: max of cobra 0.0797, gin 0.0704, client_golang 0.0000
 reliability.go.errors-new-sprintf	0	0.000000	2026-09-05	#103 go: max of cobra 0.0000, gin 0.0000, client_golang 0.0000
@@ -197,7 +197,7 @@ maintainability.python.function-length	0	0.4631	2026-09-03	#78 P4a
 maintainability.python.nesting-depth	0	0.132607	2026-09-05	#122: max of requests 0.0000, flask 0.0000, black 0.0584, boto 0.1326
 maintainability.python.cyclomatic-complexity	0	0.1251	2026-09-03	#78 P4a
 reliability.python.is-literal-comparison	0	0.016678	2026-09-05	#103 python: max of requests 0.0000, flask 0.0000, black 0.0167, boto 0.0000
-reliability.python.self-assignment	0	0.000000	2026-09-05	#103 python: max of requests 0.0000, flask 0.0000, black 0.0000, boto 0.0000
+reliability.python.self-assignment	0	0.005537	2026-09-05	#103 reconcile: max of curl 0.005537
 reliability.python.implicit-string-concat-in-collection	0	0.008339	2026-09-05	#103 python: max of requests 0.0000, flask 0.0000, black 0.0083, boto 0.0000
 reliability.python.raise-not-implemented	0	0.060276	2026-09-05	#103 python: max of requests 0.0000, flask 0.0000, black 0.0000, boto 0.0603
 reliability.python.return-in-finally	0	0.012056	2026-09-05	#103 python: max of requests 0.0000, flask 0.0000, black 0.0000, boto 0.0121
@@ -234,18 +234,18 @@ reliability.javascript.duplicate-switch-case	0	0.000000	2026-09-05	#103 javascri
 reliability.javascript.compare-neg-zero	0	0.000000	2026-09-05	#103 javascript: max of express 0.000000, lodash 0.000000, axios 0.000000
 reliability.javascript.invalid-typeof-comparison	0	0.000000	2026-09-05	#103 javascript: max of express 0.000000, lodash 0.000000, axios 0.000000
 reliability.javascript.empty-destructuring-pattern	0	0.000000	2026-09-05	#103 javascript: max of express 0.000000, lodash 0.000000, axios 0.000000
-reliability.javascript.throw-literal	0	0.000000	2026-09-05	#103 javascript: max of express 0.000000, lodash 0.000000, axios 0.000000
+reliability.javascript.throw-literal	0	0.013662	2026-09-05	#103 reconcile: max of rxjs 0.013661
 reliability.javascript.return-in-finally	0	0.000000	2026-09-05	#103 javascript: max of express 0.000000, lodash 0.000000, axios 0.000000
 reliability.javascript.unsafe-negation	0	0.000000	2026-09-05	#103 javascript: max of express 0.000000, lodash 0.000000, axios 0.000000
 reliability.javascript.dynamic-code-execution	0	0.000000	2026-09-05	#103 javascript: max of express 0.000000, lodash 0.000000, axios 0.000000
-reliability.javascript.prototype-builtin-call	0	0.061177	2026-09-05	#103 javascript: max of express 0.061177, lodash 0.000000, axios 0.000000
-reliability.javascript.self-assignment-member	0	0.000000	2026-09-05	#103 javascript: max of express 0.000000, lodash 0.000000, axios 0.000000
+reliability.javascript.prototype-builtin-call	0	0.068306	2026-09-05	#103 reconcile: max of rxjs 0.068305, express 0.061177
+reliability.javascript.self-assignment-member	0	0.016151	2026-09-05	#103 reconcile: max of rails 0.016151
 reliability.javascript.new-wrapper-object	0	0.000000	2026-09-05	#103 javascript: max of express 0.000000, lodash 0.000000, axios 0.000000
 reliability.javascript.setter-returns-value	0	0.000000	2026-09-05	#103 javascript: max of express 0.000000, lodash 0.000000, axios 0.000000
 reliability.javascript.unreachable-after-return	0	0.000000	2026-09-05	#103 javascript: max of express 0.000000, lodash 0.000000, axios 0.000000
 maintainability.javascript.nested-ternary-in-consequence	0	0.693892	2026-09-05	#103 javascript: max of express 0.000000, lodash 0.693892, axios 0.067988
 reliability.javascript.async-function-without-await	0	0.101982	2026-09-05	#103 javascript rescued: max of express 0.000000, lodash 0.000000, axios 0.101982, with test trees excluded by path
-reliability.javascript.getter-without-return	0	0.000000	2026-09-05	#103 javascript rescued: max of express 0.000000, lodash 0.000000, axios 0.000000
+reliability.javascript.getter-without-return	0	0.022753	2026-09-05	#103 reconcile: max of fmt 0.022752
 # typescript, measured against zod 3.23.8, rxjs 7.8.1 and nest 12.0.1. There is
 # no maintainability.typescript.function-length row because there is no such
 # rule: at 150 with the same exclusion it still measured 2.0765 per kLOC on
@@ -273,7 +273,7 @@ reliability.typescript.non-null-after-optional-chain	0	0.009435	2026-09-05	#103 
 reliability.typescript.duplicate-object-key	0	0.000000	2026-09-05	#103 typescript: max of zod 0.000000, rxjs 0.000000, nest 0.000000, mantine 0.000000
 reliability.typescript.unreachable-after-return	0	0.000000	2026-09-05	#103 typescript: max of zod 0.000000, rxjs 0.000000, nest 0.000000, mantine 0.000000
 maintainability.typescript.var-declaration	0	0.013662	2026-09-05	#103 typescript: max of zod 0.000000, rxjs 0.013662, nest 0.000000, mantine 0.000000
-maintainability.typescript.require-import	0	0.040984	2026-09-05	#103 typescript: max of zod 0.000000, rxjs 0.040984, nest 0.000000, mantine 0.002766
+maintainability.typescript.require-import	0	0.101982	2026-09-05	#103 reconcile: max of axios 0.101982, rxjs 0.040983, mantine 0.002765
 maintainability.typescript.unnecessary-type-constraint	0	0.000000	2026-09-05	#103 typescript: max of zod 0.000000, rxjs 0.000000, nest 0.000000, mantine 0.000000
 maintainability.typescript.literal-type-assertion	0	0.000000	2026-09-05	#103 typescript: max of zod 0.000000, rxjs 0.000000, nest 0.000000, mantine 0.000000
 reliability.typescript.switch-case-fallthrough	0	0.000000	2026-09-05	#103 typescript rescued: max of zod 0.000000, rxjs 0.000000, nest 0.000000, mantine 0.000000
