@@ -24,6 +24,30 @@
 # the severity that says so. Downgrading is not tuning: the query is unchanged
 # and the measured row in tests/profiles-corpus/noise/limits.tsv still records
 # what it always did.
+#
+# Four more candidates, from the #110 pitfall list, are absent on the same
+# terms as the two removals above: every finding read on curl, jq or redis was
+# a false positive, so they are dropped rather than tuned. Each stayed inside
+# the 2.2 `warning` ceiling of 0.25 per kLOC, which is why the number alone
+# would have shipped them.
+#   comparison-as-statement       one finding, on jq: the fragment
+#                                 `&& Flt_Rounds == 1` that the parser is left
+#                                 holding when `#ifndef` blocks split an `if`
+#                                 condition across directives.
+#   chained-comparison            ten findings, all reported at one `#error`
+#                                 line in redis' vendored jemalloc, where the
+#                                 parser glues that directive's string literal
+#                                 to the `#if X < N` lines below it. None is an
+#                                 `a < b < c` anyone wrote.
+#   assignment-in-loop-condition  two findings, both `while (size -= 64)` on the
+#                                 tail of a do-while in curl's md4 and md5. A
+#                                 compound assignment does not read as a
+#                                 comparison, which is the mistake the rule is
+#                                 for.
+#   non-literal-format-string     five findings, all `printf(LOG_COLOR_RED)` and
+#                                 its siblings in redis-cli, where the macro
+#                                 expands to a string literal and the call is an
+#                                 ordinary constant format after preprocessing.
 version: 1
 rules:
   - id: reliability.c.self-comparison
@@ -79,3 +103,103 @@ rules:
         (binary_expression
           left: (string_literal)
           operator: "==") @report
+
+  - id: reliability.c.bitwise-comparison-precedence
+    severity: warning
+    message: 'The bitwise operator binds looser than the comparison here, so the comparison is evaluated first. Parenthesise the bitwise operands if that is deliberate.'
+    ast:
+      c: |
+        (binary_expression left: (_) operator: ["&" "|" "^"] right: (binary_expression operator: ["==" "!="])) @report
+        (binary_expression left: (binary_expression operator: ["==" "!="]) operator: ["&" "|" "^"]) @report
+
+  - id: reliability.c.contradictory-equality
+    severity: warning
+    message: 'This condition requires the same variable to equal two different literals, so it is always false.'
+    ast:
+      c: |
+        ((binary_expression
+           left: (binary_expression left: (identifier) @x operator: "==" right: (number_literal) @a)
+           operator: "&&"
+           right: (binary_expression left: (identifier) @y operator: "==" right: (number_literal) @b)) @report
+         (#eq? @x @y)
+         (#not-eq? @a @b))
+
+  - id: reliability.c.tautological-inequality
+    severity: warning
+    message: 'This condition holds whenever the variable differs from either literal, so it is always true.'
+    ast:
+      c: |
+        ((binary_expression
+           left: (binary_expression left: (identifier) @x operator: "!=" right: (number_literal) @a)
+           operator: "||"
+           right: (binary_expression left: (identifier) @y operator: "!=" right: (number_literal) @b)) @report
+         (#eq? @x @y)
+         (#not-eq? @a @b))
+
+  - id: reliability.c.duplicate-else-if-condition
+    severity: warning
+    message: 'This else-if repeats the condition of the if above it, so its body cannot run.'
+    ast:
+      c: |
+        ((if_statement
+           condition: (parenthesized_expression) @a
+           alternative: (else_clause (if_statement condition: (parenthesized_expression) @b))) @report
+         (#eq? @a @b))
+
+  - id: reliability.c.identical-logical-operands
+    severity: warning
+    message: 'Both operands of this logical operator are the same identifier, so one of them is redundant.'
+    ast:
+      c: |
+        ((binary_expression left: (identifier) @l operator: ["&&" "||"] right: (identifier) @r) @report
+         (#eq? @l @r))
+
+  - id: reliability.c.self-relational-comparison
+    severity: warning
+    message: 'Both operands of this relational comparison are the same identifier, so the result is constant.'
+    ast:
+      c: |
+        ((binary_expression left: (identifier) @l operator: ["<" ">" "<=" ">="] right: (identifier) @r) @report
+         (#eq? @l @r))
+
+  - id: reliability.c.gets-call
+    severity: warning
+    message: 'gets cannot bound what it writes and was removed from the language in C11. Use fgets.'
+    ast:
+      c: |
+        ((call_expression function: (identifier) @f) @report (#eq? @f "gets"))
+
+  - id: reliability.c.unbounded-scanf-conversion
+    severity: warning
+    message: 'This scanf format uses %s with no field width, so the conversion can write past the end of the destination.'
+    ast:
+      c: |
+        ((call_expression function: (identifier) @f arguments: (argument_list (string_literal) @fmt)) @report
+         (#any-of? @f "scanf" "fscanf" "sscanf" "vscanf" "vsscanf" "vfscanf")
+         (#match? @fmt "%s"))
+
+  - id: reliability.c.strcmp-nonzero-comparison
+    severity: warning
+    message: 'Only the sign of this function''s result is specified, so comparing it against a non-zero value is unreliable.'
+    ast:
+      c: |
+        ((binary_expression
+           left: (call_expression function: (identifier) @f)
+           operator: ["==" "!="]
+           right: (number_literal) @n) @report
+         (#any-of? @f "strcmp" "strncmp" "memcmp" "strcasecmp" "strncasecmp" "wcscmp")
+         (#not-eq? @n "0"))
+
+  - id: reliability.c.strncat-destination-sizeof
+    severity: warning
+    message: 'The third argument of strncat is the number of bytes to append, not the size of the destination.'
+    ast:
+      c: |
+        ((call_expression
+           function: (identifier) @f
+           arguments: (argument_list
+             . (identifier) @dst
+             (_)
+             (sizeof_expression value: (parenthesized_expression (identifier) @sz)) .)) @report
+         (#eq? @f "strncat")
+         (#eq? @dst @sz))

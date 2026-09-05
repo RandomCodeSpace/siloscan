@@ -88,6 +88,28 @@ c/metric-under.c	1	NONE	the function spans exactly 150 lines, which is this docu
 c/metric-under.c	151	NONE	seven parameters is exactly the profile's limit
 c/metric-under.c	154	NONE	five nested if statements is exactly the profile's limit
 c/metric-under.c	167	NONE	29 branches plus the entry path is 30, exactly this document's limit
+c/bitwise-comparison-precedence-positive.c	2	reliability.c.bitwise-comparison-precedence	`&` binds looser than `==`, so this reads as `a & (b == c)`
+c/bitwise-comparison-precedence-positive.c	5	reliability.c.bitwise-comparison-precedence	`==` binds tighter than `&`, so this reads as `(a == b) & c`
+c/bitwise-comparison-precedence-negative.c	2	NONE	the parentheses give the bitwise operands the grouping the author wrote them for
+c/bitwise-comparison-precedence-negative.c	5	NONE	the parentheses give the bitwise operands the grouping the author wrote them for
+c/contradictory-equality-positive.c	2	reliability.c.contradictory-equality	one variable cannot equal both 1 and 2, so the condition is always false
+c/contradictory-equality-negative.c	2	NONE	the two comparisons test different variables, which is an ordinary condition
+c/tautological-inequality-positive.c	2	reliability.c.tautological-inequality	one variable always differs from at least one of 1 and 2, so the condition is always true
+c/tautological-inequality-negative.c	2	NONE	`&&` requires both inequalities, which is the test the author meant
+c/duplicate-else-if-condition-positive.c	2	reliability.c.duplicate-else-if-condition	the else-if condition is byte-identical to the if condition, so its body cannot run
+c/duplicate-else-if-condition-negative.c	2	NONE	the two conditions test different variables, so the else-if is reachable
+c/identical-logical-operands-positive.c	2	reliability.c.identical-logical-operands	both operands are the identical identifier, so one of them is redundant
+c/identical-logical-operands-negative.c	2	NONE	the operands are different identifiers, which is an ordinary condition
+c/self-relational-comparison-positive.c	2	reliability.c.self-relational-comparison	both operands are the identical identifier, so the comparison is constant
+c/self-relational-comparison-negative.c	2	NONE	the operands are different identifiers, which is an ordinary comparison
+c/gets-call-positive.c	2	reliability.c.gets-call	gets has no way to bound what it writes and was removed from the language in C11
+c/gets-call-negative.c	2	NONE	fgets takes the size of the destination, which is the bounded spelling
+c/unbounded-scanf-conversion-positive.c	2	reliability.c.unbounded-scanf-conversion	the %s conversion carries no field width, so it can write past the end of the destination
+c/unbounded-scanf-conversion-negative.c	2	NONE	the field width bounds the conversion to the size of the destination
+c/strcmp-nonzero-comparison-positive.c	3	reliability.c.strcmp-nonzero-comparison	only the sign of strcmp's result is specified, so comparing it against 1 is unreliable
+c/strcmp-nonzero-comparison-negative.c	3	NONE	comparing against zero tests the sign, which is the specified use
+c/strncat-destination-sizeof-positive.c	3	reliability.c.strncat-destination-sizeof	strncat's third argument is the number of bytes to append, not the size of the destination
+c/strncat-destination-sizeof-negative.c	3	NONE	the count is a separate argument rather than the size of the destination
 cpp/positive.cpp	2	reliability.cpp.self-assignment	the assignment writes `a` to itself and has no effect
 cpp/positive.cpp	5	reliability.cpp.assignment-in-condition	the condition assigns rather than compares, with no second pair of parentheses
 cpp/positive.cpp	11	reliability.cpp.identical-if-branches	both arms are the byte-identical block `{ return 1; }`
