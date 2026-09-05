@@ -178,6 +178,61 @@ ruby/metric-over.rb	19	maintainability.ruby.cyclomatic-complexity	25 branches pl
 ruby/metric-under.rb	1	NONE	seven parameters is exactly the profile's limit
 ruby/metric-under.rb	4	NONE	five nested if expressions is exactly the profile's limit
 ruby/metric-under.rb	17	NONE	24 branches plus the entry path is 25, exactly the profile's limit
+# ruby, #103 pitfall list (#113)
+ruby/nested-method-definition-positive.rb	3	reliability.ruby.nested-method-definition	the inner def is a direct child of the outer method's body, so it is defined on the class only once outer runs
+ruby/nested-method-definition-negative.rb	3	NONE	define_method inside a block defines the method eagerly and is a different node
+ruby/nested-method-definition-negative.rb	10	NONE	a def inside a do_block belongs to the block's own body, which is how Class.new is written
+ruby/duplicate-hash-key-positive.rb	1	reliability.ruby.duplicate-hash-key	the key a: appears twice in one hash literal, so the first value is dropped
+ruby/duplicate-hash-key-negative.rb	1	NONE	the two keys differ
+ruby/duplicate-hash-key-negative.rb	2	NONE	a single pair cannot match itself, because the two captures come from different pairs
+ruby/duplicate-hash-key-negative.rb	3	NONE	an empty hash has no pair to compare
+ruby/duplicate-hash-key-negative.rb	4	NONE	the same key at two nesting levels belongs to two different hash nodes
+ruby/duplicate-hash-key-negative.rb	5	NONE	call-site keyword arguments parse as an argument_list, not a hash
+ruby/duplicate-hash-key-negative.rb	6	NONE	string keys are string nodes rather than hash_key_symbol, which is a recall cost and not a finding
+ruby/duplicate-case-condition-positive.rb	2	reliability.ruby.duplicate-case-condition	the value 1 is tested twice, so the third branch is unreachable
+ruby/duplicate-case-condition-positive.rb	10	reliability.ruby.duplicate-case-condition	the multi-value when 1, 2 already covers the 2 the next branch tests
+ruby/duplicate-case-condition-negative.rb	2	NONE	the two when values differ
+ruby/duplicate-case-condition-negative.rb	9	NONE	a single when branch cannot shadow itself
+ruby/shadowed-rescue-positive.rb	5	reliability.ruby.shadowed-rescue	ArgumentError descends from StandardError, which the preceding clause already caught
+ruby/shadowed-rescue-negative.rb	5	reliability.ruby.rescue-exception	Exception does not descend from StandardError so the clause is reachable and shadowed-rescue stays silent; the line is the shipped rescue-exception rule's own finding
+ruby/shadowed-rescue-negative.rb	13	NONE	the narrow clause comes first, so nothing is shadowed
+ruby/shadowed-rescue-negative.rb	19	NONE	a single rescue clause shadows nothing
+ruby/debugger-call-positive.rb	2	reliability.ruby.debugger-call	binding.pry is a breakpoint call
+ruby/debugger-call-positive.rb	6	reliability.ruby.debugger-call	a bare debugger in a method body is a breakpoint
+ruby/debugger-call-positive.rb	11	reliability.ruby.debugger-call	a bare byebug in a block body is a breakpoint
+ruby/debugger-call-positive.rb	17	reliability.ruby.debugger-call	a bare debugger in a then branch is a breakpoint
+ruby/debugger-call-positive.rb	21	reliability.ruby.debugger-call	a bare debugger at the top level is a breakpoint
+ruby/debugger-call-negative.rb	1	NONE	a parameter named debugger is not in statement position
+ruby/debugger-call-negative.rb	5	NONE	the left of an assignment is not a statement of its own
+ruby/debugger-call-negative.rb	9	NONE	logger.debug is a different receiver and method
+ruby/debugger-call-negative.rb	13	NONE	binding.local_variable_get is not one of the three breakpoint methods
+ruby/literal-condition-positive.rb	2	reliability.ruby.literal-condition	the if condition is the literal true, so the branch is always taken
+ruby/literal-condition-positive.rb	8	reliability.ruby.literal-condition	the unless condition is the literal false, so the branch is always taken
+ruby/literal-condition-negative.rb	2	NONE	the condition is an identifier and decides something
+ruby/literal-condition-negative.rb	8	NONE	while true is the ordinary infinite loop and is out of the query
+ruby/literal-condition-negative.rb	14	NONE	a constant comparison is a binary node, not a literal
+ruby/literal-condition-negative.rb	20	NONE	the modifier form is an if_modifier node and is out of the query
+ruby/implicit-string-concatenation-positive.rb	1	reliability.ruby.implicit-string-concatenation	the two adjacent literals become one element, so the array is one short
+ruby/implicit-string-concatenation-negative.rb	1	NONE	a comma separates every element
+ruby/implicit-string-concatenation-negative.rb	4	NONE	the backslash continuation spans two lines and is the deliberate long-message form
+ruby/deprecated-exists-positive.rb	2	reliability.ruby.deprecated-exists	File.exists? is the deprecated alias
+ruby/deprecated-exists-positive.rb	6	reliability.ruby.deprecated-exists	Dir.exists? is the deprecated alias
+ruby/deprecated-exists-negative.rb	2	NONE	exist? is the current spelling
+ruby/deprecated-exists-negative.rb	6	NONE	the receiver is an ordinary object rather than File or Dir
+ruby/ineffective-access-modifier-positive.rb	4	reliability.ruby.ineffective-access-modifier	private does not apply to a singleton method, so this one is public
+ruby/ineffective-access-modifier-negative.rb	4	NONE	private does apply to an instance method
+ruby/ineffective-access-modifier-negative.rb	10	NONE	no access modifier precedes the singleton method
+ruby/ineffective-access-modifier-negative.rb	18	NONE	private_class_method is the form that does apply to a singleton method
+ruby/ineffective-access-modifier-negative.rb	26	NONE	the anchored identifier is protected rather than private
+ruby/ineffective-access-modifier-negative.rb	38	NONE	the singleton method is not the statement immediately after private, which is the rule's recall cost
+ruby/empty-ensure-positive.rb	3	reliability.ruby.empty-ensure	the ensure clause has no statements
+ruby/empty-ensure-positive.rb	8	reliability.ruby.empty-ensure	a comment is an extra that does not widen the clause, so this ensure is still empty
+ruby/empty-ensure-negative.rb	3	NONE	the ensure clause calls h
+ruby/empty-ensure-negative.rb	9	NONE	the ensure clause has a comment and a statement
+ruby/redundant-string-coercion-positive.rb	2	maintainability.ruby.redundant-string-coercion	interpolation already calls to_s, so the explicit call adds nothing
+ruby/redundant-string-coercion-negative.rb	2	NONE	to_s(2) takes a base and is not redundant
+ruby/redundant-string-coercion-negative.rb	6	NONE	to_s(:db) takes a format and is not redundant
+ruby/redundant-string-coercion-negative.rb	10	NONE	the interpolation has no explicit coercion
 # rust
 rust/dbg-macro-positive.rs	2	maintainability.rust.dbg-macro	dbg! is a debugging aid left in the source
 rust/dbg-macro-negative.rs	2	NONE	the statement is an ordinary binding with no debugging macro
