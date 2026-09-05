@@ -37,7 +37,7 @@
 | zod | https://github.com/colinhacks/zod | v3.23.8 | ca42965df46b2f7e2747db29c40a26bcb32a51d5 | MIT | LICENSE | 165 | 937060 | pinned |
 | rxjs | https://github.com/ReactiveX/rxjs | 7.8.1 | 72bc92191ab959e27a969dc4476e14d95416573f | Apache-2.0 | LICENSE.txt | 759 | 3625407 | pinned |
 | nest | https://github.com/nestjs/nest | v12.0.1 | 4c751c503bc753095f4b4f052e106f95218cc33f | MIT | LICENSE | 1821 | 170937 | pinned |
-| mantine | https://github.com/mantinedev/mantine | 9.6.0 | de1a39dbbec5054861e29929e5b910ad63756c25 | MIT | LICENSE | 5481 | 5866958 | pinned |
+| mantine | https://github.com/mantinedev/mantine | 9.6.0 | de1a39dbbec5054861e29929e5b910ad63756c25 | MIT | LICENSE | 5481 | 11940269 | pinned |
 
 ## Go
 
@@ -100,9 +100,9 @@
 6. **Ripgrep**: Pinned latest stable `15.2.0` rather than the design's unspecified version.
 7. **Dapper**: Original design excluded sidekiq (LGPL 6.x); puma substituted as designed, and Dapper's Apache-2.0 license verified (`2.1.79`).
 
-All other repositories match design selections. Every license determined by reading the LICENSE file at the pinned commit. No exclusions required; all 33 repositories qualify under the permissive list (MIT, Apache-2.0, BSD-2/3-Clause, ISC, MPL-2.0, Unlicense, 0BSD, PSF-2.0, Ruby).
+The four rows added in 2.2 (see [2.2 additions](#22-additions)) are additions beyond the design's table rather than deviations from it; all other repositories match design selections. Every license determined by reading the LICENSE file at the pinned commit. No exclusions required; all 33 repositories qualify under the permissive list (MIT, Apache-2.0, BSD-2/3-Clause, ISC, MPL-2.0, Unlicense, 0BSD, PSF-2.0, Ruby).
 
-**Count**: 33 rows. The initial design listed 30 rows; Go and C# each had a third in-house entry (`otelcontext` for Go, and an unlisted C# example) that had no URL to clone and no upstream commit to pin, so they were not included as rows in the initial 2.1 set. Four new repositories were added in 2.2 under #118 to address measurement gaps (see [2.2 additions](#22-additions) below). `scripts/profile_noise.py` reads exactly these 33 rows.
+**Count**: 33 rows. The design's table in section 6.4 listed 30 entries, one of which is the in-house Go repository `otelcontext`: it has no URL to clone and no upstream commit to pin, so it was not included as a row, leaving 29 rows in the initial 2.1 set. Four new repositories were added in 2.2 under #118 to address measurement gaps (see [2.2 additions](#22-additions) below), giving 33. `scripts/profile_noise.py` reads exactly these 33 rows.
 
 **Note**: Rails measurement shows 3,334 files; the design stated "activesupport/ only" (~50k LoC). This count includes the full Rails repository at tag `v8.1.3.1`. If strict adherence to "activesupport/ only" is required, a separate measurement isolating that subdirectory should be performed.
 
@@ -118,7 +118,9 @@ Four repositories were added to fill gaps in the 2.2 pitfall measurement (#118):
 
 3. **C#: dotnet/eShop dotnet8** — C# pitfall list (#112) determined that logging and service-code rules could not be measured against the pinned set (three libraries with minimal logging). dotnet/eShop is a reference application codebase with 529 `.cs` files that exercise logging, exception handling, and typical service patterns.
 
-4. **Python: boto/boto v2.13.2** — Python pitfall list (#106) encountered ruff-derived pitfalls where requests, flask, and black (all ruff-maintained) measure zero; the list's dispositions were derived from CPython standard library instead. Boto/boto is a legacy AWS SDK (pre-boto3, actively maintained through v2.13.2) with 531 Python files and no ruff or flake8 configuration, permitting measurement against native pre-modern Python code patterns.
+4. **Python: boto/boto v2.13.2** — Python pitfall list (#106) recorded that the pinned Python set is ruff-maintained, so ruff-derived pitfalls read zero on it, and asked for "a fourth repository chosen for age and no ruff config"; four of its dispositions were settled by a 227 kLOC CPython survey instead. Boto is the pre-boto3 AWS SDK, superseded by boto3 rather than still maintained; the pinned tag `v2.13.2` dates from 2013-09-16, predating ruff, and the tree carries no ruff or flake8 configuration (`pylintrc` is the only linter config present). It contributes 531 Python files of pre-modern Python.
+
+**Verification date**: 2026-09-05. These four rows were measured by the method in the header on that date; the 2026-09-03 header date covers the 29 rows of the 2.1 set only.
 
 ---
 
@@ -130,8 +132,8 @@ Four repositories were added to fill gaps in the 2.2 pitfall measurement (#118):
 
 **Java** (#109): The pinned set (gson 2.14.0, commons-lang 3.20.0, guava 32.1.3) are three mature libraries with active maintenance. The pitfall list discusses three rules deliberately not proposed and documents primitives needed (P1, P2) but does not recommend adding repositories with particular characteristics to fill measurement gaps.
 
-**C** (#110): The pinned set (curl 8.9.1, jq 1.8.2rc1, redis 6.2.14) includes a network utility, a JSON processor, and a data structure library—a mix of I/O-heavy and algorithmic code. The document notes "no candidate here has been run against the pinned noise set" and states that measurement is "the implementation package's job," indicating the pitfall analysis itself does not identify a specific repository gap to fill.
+**C** (#110): The pinned set (curl 8.9.1, jq 1.8.2rc1, redis 6.2.14) includes a network utility, a JSON processor, and a data structure library—a mix of I/O-heavy and algorithmic code. The pitfall list judged expected noise from a 78-line `#ifdef`-heavy probe rather than from the pinned set — "Noise is judgement plus that probe, not the per-kLOC gate" — and identifies no repository gap to fill.
 
-**C++** (#111): The pinned set (fmt 10.2.1, nlohmann/json 3.12.0, abseil-cpp 20240722.2) comprises two libraries and one general-purpose library suite. The document examines 2.1 removals and set-aside candidates but does not recommend adding repositories, and notes that "no rule text, pattern, message or query was copied" from upstream sources.
+**C++** (#111): The pinned set (fmt 10.2.1, nlohmann/json 3.12.0, abseil-cpp 20240722.2) comprises two libraries and one general-purpose library suite. The document examines 2.1 removals and set-aside candidates but does not recommend adding repositories; it judged expected noise without measuring, for want of network access rather than of a repository — "Noise is judgement only: the worktree had no git network".
 
-**Ruby** (#114): The pinned set (sinatra 3.2.0, puma 6.6.1, rails 8.1.3.1) includes two frameworks and one runtime server, with rails being a large application framework. The pitfall list documents two primitives needed and set-aside queries but does not recommend additional repositories; the analysis notes "Rails measurement shows 3,334 files" which captures application-scale code in the existing pinned set.
+**Ruby** (#113): The pinned set (sinatra 3.2.0, puma 6.6.1, rails 8.1.3.1) includes two frameworks and one runtime server, with rails being a large application framework. The pitfall list documents two primitives needed and set-aside queries but does not recommend additional repositories; its one moderate-noise item, `unsafe-deserialization`, is deferred to measurement on rails, which the existing pinned set already supplies at application scale.

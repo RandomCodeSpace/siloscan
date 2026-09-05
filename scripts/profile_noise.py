@@ -4,7 +4,7 @@
 The profile corpus under ``crates/siloscan-core/tests/profiles-corpus`` holds
 hand-written positives and negatives. It measures what its author thought of.
 The noise set measures what a rule does to real code nobody wrote for it: the
-twenty-nine repositories recorded in
+thirty-three repositories recorded in
 ``research/embedded-profiles/noise-set.md``, each pinned to a commit, cloned
 into a temporary directory at measurement time and never committed.
 
