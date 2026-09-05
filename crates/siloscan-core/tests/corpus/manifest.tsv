@@ -60,6 +60,9 @@ path	line	expect	justification
 .env	63	NONE	a semantic version string
 .env	64	NONE	a 40-hex git commit sha assigned to a build identifier
 .env	65	NONE	a UUID
+.pypirc	7	NONE	the literal __token__ username every PyPI token upload uses, not a value
+.pypirc	8	secrets.pypi-upload-token|secrets.generic-secret-assignment	a PyPI upload token in the password field of .pypirc, the file twine reads; reported twice - the vendor rule owns the pypi- prefix and the generic assignment owns password = <high-entropy value> - and the vendor rule is the one that names what it is
+.pypirc	13	NONE	a shell interpolation in the password field of the internal feed, resolved from the environment at upload time
 Client.java	4	secrets.twilio-api-key	a Twilio API key in Java
 Client.java	5	secrets.azure-ad-client-secret	an Azure AD client secret in Java
 Client.java	6	secrets.gcp-api-key	a GCP API key in Java
@@ -220,6 +223,7 @@ k8s-deployment.yaml	40	NONE	a Helm template interpolation
 k8s-deployment.yaml	42	NONE	a placeholder value
 k8s-deployment.yaml	44	NONE	a reference to an image pull secret
 k8s-deployment.yaml	45	NONE	a config checksum annotation
+k8s/configmap.yaml	2	NONE	kind: ConfigMap over a data: block of base64-shaped values is the negative secrets.kubernetes-secret-yaml exists to stay quiet on: the rule pairs data: with kind: Secret and nothing else
 k8s/configmap.yaml	7	NONE	JVM flag soup in a ConfigMap data value, punctuation-dense but not a credential
 k8s/configmap.yaml	8	NONE	40 hex characters under a build key is a git commit sha, a known false-positive shape
 k8s/configmap.yaml	9	NONE	a UUID deployment identifier in ConfigMap data
@@ -242,12 +246,15 @@ k8s/kustomization.yaml	18	ANY	exactly 40 base64 characters in a secretGenerator 
 k8s/kustomization.yaml	20	NONE	a secretGenerator file reference is a path, not a value - the correct kustomize pattern
 k8s/kustomization.yaml	25	NONE	a configMapGenerator log-level literal
 k8s/kustomization.yaml	26	NONE	a configMapGenerator feature-flag list, hyphenated identifier soup
-k8s/postgres-secret.yaml	10	secrets.kubernetes-secret-yaml|secrets.generic-secret-assignment	base64 of a 24-character password under data: beside a password key; the encoded text is itself a high-entropy value the generic assignment may own today, and the decoding reporter is secrets.kubernetes-secret-yaml, arriving via ticket 53 on the ticket 52 decode gate - either is an acceptable owner
-k8s/postgres-secret.yaml	11	secrets.kubernetes-secret-yaml|secrets.generic-secret-assignment	base64 of a 20-character replication password under data:; same encoded-value shape - the expected end-state reporter is secrets.kubernetes-secret-yaml (ticket 53), the generic assignment is the acceptable interim owner of the encoded text
-k8s/postgres-secret.yaml	12	secrets.kubernetes-secret-yaml	base64 of a credentialed postgres URL under a database-url key; no secret-like identifier, so no shipped rule can reach it without decoding - known miss until secrets.kubernetes-secret-yaml lands via tickets 52 and 53, which is the expected reporter
-k8s/redis-secret.yaml	8	secrets.kubernetes-secret-yaml|secrets.generic-secret-assignment	base64 of a 32-character redis password under data:; expected end-state reporter is secrets.kubernetes-secret-yaml (ticket 53), the generic assignment may own the encoded text until then
-k8s/redis-secret.yaml	9	secrets.kubernetes-secret-yaml|secrets.generic-secret-assignment	base64 of a 16-character requirepass value under data:; expected end-state reporter is secrets.kubernetes-secret-yaml (ticket 53), the generic assignment is the acceptable interim owner
-k8s/registry-credentials.yaml	8	secrets.kubernetes-secret-yaml	a .dockerconfigjson blob: base64 of JSON whose auth field is base64 of user:password - two encoding layers, the exact shape gating ticket 52; the key carries no secret identifier so nothing ships that can report it - known miss, expected reporter is secrets.kubernetes-secret-yaml via ticket 53
+k8s/postgres-secret.yaml	2	secrets.kubernetes-secret-yaml	kind: Secret over base64 values under data:; the rule matches from the kind: line through the first encoded value, so the reported line is where the manifest declares itself a Secret - one finding per manifest, not per key
+k8s/postgres-secret.yaml	10	secrets.generic-secret-assignment	base64 of a 24-character password under data: beside a password key; the encoded text is itself a high-entropy value the generic assignment owns - secrets.kubernetes-secret-yaml landed with ticket 53 and reports the manifest at its kind: line (row 2), not per value line
+k8s/postgres-secret.yaml	11	secrets.generic-secret-assignment	base64 of a 20-character replication password under data:; same encoded-value shape as row 10 but under an identifier the generic assignment's name class does not reach - a known miss, unchanged by ticket 53, which reports this manifest once at its kind: line
+k8s/postgres-secret.yaml	12	ANY	base64 of a credentialed postgres URL under a database-url key; no secret-like identifier, so no rule can reach the value without decoding it - the known miss ticket 52's decode gate owns; ticket 53's secrets.kubernetes-secret-yaml reports the manifest at its kind: line instead, which is row 2
+k8s/redis-secret.yaml	2	secrets.kubernetes-secret-yaml	kind: Secret over base64 password values under data:, reported at the kind: line where the match starts
+k8s/redis-secret.yaml	8	secrets.generic-secret-assignment	base64 of a 32-character redis password under data:; the generic assignment owns the encoded text, and secrets.kubernetes-secret-yaml reports this manifest at its kind: line (row 2) since ticket 53
+k8s/redis-secret.yaml	9	secrets.generic-secret-assignment	base64 of a 16-character requirepass value under data:; same shape as row 8, owned by the generic assignment
+k8s/registry-credentials.yaml	2	secrets.kubernetes-secret-yaml	kind: Secret over a .dockerconfigjson blob: the value needs decoding twice before anything can read it, and this rule reports the manifest for being one rather than reading the value at all
+k8s/registry-credentials.yaml	8	ANY	a .dockerconfigjson blob: base64 of JSON whose auth field is base64 of user:password - two encoding layers, the shape ticket 52's decode gate owns; the key carries no secret identifier, so this line stays a known miss, while ticket 53's secrets.kubernetes-secret-yaml reports the manifest at its kind: line, row 2
 k8s/session-secret.yaml	10	ANY	64 hex characters of session signing secret in stringData plaintext, reachable by the generic rules today; ownership may move to secrets.kubernetes-secret-yaml when ticket 53 lands
 k8s/session-secret.yaml	11	ANY	43-character base64url CSRF token in stringData plaintext
 k8s/session-secret.yaml	12	ANY	a 40-hex OAuth client secret in stringData plaintext, the GitHub OAuth client secret length
@@ -258,10 +265,12 @@ k8s/storefront-stack.yaml	26	NONE	a quoted cpu resource limit
 k8s/storefront-stack.yaml	27	NONE	a memory resource limit
 k8s/storefront-stack.yaml	29	NONE	an envFrom secretRef is the correct pattern and carries no value
 k8s/storefront-stack.yaml	30	NONE	the name of a referenced Secret, a low-entropy identifier
+k8s/storefront-stack.yaml	33	secrets.kubernetes-secret-yaml	the kind: Secret line of the middle document in a three-document manifest; the rule reaches it across the document it is embedded in
 k8s/storefront-stack.yaml	35	NONE	the Secret's own metadata name in the middle document, not a value
-k8s/storefront-stack.yaml	39	secrets.kubernetes-secret-yaml|secrets.generic-secret-assignment	base64 of a 20-character SMTP password under data: in a Secret sandwiched between a Deployment and a Service; expected end-state reporter is secrets.kubernetes-secret-yaml (ticket 53), the generic assignment may own the encoded text until then
-k8s/storefront-stack.yaml	40	secrets.kubernetes-secret-yaml|secrets.generic-secret-assignment	base64 of a 32-character JWT signing key under data: in a multi-document manifest; expected end-state reporter is secrets.kubernetes-secret-yaml (ticket 53), the generic assignment is the acceptable interim owner
+k8s/storefront-stack.yaml	39	secrets.generic-secret-assignment	base64 of a 20-character SMTP password under data: in a Secret sandwiched between a Deployment and a Service; the generic assignment owns the encoded text, and secrets.kubernetes-secret-yaml reports the embedded Secret at its kind: line, row 33
+k8s/storefront-stack.yaml	40	secrets.generic-secret-assignment	base64 of a 32-character JWT signing key under data: in a multi-document manifest; same shape as row 39
 k8s/storefront-stack.yaml	42	ANY	32-character base64url webhook secret in stringData plaintext in the same multi-document Secret, reachable by the generic rules today
+keys/client-cert.p12	1	secrets.pkcs12-file	a committed PKCS #12 keystore: the file existing is the finding, so the rule reports its name at line 1 with no pattern to match - and it reports it although the bytes are binary, which is what a keystore is
 keys/deploy_key	1	secrets.private-key	an OpenSSH private key
 keys/ec-private.pem	1	secrets.private-key	an SEC1 elliptic curve private key
 keys/pgp-private.asc	1	secrets.private-key	a PGP private key block
@@ -269,6 +278,7 @@ keys/public-material.pem	2	NONE	a public key block is not a private key
 keys/public-material.pem	6	NONE	a certificate is public material
 keys/public-material.pem	10	NONE	a key block with no body cannot carry a key
 keys/server.key	1	secrets.private-key	a PKCS1 RSA private key
+keys/truststore.jks	1	NONE	a Java keystore beside the PKCS #12 one: same shape of file, a name outside the .p12/.pfx globs, and no rule may report it
 main.go	9	secrets.aws-access-token	an AWS access key id in Go
 main.go	10	secrets.aws-secret-access-key|secrets.generic-secret-assignment	an AWS secret access key beside its identifier in Go; reported twice - forty characters of base64 alphabet carry no marker either rule can stand down on, argued in the_pack_reports_three_credentials_twice_and_no_others
 main.go	11	secrets.digitalocean-pat	a DigitalOcean personal access token in Go
@@ -292,12 +302,12 @@ main.tf	14	ANY	exactly 40 base64 characters in Terraform
 main.tf	15	ANY	a 256-bit signing secret in Terraform
 main.tf	16	secrets.openai-api-key	an OpenAI API key in Terraform
 main.tf	17	secrets.gcp-api-key	a GCP API key in Terraform
-main.tf	18	ANY	a password with punctuation in Terraform
+main.tf	18	secrets.generic-secret-assignment|secrets.hashicorp-tf-password	a password with punctuation in Terraform, reported twice: the generic assignment owns the shape and secrets.hashicorp-tf-password owns any quoted 8 to 20 character value in a .tf password field - a path-scoped overlap the translated rule brings with it, recorded here rather than hidden by narrowing a rule that is regenerated wholesale
 main.tf	19	secrets.generic-credentialed-url	a credentialed URL in Terraform
 main.tf	25	NONE	a variable reference
 main.tf	26	NONE	an interpolated variable reference
 main.tf	27	NONE	a lookup against a secret store
-main.tf	28	NONE	a placeholder password
+main.tf	28	secrets.hashicorp-tf-password	a placeholder password: the row was NONE until ticket 53 imported secrets.hashicorp-tf-password, which reports every quoted 8 to 20 character lowercase value in a .tf password field, placeholders included - verified against gitleaks v8.30.1, which reports this same line; the generic rules still stand down on it, and the decision recorded here is that a translated rule keeps the upstream behaviour rather than being narrowed locally
 main.tf	29	NONE	a service endpoint
 main.tf	30	NONE	a module source
 main.tf	31	NONE	a resource name
@@ -501,6 +511,10 @@ urls/settings.ini	16	secrets.generic-credentialed-url	control: empty-username re
 urls/settings.ini	17	NONE	changeit, the JVM-keystore flavor of changeme, on a localhost cache URL
 urls/settings.ini	21	NONE	{{ smtp_password }} template interpolation; lowercase with spaces, so the harness leaves it verbatim
 urls/settings.ini	22	NONE	%(smtp_password)s configparser interpolation, the shape the percent allowlist entry exists for
+vault-agent.hcl	3	secrets.vault-batch-token	a Vault batch token pasted into a runbook comment; 150 characters of [0-9A-Za-z_-] after the hvb. prefix, the format ticket 53 recovered from the regex size limit
+vault-agent.hcl	18	NONE	a postgres connection URL with a user and no password, the correct shape when the password sits in the field below
+vault-agent.hcl	19	secrets.hashicorp-tf-password	a 16-character lowercase password in an .hcl file; the row measures the .hcl half of the rule's path envelope, which the .tf rows do not
+vault-agent.hcl	24	NONE	a Vault template interpolation in the password position, resolved at render time
 web.config	4	ANY	a .NET appSettings api key of exactly 40 base64 characters
 web.config	5	ANY	a .NET appSettings client secret in 40 hex characters
 web.config	6	ANY	a .NET appSettings password
@@ -515,6 +529,10 @@ web.config	24	ANY	an XML password element whose value carries punctuation
 web.config	25	ANY	an XML password element whose value carries an at sign and a colon
 web.config	26	NONE	a placeholder inside a password element
 web.config	27	NONE	an interpolation inside a password element
+wp-config.php	6	NONE	an environment lookup in the database password position
+wp-config.php	11	NONE	a Freemius public key: the same shape as the secret key beside it, prefixed pk_ instead of sk_, and not a credential
+wp-config.php	12	secrets.freemius-secret-key|secrets.generic-secret-assignment	a Freemius secret key in the SDK init array of a .php file, the path envelope ticket 53 recovered; reported twice, by the vendor rule that owns the sk_ format and by the generic assignment that owns 'secret_key' => '<value>'
+wp-config.php	17	NONE	an environment lookup in the staging secret key position
 xml/App.config	4	NONE	a supportedRuntime sku moniker; Version= inside it is =-bearing identity text, not a secret
 xml/App.config	7	NONE	an update feed URL with no credentials, allowlisted as a scheme:// value
 xml/App.config	8	ANY	a desktop app telemetry api key of 32 base64url characters in appSettings value=
@@ -535,7 +553,7 @@ xml/Directory.Build.targets	3	NONE	a secret-named property whose body is a clock
 xml/NuGet.Config	5	NONE	the public nuget.org source URL
 xml/NuGet.Config	6	NONE	an internal feed URL with no credentials
 xml/NuGet.Config	10	NONE	a feed username is not a secret
-xml/NuGet.Config	11	ANY	ClearTextPassword is how NuGet stores a feed credential on disk, the exact shape Azure DevOps PAT leaks take
+xml/NuGet.Config	11	secrets.generic-markup-config-secret|secrets.nuget-config-password	ClearTextPassword is how NuGet stores a feed credential on disk, the exact shape Azure DevOps PAT leaks take; reported twice since ticket 53, by the markup rule that owns key=/value= pairs and by the path-scoped secrets.nuget-config-password that owns this file name
 xml/NuGet.Config	15	NONE	a %VAR% placeholder NuGet expands from the environment
 xml/NuGet.Config	19	ANY	nuget setapikey writes the key under an apikeys entry whose key attribute is the feed URL, so no keyword-bearing name sits beside the value; known gap
 xml/Payments.Api.csproj	5	NONE	a semantic version

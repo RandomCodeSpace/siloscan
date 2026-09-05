@@ -4,6 +4,41 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Added
+
+- Seven gitleaks rules the converter used to skip: `secrets.freemius-secret-key`,
+  `secrets.hashicorp-tf-password`, `secrets.kubernetes-secret-yaml`,
+  `secrets.nuget-config-password`, `secrets.pkcs12-file`,
+  `secrets.pypi-upload-token` and `secrets.vault-batch-token`. The translation
+  now covers 221 of gitleaks v8.30.1's 222 rules; the one left out is
+  `generic-api-key`, excluded on purpose because `rules/default/generic.yaml`
+  covers the same ground more narrowly and importing it would report every
+  credential they overlap twice. A Kubernetes Secret manifest is reported once,
+  at the `kind:` line the match starts on.
+- Presence rules: a rule with a `paths.include` and no payload reports the file
+  existing at a matching path, at line 1, with the file's name as the match
+  text. It reports binary and unreadable files too, which is the point for
+  `secrets.pkcs12-file` - a committed keystore is a finding because of what it
+  is, not because of anything readable inside it. A rule with no payload and no
+  `paths.include` is a load error, as it was before.
+- `paths.case_insensitive` on a rule's path envelope, applying to both
+  `include` and `exclude`. Absent means false, so every existing rule keeps
+  matching exactly what it matched.
+
+### Changed
+
+- Rule patterns compile under a 32 MiB program size limit rather than the
+  `regex` crate's 10 MiB default, which is what admitted the two wide bounded
+  repetitions above. `secrets.pypi-upload-token` and
+  `secrets.vault-batch-token` are translated with `\w` spelled as its ASCII
+  class `[0-9A-Za-z_-]`, which is what gitleaks means by `\w` and what keeps
+  each program at 1 MiB and single-digit milliseconds to build.
+- `secrets.nuget-config-password` reports its captured value rather than the
+  whole `<add key=... />` element, so the upstream allowlist that stands down
+  on `%ENVIRONMENT_VARIABLE%` placeholders applies, as it does in gitleaks.
+
 ## 2.2.0 - 2026-09-05
 
 ### Added

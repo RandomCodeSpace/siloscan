@@ -6,10 +6,14 @@ use std::sync::OnceLock;
 /// wholesale on every gitleaks bump, so nothing hand-written may live here.
 const GITLEAKS_DOCUMENT: &str = include_str!("../rules/default/secrets.yaml");
 
-/// Hand-written generic high-entropy rules. `generic-api-key`,
-/// `pypi-upload-token` and `vault-batch-token` are dropped from the translation
-/// above because their programs exceed the regex crate's size limit; these
-/// cover the generic ground with narrower patterns of our own.
+/// Hand-written generic high-entropy rules. `generic-api-key` is the one
+/// gitleaks rule the translation above deliberately drops: it is a generic
+/// matcher with a 3.5 entropy floor that overlaps everything here, so importing
+/// it would double-report every credential these rules already own. These cover
+/// the same ground with narrower patterns of our own, tuned against the
+/// detection corpus. The two rules that were dropped beside it for size,
+/// `pypi-upload-token` and `vault-batch-token`, are vendor formats with no
+/// local overlap and are translated as of the raised pattern size limit.
 const GENERIC_DOCUMENT: &str = include_str!("../rules/default/generic.yaml");
 
 /// Marks the end of a rule document's header. Everything after it is sequence
@@ -319,6 +323,14 @@ mod tests {
     ///
     /// In each case the duplicate is a second report of a credential that was
     /// already reported, not a miss.
+    ///
+    /// These three are the overlaps that hold on any path. The path-scoped
+    /// rules translated for ticket 53 add their own inside their envelopes - a
+    /// PyPI token under `password =`, a Freemius key under `'secret_key' =>`,
+    /// a NuGet `ClearTextPassword`, a Terraform password field - and those are
+    /// recorded per line in `tests/corpus/manifest.tsv`, which is the only
+    /// place a path envelope means anything. This test scans `fixture.txt`, so
+    /// none of them are reachable from it.
     #[test]
     fn the_pack_reports_three_credentials_twice_and_no_others() {
         assert_eq!(
@@ -470,13 +482,21 @@ mod tests {
         let rules =
             crate::rules::load_str(default_rules(), "default-pack").expect("default pack loads");
         for rule in &rules {
+            // A presence rule carries no pattern to compile at all, which is
+            // the one other payload the pack ships.
+            if matches!(rule.payload, CompiledPayload::Presence) {
+                continue;
+            }
             let CompiledPayload::Secret {
                 pattern,
                 allow_patterns,
                 ..
             } = &rule.payload
             else {
-                panic!("the default pack is secret rules only: {}", rule.id);
+                panic!(
+                    "the default pack is secret and presence rules only: {}",
+                    rule.id
+                );
             };
             assert!(!pattern.is_compiled(), "{} compiled at load", rule.id);
             for allow in allow_patterns {
@@ -501,13 +521,19 @@ mod tests {
         let rules =
             crate::rules::load_str(default_rules(), "default-pack").expect("default pack loads");
         for rule in &rules {
+            if matches!(rule.payload, CompiledPayload::Presence) {
+                continue;
+            }
             let CompiledPayload::Secret {
                 pattern,
                 allow_patterns,
                 ..
             } = &rule.payload
             else {
-                panic!("the default pack is secret rules only: {}", rule.id);
+                panic!(
+                    "the default pack is secret and presence rules only: {}",
+                    rule.id
+                );
             };
             assert!(
                 pattern.get().is_ok(),

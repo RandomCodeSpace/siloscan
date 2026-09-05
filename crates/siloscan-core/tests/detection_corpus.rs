@@ -19,14 +19,16 @@
 //! pack, vendor and generic alike, so a marker cannot be read as the token it
 //! stands in for by any rule - including the vendor rules, which are translated
 //! wholesale from an upstream document and cannot be hand-edited to stand down
-//! on a delimiter of ours.
+//! on a delimiter of ours. The argument holds for every rule that has a value
+//! class; the one that does not is listed in [`KNOWN_NON_CREDENTIAL_HITS`],
+//! where what it reports is the marker text itself.
 
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use siloscan_core::default_pack::default_rules;
-use siloscan_core::engines::secret;
+use siloscan_core::engines::{presence, secret};
 use siloscan_core::rules::{CompiledRule, load_str};
 
 /// Fraction of positives the pack must report, per corpus family. A family is
@@ -41,9 +43,9 @@ use siloscan_core::rules::{CompiledRule, load_str};
 /// ticket that closes the gap raises the floor in the same commit that moves
 /// the number. What a floor forbids is regression below what was measured.
 const RECALL_FLOORS: &[(&str, f64)] = &[
-    ("core", 0.9880), // measured 166/168: the netrc and word-password misses
-    ("k8s", 0.8333),  // measured 15/18: `data:` decoding waits on #52/#53
-    ("keys", 1.0),    // measured 4/4: every private-key format reported
+    ("core", 0.9884), // measured 171/173: the netrc and word-password misses
+    ("k8s", 0.8636),  // measured 19/22: `data:` decoding waits on #52
+    ("keys", 1.0),    // measured 5/5: every private-key format, plus a keystore
     ("urls", 0.9600), // measured 24/25: #44 closed bar the sub-floor entropy
     ("xml", 0.7777),  // measured 21/27: #51 closed, unlisted names remain
 ];
@@ -388,6 +390,9 @@ const ANTHROPIC_PREFIX: &str = concat!("sk-ant-", "api03-");
 const ANTHROPIC_ADMIN_PREFIX: &str = concat!("sk-ant-", "admin01-");
 const GCP_API_KEY_PREFIX: &str = concat!("AI", "za");
 const JWT_SEGMENT_PREFIX: &str = concat!("e", "y");
+const FREEMIUS_SECRET_PREFIX: &str = concat!("s", "k_");
+const PYPI_TOKEN_PREFIX: &str = concat!("pypi-AgEIcHlwa", "S5vcmc");
+const VAULT_BATCH_PREFIX: &str = concat!("hv", "b.");
 
 /// The credential a marker stands for, or `None` when the kind is unknown.
 ///
@@ -407,6 +412,7 @@ fn credential(name: &str) -> Option<String> {
         "PWP" => password(&mut rng, param, PUNCT),
         "PWQ" => password(&mut rng, param, PUNCT_WIDE),
         "PWU" => unicode_password(&mut rng, param),
+        "PWL" => lowercase_password(&mut rng, param),
         "PWSLASH" => infix(&mut rng, param, '/'),
         "PWAT" => infix(&mut rng, param, '@'),
         "PWPCT" => percent_encoded(&mut rng, param),
@@ -485,6 +491,9 @@ fn credential(name: &str) -> Option<String> {
         "ANTHROPIC" => format!("{ANTHROPIC_PREFIX}{}AA", rng.take(BASE64URL, 93)),
         "ANTHROPICADMIN" => format!("{ANTHROPIC_ADMIN_PREFIX}{}AA", rng.take(BASE64URL, 93)),
         "GCPKEY" => format!("{GCP_API_KEY_PREFIX}{}", rng.take(BASE64URL, 35)),
+        "FREEMIUS" => format!("{FREEMIUS_SECRET_PREFIX}{}", rng.take(ALNUM, param)),
+        "PYPITOKEN" => format!("{PYPI_TOKEN_PREFIX}{}", rng.take(BASE64URL, param)),
+        "VAULTBATCH" => format!("{VAULT_BATCH_PREFIX}{}", rng.take(BASE64URL, param)),
         "JWT" => format!(
             "{JWT_SEGMENT_PREFIX}{}.{JWT_SEGMENT_PREFIX}{}.{}",
             rng.take(ALNUM, 34),
@@ -521,6 +530,17 @@ fn password(rng: &mut Rng, length: usize, extra: &str) -> String {
             at = slot + 1;
         }
     }
+    value.into_iter().collect()
+}
+
+/// A lowercase alphanumeric password of `length`, carrying at least one digit.
+/// This is the value class `secrets.hashicorp-tf-password` admits - `[a-z0-9=_-]`
+/// between 8 and 20 characters - and nothing wider, so a row using it measures
+/// that rule rather than the draw.
+fn lowercase_password(rng: &mut Rng, length: usize) -> String {
+    let mut value: Vec<char> = rng.take(LOWER_ALNUM, length).chars().collect();
+    let last = value.len() - 1;
+    value[last] = rng.take(DIGIT, 1).chars().next().expect("one digit");
     value.into_iter().collect()
 }
 
@@ -671,8 +691,16 @@ fn measure() -> Measurement {
         lines_per_file.insert(relative.clone(), raw.lines().count() as u64);
 
         let content = materialize(&relative, &raw);
-        let findings = secret::scan_file(&rules, &relative, None, &content)
+        let mut findings = secret::scan_file(&rules, &relative, None, &content)
             .expect("every pattern the corpus reaches compiles");
+        // A presence rule reports a file for its name, so it is measured from
+        // the path, exactly as the scanner does it - and it is measured here
+        // because a rule that fires on a name is as capable of firing on the
+        // wrong name as any other.
+        findings.extend(presence::scan_paths(
+            &rules,
+            std::slice::from_ref(&relative),
+        ));
         for finding in findings {
             reported
                 .entry((relative.clone(), finding.line))
@@ -936,6 +964,28 @@ fn every_credential_marker_resolves() {
     }
 }
 
+/// Findings on the corpus as committed that are not credentials, as
+/// `(path, line, rule id)`. Both arrived with the path-scoped rules ticket 53
+/// translated, and both report text that is a word rather than a value.
+///
+/// `main.tf:28` is `admin_password = "changeme"`, which the file has to spell
+/// literally for its manifest row to measure the placeholder vocabulary at
+/// all. `secrets.hashicorp-tf-password` reports every quoted 8 to 20 character
+/// lowercase value in a `.tf` password field, placeholders included, and
+/// gitleaks reports the same line.
+///
+/// `xml/NuGet.Config:11` is the credential marker itself. The delimiter
+/// argument above - `{` sits outside every value class in the pack - holds
+/// only for rules that have a value class, and this one's is `.`: it reports
+/// whatever is between the quotes of a NuGet password entry, marker included.
+/// What it reports there is `{{PWA_52_916}}`, so the file still spells no
+/// credential; it spells a marker a rule with no value class cannot tell from
+/// one.
+const KNOWN_NON_CREDENTIAL_HITS: [(&str, u64, &str); 2] = [
+    ("main.tf", 28, "secrets.hashicorp-tf-password"),
+    ("xml/NuGet.Config", 11, "secrets.nuget-config-password"),
+];
+
 /// No file in the repository may spell a complete credential: the corpus on
 /// disk carries markers, and the values exist only in this process. This is
 /// what keeps the corpus publishable - in a crate, in a push, in a mirror -
@@ -945,6 +995,11 @@ fn every_credential_marker_resolves() {
 /// sitting where a credential goes, and whether the pack reads it as one is the
 /// whole question: substituting or redacting the markers first would measure a
 /// file nobody has, not the one in the repository.
+///
+/// The exceptions in [`KNOWN_NON_CREDENTIAL_HITS`] are lines the corpus spells out
+/// in full and the pack reports anyway. They are words, not values: nothing in
+/// them arms a scanner reading this repository, which is the property this test
+/// exists to hold.
 #[test]
 fn no_corpus_file_spells_a_credential() {
     let rules: Vec<CompiledRule> =
@@ -957,6 +1012,13 @@ fn no_corpus_file_spells_a_credential() {
             .expect("every pattern the corpus reaches compiles");
         let reported: Vec<String> = findings
             .into_iter()
+            .filter(|finding| {
+                !KNOWN_NON_CREDENTIAL_HITS.contains(&(
+                    relative.as_str(),
+                    finding.line,
+                    finding.rule_id.as_str(),
+                ))
+            })
             .map(|finding| format!("{}:{} {}", relative, finding.line, finding.rule_id))
             .collect();
         assert!(
