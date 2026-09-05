@@ -5,6 +5,20 @@
 #
 # Every rule is a concept-only citation. No pattern text, query text or
 # message text is taken from any upstream project.
+#
+# Three candidates from the 2.2 rust pitfall list are deliberately absent, each
+# removed on a measurement over the pinned noise set rather than re-tuned. All
+# three are inside the info gate and were removed on what they report, not on
+# how often:
+#   len-zero-comparison  0.0823 per kLOC on tokio, and all seven findings are the
+#                        body of a `fn is_empty`, the one place the comparison
+#                        cannot be replaced by the call it recommends.
+#   needless-bool        0.0846 per kLOC on ripgrep, and all three findings carry
+#                        a statement before the boolean, so the branch does not
+#                        reduce to its condition.
+#   needless-return      0.0823 per kLOC on tokio, and four of the seven findings
+#                        are the `#[cfg]`-attributed pair of returns, where the
+#                        keyword is what carries the attribute.
 version: 1
 rules:
   - id: maintainability.rust.dbg-macro
@@ -12,6 +26,26 @@ rules:
     message: "dbg! is a debugging aid and is not meant to be committed"
     ast:
       rust: "((macro_invocation macro: (identifier) @report (#eq? @report \"dbg\")))"
+  - id: maintainability.rust.bool-literal-comparison
+    severity: info
+    message: "comparing a boolean against a boolean literal adds an operator and says nothing more"
+    ast:
+      rust: "((binary_expression left: (_) operator: [\"==\" \"!=\"] right: (boolean_literal)) @report)\n((binary_expression left: (boolean_literal) operator: [\"==\" \"!=\"] right: (_)) @report)"
+  - id: maintainability.rust.let-and-return
+    severity: info
+    message: "this binding is returned immediately and adds a step with no purpose"
+    ast:
+      rust: "((block (let_declaration pattern: (identifier) @n) . (identifier) @tail) @report (#eq? @n @tail))"
+  - id: maintainability.rust.wildcard-import
+    severity: info
+    message: "this glob import hides where the names it brings in come from"
+    ast:
+      rust: "((use_declaration argument: (use_wildcard) @w) @report (#not-match? @w \"^(super|self|crate)::|prelude::\"))"
+  - id: maintainability.rust.blanket-lint-allow
+    severity: info
+    message: "this attribute switches off a whole lint group for its scope"
+    ast:
+      rust: "((attribute_item (attribute (identifier) @n arguments: (token_tree) @args)) @report (#eq? @n \"allow\") (#match? @args \"warnings|clippy::all|clippy::pedantic|clippy::restriction|clippy::complexity|clippy::correctness\"))\n((inner_attribute_item (attribute (identifier) @n2 arguments: (token_tree) @args2)) @report (#eq? @n2 \"allow\") (#match? @args2 \"warnings|clippy::all|clippy::pedantic|clippy::restriction|clippy::complexity|clippy::correctness\"))"
   - id: maintainability.rust.function-length
     severity: info
     message: "this function is longer than the profile allows"

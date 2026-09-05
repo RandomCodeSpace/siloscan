@@ -112,6 +112,32 @@ rust/unimplemented-marker-positive.rs	2	reliability.rust.unimplemented-marker	to
 rust/unimplemented-marker-negative.rs	2	NONE	the macro is an ordinary one and not a placeholder
 rust/mem-forget-positive.rs	3	reliability.rust.mem-forget	the call is the mem::forget path, which skips the destructor
 rust/mem-forget-negative.rs	2	NONE	the call drops the value, which runs the destructor the rule is about
+rust/static-mut-positive.rs	1	reliability.rust.static-mut	the static carries a mutable specifier, so the state is shared and unsynchronised
+rust/static-mut-negative.rs	2	NONE	the static is immutable and its interior mutability is an atomic, which is synchronised
+rust/transmute-call-positive.rs	2	reliability.rust.transmute-call	the turbofish spelling of transmute, reached through the generic_function node
+rust/transmute-call-positive.rs	3	reliability.rust.transmute-call	the plain spelling of transmute, reached through the scoped_identifier node
+rust/transmute-call-negative.rs	1	NONE	size_of is an ordinary call in the same module and reinterprets nothing
+rust/self-comparison-ordering-positive.rs	1	reliability.rust.self-comparison-ordering	both operands are the identical identifier under an inequality, so the result is fixed
+rust/self-comparison-ordering-positive.rs	2	reliability.rust.self-comparison-ordering	the same shape under an ordering operator, which the shipped equality rule does not see
+rust/self-comparison-ordering-negative.rs	1	NONE	the NaN test is a method call, not a comparison of an identifier with itself
+rust/unreachable-after-return-positive.rs	3	reliability.rust.unreachable-after-return	the binding follows a return in the same block and can never run
+rust/unreachable-after-return-negative.rs	3	NONE	an item declaration after a return is reachable, which is the idiom that removed this rule in 2.1
+rust/unreachable-after-return-negative.rs	8	NONE	the attribute on the item is a sibling of the return statement and is not a statement
+rust/unreachable-after-return-negative.rs	9	NONE	the attributed item is reachable for the same reason as the plain one
+rust/bool-literal-comparison-positive.rs	1	maintainability.rust.bool-literal-comparison	the right operand is a boolean literal, so the comparison adds nothing
+rust/bool-literal-comparison-positive.rs	2	maintainability.rust.bool-literal-comparison	the same shape under the inequality operator
+rust/bool-literal-comparison-negative.rs	1	NONE	negation is the short spelling the rule asks for
+rust/let-and-return-positive.rs	1	maintainability.rust.let-and-return	the binding is the whole tail expression and the step has no purpose
+rust/let-and-return-negative.rs	1	NONE	the tail expression uses the binding rather than returning it
+rust/let-and-return-negative.rs	2	NONE	the tail expression is a different identifier from the one bound
+rust/wildcard-import-positive.rs	1	maintainability.rust.wildcard-import	a glob over an external module, where the origin of every name it brings in is unstated
+rust/wildcard-import-negative.rs	4	NONE	the parent glob in a test module is the idiom the predicate excludes
+rust/wildcard-import-negative.rs	5	NONE	a prelude glob is the one glob the ecosystem endorses
+rust/wildcard-import-negative.rs	6	NONE	a crate-rooted glob is usually the re-export idiom and is excluded with it
+rust/blanket-lint-allow-positive.rs	1	maintainability.rust.blanket-lint-allow	an inner attribute switching off every warning for the whole file
+rust/blanket-lint-allow-positive.rs	2	maintainability.rust.blanket-lint-allow	an outer attribute switching off a whole lint group for the item
+rust/blanket-lint-allow-negative.rs	1	NONE	the attribute names one lint, not a group
+rust/blanket-lint-allow-negative.rs	2	NONE	a second attribute naming one lint
 # go
 go/function-length-over.go	3	maintainability.go.function-length	the function is 151 lines, one over the profile's 150
 go/function-length-under.go	3	NONE	the function is 150 lines, which the profile allows
