@@ -161,12 +161,27 @@ reliability.go.empty-error-branch	0	0.000000	2026-09-05	#103 go: max of cobra 0.
 reliability.go.redundant-boolean-comparison	0	0.079675	2026-09-05	#103 go: max of cobra 0.0797, gin 0.0704, client_golang 0.0000
 reliability.go.errors-new-sprintf	0	0.000000	2026-09-05	#103 go: max of cobra 0.0000, gin 0.0000, client_golang 0.0000
 maintainability.go.struct-tag-malformed	0	0.000000	2026-09-05	#103 go: max of cobra 0.0000, gin 0.0000, client_golang 0.0000
-# python, measured against requests 2.34.2, flask 3.1.2 and black 26.5.1.
+# python, measured against requests 2.34.2, flask 3.1.2, black 26.5.1 and,
+# from #122 onwards, boto v2.13.2.
 reliability.python.self-comparison	0	0.0000	2026-09-03	#78 P4a
 reliability.python.identical-if-branches	0	0.1109	2026-09-03	#78 P4a
 maintainability.python.function-length	0	0.4631	2026-09-03	#78 P4a
 maintainability.python.nesting-depth	0	0.132607	2026-09-05	#122: max of requests 0.0000, flask 0.0000, black 0.0584, boto 0.1326
 maintainability.python.cyclomatic-complexity	0	0.1251	2026-09-03	#78 P4a
+reliability.python.is-literal-comparison	0	0.016678	2026-09-05	#103 python: max of requests 0.0000, flask 0.0000, black 0.0167, boto 0.0000
+reliability.python.self-assignment	0	0.000000	2026-09-05	#103 python: max of requests 0.0000, flask 0.0000, black 0.0000, boto 0.0000
+reliability.python.implicit-string-concat-in-collection	0	0.008339	2026-09-05	#103 python: max of requests 0.0000, flask 0.0000, black 0.0083, boto 0.0000
+reliability.python.raise-not-implemented	0	0.060276	2026-09-05	#103 python: max of requests 0.0000, flask 0.0000, black 0.0000, boto 0.0603
+reliability.python.return-in-finally	0	0.012056	2026-09-05	#103 python: max of requests 0.0000, flask 0.0000, black 0.0000, boto 0.0121
+reliability.python.missing-self-parameter	0	0.050033	2026-09-05	#103 python: max of requests 0.0000, flask 0.0000, black 0.0500, boto 0.0121
+reliability.python.comparison-against-bare-literal	0	0.000000	2026-09-05	#103 python: max of requests 0.0000, flask 0.0000, black 0.0000, boto 0.0000
+reliability.python.subprocess-shell-true	0	0.036166	2026-09-05	#103 python: max of requests 0.0000, flask 0.0000, black 0.0083, boto 0.0362
+reliability.python.yaml-load-without-loader	0	0.050033	2026-09-05	#103 python: max of requests 0.0000, flask 0.0000, black 0.0500, boto 0.0121
+reliability.python.open-without-encoding	0	0.665336	2026-09-05	#103 python: max of requests 0.6653, flask 0.3087, black 0.4086, boto 0.5425
+reliability.python.unreachable-after-return	0	0.016678	2026-09-05	#103 python: max of requests 0.0000, flask 0.0000, black 0.0167, boto 0.0121
+reliability.python.assert-on-tuple	0	0.000000	2026-09-05	#103 python: max of requests 0.0000, flask 0.0000, black 0.0000, boto 0.0000
+maintainability.python.lambda-assignment	0	0.289324	2026-09-05	#103 python: max of requests 0.0000, flask 0.0000, black 0.1584, boto 0.2893
+maintainability.python.star-import	0	0.183452	2026-09-05	#103 python: max of requests 0.0000, flask 0.0000, black 0.1835, boto 0.0603
 # javascript, measured against express 4.22.2, lodash 4.18.1 and axios 1.20.0,
 # with maintainability.javascript.function-length at 150 and excluding test
 # trees by path. Without the exclusion it measured 3.7930 per kLOC on express;

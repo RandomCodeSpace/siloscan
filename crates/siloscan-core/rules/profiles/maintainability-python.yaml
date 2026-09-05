@@ -14,6 +14,12 @@
 # parameters - they are what a keyword-argument-per-API-field SDK looks like,
 # and raising the threshold high enough to accept boto would stop the rule
 # saying anything on the other three repositories.
+#
+# star-import carries the one `paths` exclusion the #103 noise policy allows,
+# set to `__init__.py`. The package initialiser that re-exports its submodules
+# is the idiom behind the rule's findings and is not a finding a reviewer
+# wants. With the exclusion the rule measures 0.1835 per kLOC on black and
+# 0.0603 on boto against the 1.0 info ceiling.
 version: 1
 rules:
   - id: maintainability.python.function-length
@@ -37,3 +43,16 @@ rules:
     metric:
       measure: cyclomatic-complexity
       max: 25
+  - id: maintainability.python.lambda-assignment
+    severity: info
+    message: "a lambda bound to a name is still anonymous in every traceback and repr"
+    ast:
+      python: "(assignment left: (identifier) right: (lambda) @report)"
+  - id: maintainability.python.star-import
+    severity: info
+    message: "a wildcard import makes this module's namespace depend on another module's contents"
+    paths:
+      exclude:
+        - "**/__init__.py"
+    ast:
+      python: "(import_from_statement (wildcard_import) @report)"
