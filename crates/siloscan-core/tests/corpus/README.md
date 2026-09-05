@@ -37,6 +37,11 @@ Each family measures one territory, and each holds its own recall floor
     xml              .NET and JVM XML configuration: App.config, web.config,
                      MSBuild, NuGet.Config, Maven settings.xml, Ivy - centered
                      on the ticket #51 =[^=] markup gap
+    encoded          credentials that sit in a file base64-encoded rather than
+                     in plain text: docker config.json and .dockercfg auth
+                     fields, npm .npmrc _auth and _password, an
+                     Authorization: Basic header carrying a real
+                     base64(user:password) - the ticket #52 gate
     noise-artifacts  pure noise, no positives: lockfiles, checksums, PEM
                      certificates, inlined fonts, minified bundles, sourcemaps
     noise-code       pure noise, no positives: generated and vendored source
@@ -170,10 +175,16 @@ not classify, then assert:
 Every floor is the MEASURED value at the time its family landed - descriptive,
 not aspirational. Families built to hold a known gap start low on purpose:
 `xml` contracts the names (`AccountKey`, `machineKey`, NuGet `apikeys`, Ivy
-`name=`/`value=`) no rule lists, and `k8s` the `data:` decoding that arrives
-with ticket #52 - `secrets.kubernetes-secret-yaml` landed with ticket #53 and
-reports a Secret manifest once, at the `kind:` line its match starts on, which
-is not the line each encoded value sits on. `urls` was one of them and is the
+`name=`/`value=`) no rule lists, and `k8s` the `data:` decoding ticket #52
+gated on - `secrets.kubernetes-secret-yaml` landed with ticket #53 and reports
+a Secret manifest once, at the `kind:` line its match starts on, which is not
+the line each encoded value sits on. `k8s` keeps its 0.8636 floor after #52,
+because the two shapes still missing there are the ones only decoding could
+reach: a base64 blob under a key that names nothing (`database-url`) and a
+`.dockerconfigjson` that is base64 of JSON that is base64 of a login. `encoded`
+is the counter-example and is why #52 closed without a decoder: every
+encoded credential that carries its key in plain text beside it is reachable by
+a pattern, and that family landed at 1.0000. `urls` was one of them and is the
 worked example of the rest: it landed at 0.4782 holding the ticket #44
 placeholder-vocabulary URLs, and the commit that split that allowlist raised it
 to 0.9600. `xml` is the second: it landed at 0.5925 holding the ticket #51

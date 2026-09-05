@@ -74,12 +74,13 @@ mod tests {
 
     /// Every rule id the generic document ships. Named here so a rule that
     /// disappears from the pack fails a test instead of quietly scanning less.
-    const GENERIC_RULE_IDS: [&str; 6] = [
+    const GENERIC_RULE_IDS: [&str; 7] = [
         "secrets.generic-credentialed-url",
         "secrets.aws-secret-access-key",
         "secrets.generic-secret-assignment",
         "secrets.generic-password-assignment",
         "secrets.generic-authorization-header",
+        "secrets.registry-encoded-basic-auth",
         "secrets.generic-markup-config-secret",
     ];
 
