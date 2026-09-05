@@ -5,6 +5,15 @@
 #
 # Every rule is a concept-only citation. No pattern text, query text or
 # message text is taken from any upstream project.
+#
+# unimplemented-marker carries `info` rather than `warning` since #122. It
+# measures 0.6605 per kLOC on serde over the 33-row noise set, over the 2.2
+# `warning` ceiling of 0.25 and under the `info` ceiling of 1.0. Every finding
+# is a real `todo!` or `unimplemented!`; a crate that reaches serde's density
+# of them is telling the reader where its unfinished paths are, which is what
+# `info` reports. Downgrading is not tuning: the query is unchanged and the
+# measured row in tests/profiles-corpus/noise/limits.tsv still records what it
+# always did.
 version: 1
 rules:
   - id: reliability.rust.self-comparison
@@ -23,7 +32,7 @@ rules:
     ast:
       rust: "((if_expression consequence: (block) @a alternative: (else_clause (block) @b)) @report (#eq? @a @b))"
   - id: reliability.rust.unimplemented-marker
-    severity: warning
+    severity: info
     message: "todo! and unimplemented! panic at run time, so this path is unfinished"
     ast:
       rust: "((macro_invocation macro: (identifier) @report (#match? @report \"^(todo|unimplemented)$\")))"

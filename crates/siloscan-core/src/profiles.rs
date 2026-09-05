@@ -97,7 +97,7 @@ pub const REGISTRY: &[Profile] = &[
         include_str!("../rules/profiles/maintainability-javascript.yaml"),
     ),
     Profile::new(
-        "maintainability-python@1",
+        "maintainability-python@2",
         "python",
         include_str!("../rules/profiles/maintainability-python.yaml"),
     ),
@@ -127,7 +127,7 @@ pub const REGISTRY: &[Profile] = &[
         include_str!("../rules/profiles/reliability-cpp.yaml"),
     ),
     Profile::new(
-        "reliability-csharp@1",
+        "reliability-csharp@2",
         "csharp",
         include_str!("../rules/profiles/reliability-csharp.yaml"),
     ),
@@ -147,7 +147,7 @@ pub const REGISTRY: &[Profile] = &[
         include_str!("../rules/profiles/reliability-javascript.yaml"),
     ),
     Profile::new(
-        "reliability-python@1",
+        "reliability-python@2",
         "python",
         include_str!("../rules/profiles/reliability-python.yaml"),
     ),
@@ -263,10 +263,15 @@ mod tests {
     #[test]
     fn the_shipped_registry_is_ordered_and_self_consistent() {
         for profile in REGISTRY {
-            let stem = profile
+            let (stem, generation) = profile
                 .identity()
-                .strip_suffix("@1")
-                .unwrap_or_else(|| panic!("{} has no @1 suffix", profile.identity()));
+                .rsplit_once('@')
+                .unwrap_or_else(|| panic!("{} has no @<n> suffix", profile.identity()));
+            assert!(
+                !generation.is_empty() && generation.bytes().all(|b| b.is_ascii_digit()),
+                "{} does not end in a contract generation",
+                profile.identity()
+            );
             let (family, language) = stem
                 .rsplit_once('-')
                 .unwrap_or_else(|| panic!("{stem} is not <profile>-<language>"));

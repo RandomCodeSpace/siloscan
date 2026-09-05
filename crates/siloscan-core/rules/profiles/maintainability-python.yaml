@@ -5,6 +5,15 @@
 #
 # Every rule is a concept-only citation. No pattern text, query text or
 # message text is taken from any upstream project.
+#
+# parameter-count is deliberately absent. Measured over the 33-row noise set on
+# #122 it reported 239 findings on boto v2.13.2, 2.8812 per kLOC against the
+# 2.2 info ceiling of 1.0, and no path class carries the breach: 211 of the 239
+# are under boto/ itself, 2.5436 per kLOC on their own. The findings are not
+# wrong - boto/beanstalk/layer1.py's create_environment really does take ten
+# parameters - they are what a keyword-argument-per-API-field SDK looks like,
+# and raising the threshold high enough to accept boto would stop the rule
+# saying anything on the other three repositories.
 version: 1
 rules:
   - id: maintainability.python.function-length
@@ -14,13 +23,6 @@ rules:
     metric:
       measure: function-length
       max: 120
-  - id: maintainability.python.parameter-count
-    severity: info
-    message: "this function takes more parameters than the profile allows"
-    languages: [python]
-    metric:
-      measure: parameter-count
-      max: 7
   - id: maintainability.python.nesting-depth
     severity: info
     message: "this function nests deeper than the profile allows"

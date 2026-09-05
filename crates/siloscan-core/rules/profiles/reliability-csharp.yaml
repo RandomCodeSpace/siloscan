@@ -3,7 +3,7 @@
 # are not ownable and no pattern, query or message text is taken from another
 # analyser.
 #
-# Identity: reliability-csharp@1. See crates/siloscan-core/src/profiles.rs.
+# Identity: reliability-csharp@2. See crates/siloscan-core/src/profiles.rs.
 #
 # Two candidates from the rule matrix are deliberately absent, each removed on
 # the measurement recorded in tests/profiles-corpus/noise/limits.tsv rather
@@ -17,15 +17,26 @@
 #                             warning restore` line, or a C# local function
 #                             declared after the return - and a local function
 #                             is hoisted, so it is reachable.
+#
+# Two more were removed on #122, on the 33-row noise set with dotnet/eShop
+# dotnet8 in it. Both are over the 2.2 warning ceiling of 0.25 findings per
+# kLOC on eShop, and neither breach sits in a path class that could be
+# excluded - every finding is in src/ClientApp, the shipped MAUI client:
+#   async-void                8 findings on eShop, 0.4113 per kLOC. All eight
+#                             are `async void` overrides of framework virtuals
+#                             - OnStart, OnAppearing, OnHandlerChanged,
+#                             OnPropertyChanged, ApplyQueryAttributes - or a
+#                             BindableProperty changed callback. An override
+#                             cannot change its return type, so the rule is
+#                             asking for something the code cannot give.
+#   empty-catch               10 findings on eShop, 0.5141 per kLOC. Nine are
+#                             the same `catch (InvalidOperationException) {}`
+#                             around AbortAnimation in one file,
+#                             VisualElementExtensions.cs. The catches are
+#                             genuinely empty, but one file's idiom carries the
+#                             whole breach and no path excludes it.
 version: 1
 rules:
-  - id: reliability.csharp.empty-catch
-    severity: warning
-    message: 'This catch block is empty, so the exception is discarded with no record that it happened. A handler that holds only a comment is not reported.'
-    ast:
-      csharp: |
-        (catch_clause body: (block "{" . "}") @report)
-
   - id: reliability.csharp.self-comparison
     severity: warning
     message: 'Both operands of this comparison are the same identifier, so the result is constant.'
@@ -46,17 +57,6 @@ rules:
            (catch_declaration name: (identifier) @n)
            body: (block (throw_statement (identifier) @t))) @report
          (#eq? @n @t))
-
-  - id: reliability.csharp.async-void
-    severity: warning
-    message: 'An async void method cannot be awaited, so a fault inside it is raised on the thread pool rather than at the caller.'
-    ast:
-      csharp: |
-        ((method_declaration
-           (modifier) @m
-           returns: (predefined_type) @r) @report
-         (#eq? @m "async")
-         (#eq? @r "void"))
 
   - id: reliability.csharp.identical-if-branches
     severity: warning
