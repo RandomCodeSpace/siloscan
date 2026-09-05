@@ -38,13 +38,15 @@ use siloscan_core::rules::{CompiledRule, load_str};
 /// Every floor is the MEASURED value at the time its family landed -
 /// descriptive, not aspirational. A family whose positives contract known
 /// gaps (the ticket #44 placeholder-vocabulary URLs, the `=[^=]` markup
-/// allowlist of #51, the Kubernetes `data:` decoding rule arriving with #53)
-/// starts low on purpose: the floor records where the pack stands, and the
-/// ticket that closes the gap raises the floor in the same commit that moves
-/// the number. What a floor forbids is regression below what was measured.
+/// allowlist of #51, the Kubernetes `data:` values ticket #52 decided not to
+/// decode) starts low on purpose: the floor records where the pack stands, and
+/// the ticket that closes the gap raises the floor in the same commit that
+/// moves the number. What a floor forbids is regression below what was
+/// measured.
 const RECALL_FLOORS: &[(&str, f64)] = &[
     ("core", 0.9884), // measured 171/173: the netrc and word-password misses
-    ("k8s", 0.8636),  // measured 19/22: `data:` decoding waits on #52
+    ("encoded", 1.0), // measured 8/8: the docker and npm logins #52 gated on
+    ("k8s", 0.8636),  // measured 19/22: the 3 misses #52 left to decoding
     ("keys", 1.0),    // measured 5/5: every private-key format, plus a keystore
     ("urls", 0.9600), // measured 24/25: #44 closed bar the sub-floor entropy
     ("xml", 0.7777),  // measured 21/27: #51 closed, unlisted names remain
@@ -421,6 +423,7 @@ fn credential(name: &str) -> Option<String> {
         "PWEQ" => eq_probe_password(&mut rng, param),
         "B64PAD" => padded_base64(&mut rng, param),
         "B64PW" => base64_std(password(&mut rng, param, "").as_bytes()),
+        "B64BASIC" => base64_std(format!("ci-deploy:{}", password(&mut rng, param, "")).as_bytes()),
         "B64CREDURL" => base64_std(
             format!(
                 "postgres://app:{}@db.internal:5432/app",

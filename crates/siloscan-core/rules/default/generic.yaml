@@ -564,6 +564,73 @@ rules:
           - 'qwerty'
           - 'foobar'
           - 'lorem'
+  - id: secrets.registry-encoded-basic-auth
+    severity: warning
+    message: 'Detected a base64-encoded registry login, which is the account password itself with an encoding over it and nothing else.'
+    secret:
+      # Two registry-client configuration formats that hold an HTTP basic
+      # credential base64-encoded, because base64 is what RFC 7617 puts on the
+      # wire and both formats store the wire form:
+      #
+      #   ~/.docker/config.json  "auth": "<base64 of user:password>", and the
+      #   ~/.dockercfg           legacy single-line file of the same shape
+      #   .npmrc                 _auth=<base64 of user:password>, bare or under
+      #                          a `//registry/:` prefix
+      #
+      # One rule rather than two, because it is one credential in one encoding
+      # under two spellings of the same key: one message, one entropy floor,
+      # one set of corpus rows. `secrets.generic-secret-assignment` reaches
+      # neither spelling - its name class admits `auth` only when a word
+      # follows it, `auth_token`, `auth-key`, `auth.secret`, and both of these
+      # end at the `h`. npm's sibling `_password=` is base64 too and is
+      # already reported by that rule, because that name does spell one.
+      #
+      # Nothing is decoded here, and that is ticket #52's decision rather than
+      # a shortcut: the encoded run is the credential as it sits in the file,
+      # so the span, the snippet and the fingerprint all point at bytes that
+      # exist. A value recovered by decoding has no span on disk at all.
+      #
+      # What makes this narrow is the value class plus a mandatory terminator.
+      # The class is base64 and its padding, nothing else, so an identifier -
+      # which carries `_` or `-` - ends the run before the terminator can
+      # match and the rule never reports `"auth": "docker_credential_helper"`
+      # at all. Interpolations and documentation placeholders are outside the
+      # class from their first character - `$DOCKER_HUB_AUTH`, `${NPM_AUTH}`,
+      # `<base64-of-username-and-password>` - so none of them needs an
+      # allowlist entry.
+      #
+      # Sixteen characters is the floor because base64 of the shortest login
+      # worth reporting - a three-character user and an eight-character
+      # password - is that long, and because a shorter value cannot clear the
+      # entropy floor anyway: Shannon entropy over bytes has a ceiling of
+      # log2(length).
+      #
+      # Ships at `warning`, for the reason `secrets.generic-authorization-header`
+      # states above and `default_pack.rs` argues: every finding this rule
+      # makes is new, no existing baseline can cover one, and a rule that ships
+      # at `error` fails the first build after an upgrade under the default
+      # `--fail-on error`.
+      pattern: '(?:"auth"[ \t]*:[ \t]*"|(?:^|[\s:])_auth[ \t]*=[ \t]*)([A-Za-z0-9+/]{16,684}={0,2})(?:[\x60''"\s;,]|$)'
+      group: 1
+      # The same floor `secrets.generic-authorization-header` carries, and for
+      # the same bytes: a base64 basic credential under another key. The five
+      # corpus values measure 4.5719 to 4.8637, so the floor is not what holds
+      # this rule's precision - the base64 alphabet is 64 symbols and a run
+      # this long sits near its ceiling whatever it encodes. What the floor
+      # does buy is the short end: at sixteen characters the ceiling is 4.0,
+      # and a value that repeats itself cannot reach 3.5.
+      entropy: 3.5
+      keywords:
+        - '"auth"'
+        - '_auth'
+      allowlist:
+        patterns:
+          # A value with no digit anywhere is a word, not an encoding. Ten of
+          # the sixty-four base64 symbols are digits, so a real encoded login
+          # sixteen characters or longer carrying none is a draw nobody will
+          # see, while an English identifier sitting in the slot is exactly
+          # this shape. It is the entry the three rules above already use.
+          - '^[^0-9]*$'
   - id: secrets.generic-markup-config-secret
     severity: warning
     message: 'Detected a credential carried by a configuration element or attribute pair, which is how XML and .NET configuration files leak one.'

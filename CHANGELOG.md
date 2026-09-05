@@ -26,6 +26,16 @@ All notable changes to this project are documented here. The format follows
 - `paths.case_insensitive` on a rule's path envelope, applying to both
   `include` and `exclude`. Absent means false, so every existing rule keeps
   matching exactly what it matched.
+- `secrets.registry-encoded-basic-auth`, which reports the base64 login a
+  registry client stores in `~/.docker/config.json` and `~/.dockercfg`
+  (`"auth": "..."`) and in `.npmrc` (`_auth=...`, bare or under a
+  `//registry/:` prefix). The encoded run is reported where it sits, with its
+  own span and fingerprint; nothing is decoded, which is the decision ticket
+  #52 records. Measured on the detection corpus at recall 1.0000 for the new
+  `encoded` family and precision 1.0000 overall, and on two real trees at 0
+  findings added and 0 removed: 1.2 GB of published crates under a cargo
+  registry stays at 515 and 2.5 GB of `/usr/share` stays at 26, with the rule's
+  keywords present in 690 files across the two.
 
 ### Changed
 

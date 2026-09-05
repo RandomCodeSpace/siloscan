@@ -1,0 +1,26 @@
+{
+  "auths": {
+    "registry.internal:5000": {
+      "auth": "{{B64BASIC_20_511}}"
+    },
+    "ghcr.io": {
+      "auth": "{{B64BASIC_28_512}}",
+      "email": "ci-bot@example.com"
+    },
+    "index.docker.io": {
+      "auth": "$DOCKER_HUB_AUTH"
+    },
+    "public.ecr.aws": {
+      "auth": "<base64-of-username-and-password>"
+    },
+    "quay.io": {
+      "auth": ""
+    }
+  },
+  "credsStore": "pass",
+  "credHelpers": {
+    "asia-docker.pkg.dev": "gcloud"
+  },
+  "psFormat": "table {{.ID}}\t{{.Image}}\t{{.Status}}",
+  "detachKeys": "ctrl-e,e"
+}

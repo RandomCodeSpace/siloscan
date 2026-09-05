@@ -208,6 +208,33 @@ docker-compose.yml	30	NONE	a URL with a username and no password
 docker-compose.yml	31	NONE	a shell variable in the password position
 docker-compose.yml	32	NONE	a template interpolation in the password position
 docker-compose.yml	33	NONE	an instruction to the reader in the password position
+encoded/.dockercfg	1	ANY	a legacy .dockercfg: the whole file is one line of JSON whose auth field is base64(user:password), the shape docker wrote before config.json
+encoded/.npmrc	3	NONE	a registry URL with no credential in it
+encoded/.npmrc	4	NONE	always-auth is a boolean policy flag; it carries the word auth beside a value and must stay quiet
+encoded/.npmrc	5	ANY	npm's _auth for the default registry: base64(user:password), the encoded shape ticket 52 gates on
+encoded/.npmrc	6	NONE	a contact address, not a credential
+encoded/.npmrc	8	ANY	npm's per-registry _auth, the same encoded credential under a scoped key
+encoded/.npmrc	9	NONE	a plaintext registry username, which is not a secret on its own
+encoded/.npmrc	10	ANY	npm's _password: base64 of the password alone, no username, under a per-registry key
+encoded/.npmrc	11	secrets.npm-access-token	an npm access token in the _authToken slot: plaintext with a vendor prefix, owned by the vendor rule and not by any encoded shape
+encoded/.npmrc	12	NONE	an _auth read from the environment, the correct pattern, carrying no value
+encoded/.npmrc	13	NONE	a documentation placeholder in the _auth slot
+encoded/.npmrc	14	NONE	base64 of a public certificate under npm's ca[] key: base64 that is not a credential, the false positive an encoded-credential rule has to stay off
+encoded/.npmrc	15	NONE	a boolean TLS setting
+encoded/.npmrc	16	NONE	a numeric retry count
+encoded/config.json	4	ANY	docker's client config: the auth field is base64(user:password) for one registry
+encoded/config.json	7	ANY	a second registry entry, the same encoded shape with a comma rather than a brace after it
+encoded/config.json	8	NONE	a contact address beside an auth field
+encoded/config.json	11	NONE	an auth field an entrypoint substitutes from the environment, carrying no value
+encoded/config.json	14	NONE	a documentation placeholder in the auth field
+encoded/config.json	17	NONE	an empty auth field, which is what a credential helper entry leaves behind
+encoded/config.json	20	NONE	the name of a credential helper, not a credential
+encoded/config.json	22	NONE	a credHelpers entry mapping a registry to a helper binary
+encoded/config.json	24	NONE	a docker ps format template, brace interpolation the harness must leave verbatim
+encoded/config.json	25	NONE	a detach key sequence
+encoded/fetch-deps.sh	8	ANY	an Authorization: Basic header whose value is a real base64(user:password) rather than a random token, outside a curl command; what this row measures is whether the header rule's entropy floor admits an encoded credential
+encoded/fetch-deps.sh	12	NONE	the same header taken from the environment, the correct pattern
+encoded/fetch-deps.sh	16	NONE	a sha256 digest of a downloaded archive, 64 hex that must stay quiet
 k8s-deployment.yaml	7	ANY	a password in a Secret stringData block
 k8s-deployment.yaml	8	ANY	exactly 40 base64 characters in a Secret stringData block
 k8s-deployment.yaml	9	ANY	a 256-bit signing secret in a Secret stringData block
@@ -249,12 +276,12 @@ k8s/kustomization.yaml	26	NONE	a configMapGenerator feature-flag list, hyphenate
 k8s/postgres-secret.yaml	2	secrets.kubernetes-secret-yaml	kind: Secret over base64 values under data:; the rule matches from the kind: line through the first encoded value, so the reported line is where the manifest declares itself a Secret - one finding per manifest, not per key
 k8s/postgres-secret.yaml	10	secrets.generic-secret-assignment	base64 of a 24-character password under data: beside a password key; the encoded text is itself a high-entropy value the generic assignment owns - secrets.kubernetes-secret-yaml landed with ticket 53 and reports the manifest at its kind: line (row 2), not per value line
 k8s/postgres-secret.yaml	11	secrets.generic-secret-assignment	base64 of a 20-character replication password under data:; same encoded-value shape as row 10 but under an identifier the generic assignment's name class does not reach - a known miss, unchanged by ticket 53, which reports this manifest once at its kind: line
-k8s/postgres-secret.yaml	12	ANY	base64 of a credentialed postgres URL under a database-url key; no secret-like identifier, so no rule can reach the value without decoding it - the known miss ticket 52's decode gate owns; ticket 53's secrets.kubernetes-secret-yaml reports the manifest at its kind: line instead, which is row 2
+k8s/postgres-secret.yaml	12	ANY	base64 of a credentialed postgres URL under a database-url key; no secret-like identifier, so no rule can reach the value without decoding it - ticket 52 measured this and left it, because a decoded credential has no span on disk and no honest fingerprint; ticket 53's secrets.kubernetes-secret-yaml reports the manifest at its kind: line instead, which is row 2
 k8s/redis-secret.yaml	2	secrets.kubernetes-secret-yaml	kind: Secret over base64 password values under data:, reported at the kind: line where the match starts
 k8s/redis-secret.yaml	8	secrets.generic-secret-assignment	base64 of a 32-character redis password under data:; the generic assignment owns the encoded text, and secrets.kubernetes-secret-yaml reports this manifest at its kind: line (row 2) since ticket 53
 k8s/redis-secret.yaml	9	secrets.generic-secret-assignment	base64 of a 16-character requirepass value under data:; same shape as row 8, owned by the generic assignment
 k8s/registry-credentials.yaml	2	secrets.kubernetes-secret-yaml	kind: Secret over a .dockerconfigjson blob: the value needs decoding twice before anything can read it, and this rule reports the manifest for being one rather than reading the value at all
-k8s/registry-credentials.yaml	8	ANY	a .dockerconfigjson blob: base64 of JSON whose auth field is base64 of user:password - two encoding layers, the shape ticket 52's decode gate owns; the key carries no secret identifier, so this line stays a known miss, while ticket 53's secrets.kubernetes-secret-yaml reports the manifest at its kind: line, row 2
+k8s/registry-credentials.yaml	8	ANY	a .dockerconfigjson blob: base64 of JSON whose auth field is base64 of user:password - two encoding layers, so the inner auth field secrets.registry-encoded-basic-auth reports in a plain config.json is not present in these bytes at all; ticket 52 left this to the manifest-level report, which is ticket 53's secrets.kubernetes-secret-yaml at the kind: line, row 2
 k8s/session-secret.yaml	10	ANY	64 hex characters of session signing secret in stringData plaintext, reachable by the generic rules today; ownership may move to secrets.kubernetes-secret-yaml when ticket 53 lands
 k8s/session-secret.yaml	11	ANY	43-character base64url CSRF token in stringData plaintext
 k8s/session-secret.yaml	12	ANY	a 40-hex OAuth client secret in stringData plaintext, the GitHub OAuth client secret length
