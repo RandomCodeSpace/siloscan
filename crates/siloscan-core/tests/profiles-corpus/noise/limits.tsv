@@ -67,6 +67,17 @@ maintainability.cpp.using-namespace-in-header	0	0.065737	2026-09-03	#98 D1: max 
 reliability.cpp.assignment-in-condition	0	0.000000	2026-09-03	#98 D1: no finding on fmt, nlohmann/json or abseil-cpp; re-measured with C++ headers detected as C++; the landing measurement read every .h as C
 reliability.cpp.identical-if-branches	0	0.000000	2026-09-03	#98 D1: no finding on fmt, nlohmann/json or abseil-cpp; re-measured with C++ headers detected as C++; the landing measurement read every .h as C
 reliability.cpp.self-assignment	0	0.000000	2026-09-03	#98 D1: no finding on fmt, nlohmann/json or abseil-cpp; re-measured with C++ headers detected as C++; the landing measurement read every .h as C
+reliability.cpp.catch-by-value	0	0.022753	2026-09-05	#103 cpp: max of fmt 0.0228, nlohmann/json 0.0000, abseil-cpp 0.0000
+reliability.cpp.throw-pointer	0	0.000000	2026-09-05	#103 cpp: max of fmt 0.0000, nlohmann/json 0.0000, abseil-cpp 0.0000
+reliability.cpp.assert-with-side-effect	0	0.000000	2026-09-05	#103 cpp: max of fmt 0.0000, nlohmann/json 0.0000, abseil-cpp 0.0000
+reliability.cpp.duplicate-else-if-condition	0	0.000000	2026-09-05	#103 cpp: max of fmt 0.0000, nlohmann/json 0.0000, abseil-cpp 0.0000
+reliability.cpp.identical-logical-operands	0	0.000000	2026-09-05	#103 cpp: max of fmt 0.0000, nlohmann/json 0.0000, abseil-cpp 0.0000
+reliability.cpp.unsafe-c-string-call	0	0.029587	2026-09-05	#103 cpp: max of fmt 0.0000, nlohmann/json 0.0000, abseil-cpp 0.0296
+reliability.cpp.size-comparison-always-true	0	0.000000	2026-09-05	#103 cpp: max of fmt 0.0000, nlohmann/json 0.0000, abseil-cpp 0.0000
+maintainability.cpp.container-size-zero-comparison	0	0.091009	2026-09-05	#103 cpp: max of fmt 0.0910, nlohmann/json 0.0845, abseil-cpp 0.0237
+maintainability.cpp.implicit-converting-constructor	0	0.477794	2026-09-05	#103 cpp: max of fmt 0.4778, nlohmann/json 0.3381, abseil-cpp 0.4497
+maintainability.cpp.named-unsafe-cast	0	0.301781	2026-09-05	#103 cpp: max of fmt 0.2275, nlohmann/json 0.0188, abseil-cpp 0.3018
+maintainability.cpp.redundant-virtual-with-override	0	0.000000	2026-09-05	#103 cpp: max of fmt 0.0000, nlohmann/json 0.0000, abseil-cpp 0.0000
 maintainability.csharp.cyclomatic-complexity	0	0.384109	2026-09-03	#78 P4b: max of AutoMapper 0.0208, Dapper 0.2483, Newtonsoft.Json 0.3841
 maintainability.csharp.function-length	0	0.668381	2026-09-05	#122: max of AutoMapper 0.0416, Dapper 0.3476, Newtonsoft.Json 0.3615, dotnet/eShop 0.6684; twelve of the thirteen findings on eShop are Entity Framework migration scaffolds
 maintainability.csharp.nesting-depth	0	0.248263	2026-09-03	#78 P4b: max of AutoMapper 0.0000, Dapper 0.2483, Newtonsoft.Json 0.1958

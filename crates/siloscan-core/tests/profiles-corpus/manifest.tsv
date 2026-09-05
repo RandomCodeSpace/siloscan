@@ -102,6 +102,50 @@ cpp/metric-over.cpp	19	maintainability.cpp.cyclomatic-complexity	25 branches plu
 cpp/metric-under.cpp	1	NONE	seven parameters is exactly the profile's limit
 cpp/metric-under.cpp	4	NONE	five nested if statements is exactly the profile's limit
 cpp/metric-under.cpp	17	NONE	24 branches plus the entry path is 25, exactly the profile's limit
+cpp/catch-by-value-positive.cpp	2	reliability.cpp.catch-by-value	the handler declares a plain identifier, so the exception is copied and a derived type is sliced
+cpp/catch-by-value-negative.cpp	2	NONE	a const reference binds the exception without copying it
+cpp/catch-by-value-negative.cpp	3	NONE	a non-const reference binds the exception without copying it
+cpp/catch-by-value-negative.cpp	4	NONE	an ellipsis handler declares no parameter, so nothing is copied
+cpp/catch-by-value-negative.cpp	5	NONE	a built-in type cannot be sliced and copying it is free
+cpp/throw-pointer-positive.cpp	2	reliability.cpp.throw-pointer	the operand is a new-expression, so the thrown object is a pointer every handler must delete
+cpp/throw-pointer-negative.cpp	2	NONE	the exception is thrown by value, which is the form handlers catch by reference
+cpp/throw-pointer-negative.cpp	3	NONE	a new-expression outside a throw is an ordinary allocation
+cpp/assert-with-side-effect-positive.cpp	2	reliability.cpp.assert-with-side-effect	the assertion assigns, so the program behaves differently once NDEBUG removes it
+cpp/assert-with-side-effect-positive.cpp	3	reliability.cpp.assert-with-side-effect	the assertion increments, so the program behaves differently once NDEBUG removes it
+cpp/assert-with-side-effect-negative.cpp	2	NONE	the assertion compares and changes nothing
+cpp/assert-with-side-effect-negative.cpp	3	NONE	the call is not assert, so removing NDEBUG code does not remove it
+cpp/duplicate-else-if-condition-positive.cpp	2	reliability.cpp.duplicate-else-if-condition	the else-if repeats the condition above it, so its branch can never run
+cpp/duplicate-else-if-condition-negative.cpp	2	NONE	the two conditions test opposite sides of zero and both branches are reachable
+cpp/identical-logical-operands-positive.cpp	2	reliability.cpp.identical-logical-operands	both operands are the identical identifier, so one of them is the wrong variable
+cpp/identical-logical-operands-negative.cpp	2	NONE	the operands are different identifiers, which is an ordinary conjunction
+cpp/identical-logical-operands-negative.cpp	3	NONE	the operands are different identifiers, which is an ordinary disjunction
+cpp/unsafe-c-string-call-positive.cpp	2	reliability.cpp.unsafe-c-string-call	strcpy writes to the destination without a bound
+cpp/unsafe-c-string-call-negative.cpp	2	NONE	the callee is a member function, not the free function the rule names
+cpp/unsafe-c-string-call-negative.cpp	3	NONE	snprintf takes the destination size and is the bounded replacement
+cpp/unsafe-c-string-call-negative.cpp	4	NONE	strncpy takes a bound and the qualified name is not the free identifier the rule names
+cpp/size-comparison-always-true-positive.cpp	2	reliability.cpp.size-comparison-always-true	an unsigned size is never below zero, so the comparison is always true
+cpp/size-comparison-always-true-negative.cpp	2	NONE	comparing against one asks whether the container holds anything, which is not constant
+cpp/implicit-converting-constructor-positive.cpp	1	maintainability.cpp.implicit-converting-constructor	a declared single-argument constructor in a struct with no explicit keyword
+cpp/implicit-converting-constructor-positive.cpp	2	maintainability.cpp.implicit-converting-constructor	an in-class defined single-argument constructor in a struct with no explicit keyword
+cpp/implicit-converting-constructor-positive.cpp	3	maintainability.cpp.implicit-converting-constructor	a declared single-argument constructor in a class with no explicit keyword
+cpp/implicit-converting-constructor-positive.cpp	4	maintainability.cpp.implicit-converting-constructor	an in-class defined single-argument constructor in a class with no explicit keyword
+cpp/implicit-converting-constructor-negative.cpp	2	NONE	the explicit keyword is the fix the rule asks for
+cpp/implicit-converting-constructor-negative.cpp	3	NONE	a copy constructor takes its own class and is not a conversion
+cpp/implicit-converting-constructor-negative.cpp	4	NONE	a move constructor takes its own class and is not a conversion
+cpp/implicit-converting-constructor-negative.cpp	5	NONE	two parameters cannot be an implicit conversion
+cpp/implicit-converting-constructor-negative.cpp	6	NONE	a default constructor takes no argument to convert from
+cpp/implicit-converting-constructor-negative.cpp	7	NONE	an initializer-list constructor is implicit on purpose
+cpp/redundant-virtual-with-override-positive.cpp	2	maintainability.cpp.redundant-virtual-with-override	override already implies virtual, so writing both is redundant
+cpp/redundant-virtual-with-override-negative.cpp	2	NONE	override alone is the spelling the rule asks for
+cpp/redundant-virtual-with-override-negative.cpp	3	NONE	virtual alone declares a new virtual function and overrides nothing
+cpp/redundant-virtual-with-override-negative.cpp	4	NONE	final without virtual is not the redundant pair
+cpp/redundant-virtual-with-override-negative.cpp	5	NONE	a pure virtual declaration carries no virtual specifier
+cpp/named-unsafe-cast-positive.cpp	2	maintainability.cpp.named-unsafe-cast	const_cast discards the const the type system was holding
+cpp/named-unsafe-cast-negative.cpp	2	NONE	static_cast is checked by the compiler and is not one of the names the rule lists
+cpp/container-size-zero-comparison-positive.cpp	2	maintainability.cpp.container-size-zero-comparison	size() == 0 asks a yes-or-no question that empty() answers directly
+cpp/container-size-zero-comparison-positive.cpp	3	maintainability.cpp.container-size-zero-comparison	length() != 0 asks a yes-or-no question that empty() answers directly
+cpp/container-size-zero-comparison-negative.cpp	2	NONE	empty() is the spelling the rule asks for
+cpp/container-size-zero-comparison-negative.cpp	3	NONE	comparing against one is a count question, not an emptiness question
 csharp/metric-over.cs	2	maintainability.csharp.function-length	the method spans 121 lines, one over the profile's 120
 csharp/metric-over.cs	125	maintainability.csharp.parameter-count	the method takes 8 parameters, one over the profile's 7
 csharp/metric-over.cs	130	maintainability.csharp.nesting-depth	six nested if statements, one over the profile's 5

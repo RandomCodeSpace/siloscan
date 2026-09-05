@@ -30,6 +30,30 @@
 #                             report lands on the `;` of the next statement.
 #                             Zero true positives on three repositories is not
 #                             a threshold to tune.
+#
+# Three more candidates from the #111 pitfall list are absent for the same
+# reason, measured on fmt 10.2.1, nlohmann/json v3.12.0 and abseil-cpp
+# 20240722.2 under the 2.2 policy:
+#   chained-relational-comparison  1.5267 per kLOC on abseil against a 0.25
+#                             ceiling for a warning, and every finding read is
+#                             a template-id tree-sitter-cpp resolves as
+#                             arithmetic - `L::Partial(3).Pointer<0>(p)`,
+#                             `atomic<CycleClockSourceFunc> f`. The breach is
+#                             concentrated in template-dense headers, which are
+#                             the library, so no `paths` exclusion reaches it.
+#   bitwise-comparison-precedence  within the ceiling at 0.0657 per kLOC on
+#                             nlohmann/json, and all eight findings read across
+#                             nlohmann/json and abseil are parse artifacts: the
+#                             match runs from a reference declarator in a macro
+#                             argument (`json::invalid_iterator&);`) or from an
+#                             `operator!=` declaration across the closing brace
+#                             of the function above it. No finding is an
+#                             expression whose operands group wrongly.
+#   assignment-in-loop-condition  within the ceiling at 0.0118 per kLOC on
+#                             abseil, and both findings are `} while (v /= 10);`
+#                             in a digit-emitting loop. A compound assignment
+#                             cannot be a mistyped comparison, which is the
+#                             whole pitfall, so the yield here is zero.
 version: 1
 rules:
   - id: reliability.cpp.self-assignment
@@ -61,3 +85,76 @@ rules:
            consequence: (compound_statement) @a
            alternative: (else_clause (compound_statement) @b)) @report
          (#eq? @a @b))
+
+  - id: reliability.cpp.catch-by-value
+    severity: warning
+    message: 'This handler catches the exception by value, which copies it and slices a derived type down to its base.'
+    ast:
+      cpp: |
+        (catch_clause
+          parameters: (parameter_list
+            (parameter_declaration
+              type: [(type_identifier) (qualified_identifier) (template_type)]
+              declarator: (identifier)) @report))
+
+  - id: reliability.cpp.throw-pointer
+    severity: warning
+    message: 'This throws a pointer, so every handler has to catch the pointer type and delete it.'
+    ast:
+      cpp: |
+        (throw_statement (new_expression)) @report
+
+  - id: reliability.cpp.assert-with-side-effect
+    severity: warning
+    message: 'This assertion changes state, so the program behaves differently once NDEBUG removes it.'
+    ast:
+      cpp: |
+        ((call_expression
+           function: (identifier) @f
+           arguments: (argument_list
+             [(assignment_expression) (update_expression)])) @report
+         (#eq? @f "assert"))
+
+  - id: reliability.cpp.duplicate-else-if-condition
+    severity: warning
+    message: 'This else-if repeats the condition above it, so its branch can never run.'
+    ast:
+      cpp: |
+        ((if_statement
+           condition: (condition_clause value: (_) @c1)
+           alternative: (else_clause
+             (if_statement
+               condition: (condition_clause value: (_) @c2)))) @report
+         (#eq? @c1 @c2))
+
+  - id: reliability.cpp.identical-logical-operands
+    severity: warning
+    message: 'Both operands of this logical operator are the same identifier, so one of them is the wrong variable.'
+    ast:
+      cpp: |
+        ((binary_expression
+           left: (identifier) @l
+           operator: ["&&" "||"]
+           right: (identifier) @r) @report
+         (#eq? @l @r))
+
+  - id: reliability.cpp.unsafe-c-string-call
+    severity: warning
+    message: 'This function writes without a destination bound and has a bounded replacement.'
+    ast:
+      cpp: |
+        ((call_expression function: (identifier) @f) @report
+         (#any-of? @f "strcpy" "strcat" "sprintf" "gets" "alloca" "strtok"))
+
+  - id: reliability.cpp.size-comparison-always-true
+    severity: warning
+    message: 'An unsigned size is never below zero, so this comparison is always true.'
+    ast:
+      cpp: |
+        ((binary_expression
+           left: (call_expression
+             function: (field_expression field: (field_identifier) @m))
+           operator: ">="
+           right: (number_literal) @z) @report
+         (#eq? @m "size")
+         (#eq? @z "0"))

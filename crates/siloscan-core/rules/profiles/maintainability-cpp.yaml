@@ -13,6 +13,15 @@
 # the threshold cannot help: the mis-parsed unit is thousands of lines long
 # whatever the limit. The other three measures are unaffected, because a
 # pseudo-function that wide is still shallow and unbranched.
+#
+# named-unsafe-cast ships for `const_cast` alone. Measured with
+# `reinterpret_cast` in the same `#any-of?` list it reported 2.6628 per kLOC on
+# abseil-cpp against a 1.0 ceiling for an info rule, and every finding read is
+# bit-level code doing what it is there to do: `reinterpret_cast<void*>(
+# syscall(SYS_mmap, ...))`, `reinterpret_cast<FnPtr>(value)` in an atomic hook.
+# Dropping the one name brought the rule to 0.3018 per kLOC on the same
+# repository; that is the removal the #111 list predicted, not a tuned
+# threshold.
 version: 1
 rules:
   - id: maintainability.cpp.using-namespace-in-header
@@ -51,3 +60,85 @@ rules:
     metric:
       measure: cyclomatic-complexity
       max: 25
+
+  - id: maintainability.cpp.implicit-converting-constructor
+    severity: info
+    message: 'This single-argument constructor is not explicit, so the type becomes an implicit conversion target at every call site.'
+    ast:
+      cpp: |
+        ((class_specifier
+           name: (type_identifier) @cls
+           body: (field_declaration_list
+             (declaration
+               .
+               declarator: (function_declarator
+                 declarator: (identifier) @ctor
+                 parameters: (parameter_list . (parameter_declaration type: (_) @ptype) .))) @report))
+         (#eq? @ctor @cls)
+         (#not-eq? @ptype @cls)
+         (#not-match? @ptype "initializer_list"))
+        ((class_specifier
+           name: (type_identifier) @cls
+           body: (field_declaration_list
+             (function_definition
+               .
+               declarator: (function_declarator
+                 declarator: (identifier) @ctor
+                 parameters: (parameter_list . (parameter_declaration type: (_) @ptype) .))) @report))
+         (#eq? @ctor @cls)
+         (#not-eq? @ptype @cls)
+         (#not-match? @ptype "initializer_list"))
+        ((struct_specifier
+           name: (type_identifier) @cls
+           body: (field_declaration_list
+             (declaration
+               .
+               declarator: (function_declarator
+                 declarator: (identifier) @ctor
+                 parameters: (parameter_list . (parameter_declaration type: (_) @ptype) .))) @report))
+         (#eq? @ctor @cls)
+         (#not-eq? @ptype @cls)
+         (#not-match? @ptype "initializer_list"))
+        ((struct_specifier
+           name: (type_identifier) @cls
+           body: (field_declaration_list
+             (function_definition
+               .
+               declarator: (function_declarator
+                 declarator: (identifier) @ctor
+                 parameters: (parameter_list . (parameter_declaration type: (_) @ptype) .))) @report))
+         (#eq? @ctor @cls)
+         (#not-eq? @ptype @cls)
+         (#not-match? @ptype "initializer_list"))
+
+  - id: maintainability.cpp.redundant-virtual-with-override
+    severity: info
+    message: 'The override specifier already implies virtual, so writing both is redundant.'
+    ast:
+      cpp: |
+        ((field_declaration
+           "virtual"
+           declarator: (function_declarator (virtual_specifier) @v)) @report
+         (#eq? @v "override"))
+
+  - id: maintainability.cpp.named-unsafe-cast
+    severity: info
+    message: 'This cast discards a guarantee the type system was holding.'
+    ast:
+      cpp: |
+        ((call_expression
+           function: (template_function name: (identifier) @f)) @report
+         (#eq? @f "const_cast"))
+
+  - id: maintainability.cpp.container-size-zero-comparison
+    severity: info
+    message: 'This compares a count against zero to ask an emptiness question that empty() answers directly.'
+    ast:
+      cpp: |
+        ((binary_expression
+           left: (call_expression
+             function: (field_expression field: (field_identifier) @m))
+           operator: ["==" "!="]
+           right: (number_literal) @z) @report
+         (#any-of? @m "size" "length")
+         (#eq? @z "0"))
