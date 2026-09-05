@@ -5,6 +5,15 @@
 #
 # Every rule is a concept-only citation. No pattern text, query text or
 # message text is taken from any upstream project.
+#
+# The ten rules from unreachable-after-return onwards are the reliability half
+# of the go pitfall list (#105), measured under the 2.2 noise policy on cobra,
+# gin and prometheus/client_golang. No candidate on that list was dropped.
+# unreachable-after-return is the 2.1 removal returning: the removed query
+# anchored a bare (_) after the return and a go comment is a named sibling
+# inside statement_list, so it reported trailing comments. Demanding the
+# _statement supertype instead reports no comment, and the rule measures
+# 0.0000 per kLOC on all three gate repositories.
 version: 1
 rules:
   - id: reliability.go.self-comparison
@@ -32,3 +41,72 @@ rules:
     message: "both arms of this if have the same body, so the condition decides nothing"
     ast:
       go: "((if_statement consequence: (block) @a alternative: (block) @b) @report (#eq? @a @b))"
+  - id: reliability.go.unreachable-after-return
+    severity: warning
+    message: "this statement follows a return in the same block, so it never runs"
+    ast:
+      go: |
+        (statement_list (return_statement) . (_statement) @report)
+  - id: reliability.go.self-comparison-ordering
+    severity: warning
+    message: "both operands of this comparison are the same identifier, so its result is fixed"
+    ast:
+      go: |
+        ((binary_expression left: (identifier) @l operator: "<" right: (identifier) @r) @report (#eq? @l @r))
+        ((binary_expression left: (identifier) @l operator: ">" right: (identifier) @r) @report (#eq? @l @r))
+        ((binary_expression left: (identifier) @l operator: "<=" right: (identifier) @r) @report (#eq? @l @r))
+        ((binary_expression left: (identifier) @l operator: ">=" right: (identifier) @r) @report (#eq? @l @r))
+        ((binary_expression left: (identifier) @l operator: "!=" right: (identifier) @r) @report (#eq? @l @r))
+  - id: reliability.go.self-boolean-operand
+    severity: warning
+    message: "both operands of this boolean operator are the same identifier, so the operator decides nothing"
+    ast:
+      go: |
+        ((binary_expression left: (identifier) @l operator: "&&" right: (identifier) @r) @report (#eq? @l @r))
+        ((binary_expression left: (identifier) @l operator: "||" right: (identifier) @r) @report (#eq? @l @r))
+  - id: reliability.go.self-assignment-field
+    severity: warning
+    message: "this assignment writes a field back to itself and has no effect"
+    ast:
+      go: |
+        ((assignment_statement left: (expression_list . (selector_expression) @l .) operator: "=" right: (expression_list . (selector_expression) @r .)) @report (#eq? @l @r))
+  - id: reliability.go.duplicate-switch-case
+    severity: warning
+    message: "two case clauses in this switch list the same values, so the later one is dead"
+    ast:
+      go: |
+        ((expression_switch_statement (expression_case value: (expression_list) @a) (expression_case value: (expression_list) @b)) @report (#eq? @a @b))
+  - id: reliability.go.duplicate-else-if-condition
+    severity: warning
+    message: "this else-if repeats the condition of the if above it, so its branch is unreachable"
+    ast:
+      go: |
+        ((if_statement !initializer condition: (_) @c1 alternative: (if_statement !initializer condition: (_) @c2)) @report (#eq? @c1 @c2))
+  - id: reliability.go.error-string-comparison
+    severity: warning
+    message: "this compares an error message with a string literal, which breaks when the message is reworded"
+    ast:
+      go: |
+        ((binary_expression left: (call_expression function: (selector_expression field: (field_identifier) @m) arguments: (argument_list)) operator: "==" right: (interpreted_string_literal)) @report (#eq? @m "Error"))
+        ((binary_expression left: (call_expression function: (selector_expression field: (field_identifier) @m) arguments: (argument_list)) operator: "!=" right: (interpreted_string_literal)) @report (#eq? @m "Error"))
+  - id: reliability.go.empty-error-branch
+    severity: warning
+    message: "this error check guards an empty block, so the error is detected and then dropped"
+    ast:
+      go: |
+        ((if_statement condition: (binary_expression left: (identifier) @e operator: "!=" right: (nil)) consequence: (block "{" . "}")) @report (#eq? @e "err"))
+  - id: reliability.go.redundant-boolean-comparison
+    severity: info
+    message: "this compares a boolean with a boolean constant instead of using it directly"
+    ast:
+      go: |
+        ((binary_expression operator: "==" right: (true)) @report)
+        ((binary_expression operator: "==" right: (false)) @report)
+        ((binary_expression operator: "!=" right: (true)) @report)
+        ((binary_expression operator: "!=" right: (false)) @report)
+  - id: reliability.go.errors-new-sprintf
+    severity: info
+    message: "errors.New over a fmt.Sprintf result is the job of fmt.Errorf"
+    ast:
+      go: |
+        ((call_expression function: (selector_expression operand: (identifier) @pkg field: (field_identifier) @fn) arguments: (argument_list . (call_expression function: (selector_expression operand: (identifier) @p2 field: (field_identifier) @f2)) .)) @report (#eq? @pkg "errors") (#eq? @fn "New") (#eq? @p2 "fmt") (#eq? @f2 "Sprintf"))

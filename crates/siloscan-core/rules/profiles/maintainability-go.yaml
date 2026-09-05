@@ -5,6 +5,22 @@
 #
 # Every rule is a concept-only citation. No pattern text, query text or
 # message text is taken from any upstream project.
+#
+# struct-tag-malformed is the maintainability half of the go pitfall list
+# (#105), measured under the 2.2 noise policy on cobra, gin and
+# prometheus/client_golang. Two candidates from that list are deliberately
+# absent, each removed on a measurement over those repositories rather than
+# re-tuned:
+#   naked-return          1.4937 per kLOC on gin, over the info gate, and every
+#                         finding read is a short helper with named results
+#                         where the naked return is deliberate. The findings
+#                         are in context.go rather than in tests, so no paths
+#                         exclusion reaches them.
+#   empty-interface-type  1.5935 per kLOC on cobra and 4.2302 on
+#                         prometheus/client_golang, both over the info gate.
+#                         The rule says the code predates the go 1.18 `any`
+#                         alias, not that it is wrong, and cobra's findings are
+#                         in cobra.go and command.go.
 version: 1
 rules:
   - id: maintainability.go.function-length
@@ -35,3 +51,9 @@ rules:
     metric:
       measure: cyclomatic-complexity
       max: 25
+  - id: maintainability.go.struct-tag-malformed
+    severity: info
+    message: "this struct tag is not in key:\"value\" form, so reflect.StructTag.Get reads nothing from it"
+    ast:
+      go: |
+        ((field_declaration tag: (raw_string_literal) @report) (#not-match? @report "^`(\\s*[A-Za-z0-9_.-]+:\"[^\"]*\")*\\s*`$"))

@@ -131,6 +131,32 @@ go/defer-in-loop-positive.go	5	reliability.go.defer-in-loop	the defer sits in a 
 go/defer-in-loop-negative.go	5	NONE	the call runs in the loop body rather than being deferred
 go/identical-if-branches-positive.go	4	reliability.go.identical-if-branches	both arms are byte-identical, which is the copy-paste shape the rule owns
 go/identical-if-branches-negative.go	4	NONE	the two arms differ, so the condition decides the value
+go/unreachable-after-return-positive.go	6	reliability.go.unreachable-after-return	the call sits directly after a return in the same block, so it can never run
+go/unreachable-after-return-negative.go	6	NONE	a comment follows the return rather than a statement, so nothing is dead
+go/self-comparison-ordering-positive.go	4	reliability.go.self-comparison-ordering	both operands are the identical identifier, so the ordering comparison is constant
+go/self-comparison-ordering-negative.go	4	NONE	the operands are two different identifiers, which is an ordinary comparison
+go/self-boolean-operand-positive.go	4	reliability.go.self-boolean-operand	both operands of the && are the identical identifier, so the operator decides nothing
+go/self-boolean-operand-negative.go	4	NONE	the operands are two different identifiers, so the operator decides the result
+go/self-assignment-field-positive.go	6	reliability.go.self-assignment-field	the assignment writes the field back to itself and has no effect
+go/self-assignment-field-negative.go	6	NONE	the assignment reads a different field, so it has an effect
+go/duplicate-switch-case-positive.go	4	reliability.go.duplicate-switch-case	two case clauses list the same values, so the later one is dead
+go/duplicate-switch-case-negative.go	4	NONE	every case clause lists distinct values
+go/duplicate-else-if-condition-positive.go	4	reliability.go.duplicate-else-if-condition	the else-if repeats the condition of the if above it, so its branch is unreachable
+go/duplicate-else-if-condition-negative.go	8	NONE	both ifs carry an initializer, so the reused condition variable is set afresh before each test
+go/error-string-comparison-positive.go	4	reliability.go.error-string-comparison	the error is classified by comparing its message with a string literal
+go/error-string-comparison-negative.go	6	NONE	the comparison is against another error's message, and the substring test is not an equality
+go/empty-error-branch-positive.go	4	reliability.go.empty-error-branch	the error check guards an empty block, so the error is detected and then dropped
+go/empty-error-branch-negative.go	4	NONE	the block holds a comment saying why the error is ignored, so it is not empty
+go/redundant-boolean-comparison-positive.go	4	reliability.go.redundant-boolean-comparison	the map lookup is compared with true rather than used directly
+go/redundant-boolean-comparison-negative.go	4	NONE	the two-value map lookup is used directly, with no boolean constant to compare against
+go/errors-new-sprintf-positive.go	9	reliability.go.errors-new-sprintf	errors.New wraps a fmt.Sprintf result, which is the one call fmt.Errorf makes
+go/errors-new-sprintf-negative.go	6	NONE	the error is built with fmt.Errorf already
+go/struct-tag-malformed-positive.go	4	maintainability.go.struct-tag-malformed	the second key carries no quoted value, so reflect.StructTag.Get reads nothing from the tag
+go/struct-tag-malformed-negative.go	6	NONE	the tag is one well-formed key and quoted value
+go/struct-tag-malformed-negative.go	7	NONE	the values carry a colon and a space, which a well-formed tag allows
+go/struct-tag-malformed-negative.go	8	NONE	the values carry commas and an equals sign, which a well-formed tag allows
+go/struct-tag-malformed-negative.go	9	NONE	the tag holds two keys whose values carry protobuf punctuation
+go/struct-tag-malformed-negative.go	11	NONE	an empty tag has no key to malform
 # python
 python/function-length-over.py	1	maintainability.python.function-length	the function is 121 lines, one over the profile's 120
 python/function-length-under.py	1	NONE	the function is 120 lines, which the profile allows
