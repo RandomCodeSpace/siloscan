@@ -5,12 +5,9 @@
 #
 # Identity: reliability-c@1. See crates/siloscan-core/src/profiles.rs.
 #
-# Two candidates from the rule matrix are deliberately absent, each removed on
-# the measurement recorded in tests/profiles-corpus/noise/limits.tsv rather
-# than re-tuned:
-#   unreachable-after-return  1.21 per kLOC on curl, 1.84 on jq, 1.49 on redis,
-#                             and every finding read is a trailing comment on
-#                             the return line, not code.
+# One candidate from the rule matrix is deliberately absent, removed on the
+# measurement recorded in tests/profiles-corpus/noise/limits.tsv rather than
+# re-tuned:
 #   empty-if-body             every finding read on curl is the deliberate
 #                             `if (cond) ; else if (...)` idiom that excludes a
 #                             case, and jq's are `#ifdef` bodies the C parser
@@ -26,7 +23,7 @@
 # what it always did.
 #
 # Four more candidates, from the #110 pitfall list, are absent on the same
-# terms as the two removals above: every finding read on curl, jq or redis was
+# terms as the removal above: every finding read on curl, jq or redis was
 # a false positive, so they are dropped rather than tuned. Each stayed inside
 # the 2.2 `warning` ceiling of 0.25 per kLOC, which is why the number alone
 # would have shipped them.
@@ -48,6 +45,48 @@
 #                                 its siblings in redis-cli, where the macro
 #                                 expands to a string literal and the call is an
 #                                 ordinary constant format after preprocessing.
+#
+# The last two rules in this document are the #110 items that needed an engine
+# primitive. The `#has-descendant?` and `#not-has-descendant?` predicates added
+# in #114 express them, and both were measured under the 2.2 policy on curl, jq
+# and redis:
+#   null-check-wrong-operator  the dereference is found anywhere under the right
+#                              operand instead of at one exact depth, so
+#                              `p != NULL || p->x > 0` is caught as well as
+#                              `p != NULL || p->x`, which is the recall failure
+#                              that kept the rule out. No finding on curl, jq or
+#                              redis. A sub-pattern's captures cannot be
+#                              compared with the outer pattern's, so the query
+#                              does not require the pointer dereferenced on the
+#                              right to be the one tested on the left.
+#   unreachable-after-return   back after its 2.1 removal, which read 1.21 per
+#                              kLOC on curl, 1.84 on jq and 1.49 on redis with
+#                              every finding a trailing comment on the return
+#                              line. That was the `(_)` wildcard matching a
+#                              comment node; #117 replaced it with an explicit
+#                              alternation of statement kinds and still measured
+#                              0:1 on curl, the one finding being lib/doh.c:829,
+#                              where an `#ifdef`/`#else` pair supplies two `if`
+#                              conditions for one body and the parser leaves the
+#                              guarded return without its `if`. The
+#                              `#not-has-descendant?` guard skips a block holding
+#                              a preprocessor directive, which drops that
+#                              finding and no other: zero on curl, jq and redis.
+#
+# One further candidate from the same set is dropped on its measurement, on the
+# same terms as the removal above:
+#   switch-case-fallthrough   63 findings over the three repositories, peaking at
+#                             0.3719 per kLOC on redis, inside the `info` ceiling
+#                             of 1.0, and every finding read is a false positive.
+#                             Redis' murmur3 tail switch and its lzf decoder's
+#                             Duff device fall through deliberately with no
+#                             marker, jemalloc's `EMIT_SIMPLE(int, "d")` arms are
+#                             macro calls with no semicolon so the parser never
+#                             sees the `break` that follows them, and curl's
+#                             `exit(1)` and jq's `assert(0 && ...)` arms end in
+#                             calls that do not return. Exempting those needs the
+#                             preprocessor or a noreturn model, neither of which
+#                             the predicates supply.
 version: 1
 rules:
   - id: reliability.c.self-comparison
@@ -203,3 +242,30 @@ rules:
              (sizeof_expression value: (parenthesized_expression (identifier) @sz)) .)) @report
          (#eq? @f "strncat")
          (#eq? @dst @sz))
+
+  - id: reliability.c.null-check-wrong-operator
+    severity: warning
+    message: 'This null check is joined to a member access with ||, so the pointer is dereferenced exactly when it is null.'
+    ast:
+      c: |
+        ((binary_expression
+           left: (binary_expression
+                   left: (identifier)
+                   operator: "!="
+                   right: (null))
+           operator: "||"
+           right: (_) @rhs) @report
+         (#has-descendant? @rhs "(field_expression argument: (identifier) @q)"))
+
+  - id: reliability.c.unreachable-after-return
+    severity: warning
+    message: 'This statement directly follows a return in the same block, so it can never run.'
+    ast:
+      c: |
+        ((compound_statement (return_statement) . [
+           (expression_statement) (if_statement) (return_statement)
+           (while_statement) (for_statement) (do_statement) (switch_statement)
+           (compound_statement) (break_statement) (continue_statement)
+           (goto_statement) (declaration)
+         ] @report) @block
+         (#not-has-descendant? @block "[(preproc_if) (preproc_ifdef) (preproc_elif) (preproc_elifdef) (preproc_else) (preproc_call) (preproc_def) (preproc_function_def) (preproc_include)] @p"))

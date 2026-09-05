@@ -63,6 +63,7 @@ reliability.c.duplicate-else-if-condition	0	0.000000	2026-09-05	#103 c: max of c
 reliability.c.gets-call	0	0.000000	2026-09-05	#103 c: max of curl 0.0000, jq 0.0000, redis 0.0000
 reliability.c.identical-if-branches	0	0.006641	2026-09-03	#98 D1: max of curl 0.0000, jq 0.0000, redis 0.0066; re-measured after the .h fix moved two Qt C++ headers out of redis' own-language denominator
 reliability.c.identical-logical-operands	0	0.000000	2026-09-05	#103 c: max of curl 0.0000, jq 0.0000, redis 0.0000
+reliability.c.null-check-wrong-operator	0	0.000000	2026-09-05	#103 c rescued: max of curl 0.0000, jq 0.0000, redis 0.0000
 reliability.c.self-assignment	0	0.006641	2026-09-03	#98 D1: max of curl 0.0000, jq 0.0000, redis 0.0066; re-measured after the .h fix moved two Qt C++ headers out of redis' own-language denominator
 reliability.c.self-comparison	0	0.000000	2026-09-03	#78 P4b: no finding on curl, jq or redis
 reliability.c.self-relational-comparison	0	0.000000	2026-09-05	#103 c: max of curl 0.0000, jq 0.0000, redis 0.0000
@@ -71,6 +72,7 @@ reliability.c.string-literal-comparison	0	0.000000	2026-09-03	#78 P4b: no findin
 reliability.c.strncat-destination-sizeof	0	0.000000	2026-09-05	#103 c: max of curl 0.0000, jq 0.0000, redis 0.0000
 reliability.c.tautological-inequality	0	0.000000	2026-09-05	#103 c: max of curl 0.0000, jq 0.0000, redis 0.0000
 reliability.c.unbounded-scanf-conversion	0	0.005537	2026-09-05	#103 c: max of curl 0.0055, jq 0.0000, redis 0.0000
+reliability.c.unreachable-after-return	0	0.000000	2026-09-05	#103 c rescued: max of curl 0.0000, jq 0.0000, redis 0.0000
 maintainability.cpp.cyclomatic-complexity	0	0.694928	2026-09-03	#98 D1: max of fmt 0.2048, nlohmann/json 0.6949, abseil-cpp 0.1479; re-measured with C++ headers detected as C++; the landing measurement read every .h as C
 maintainability.cpp.nesting-depth	0	0.244164	2026-09-03	#98 D1: max of fmt 0.1820, nlohmann/json 0.2442, abseil-cpp 0.0828; re-measured with C++ headers detected as C++; the landing measurement read every .h as C
 maintainability.cpp.parameter-count	0	0.091009	2026-09-03	#98 D1: max of fmt 0.0910, nlohmann/json 0.0470, abseil-cpp 0.0710; re-measured with C++ headers detected as C++; the landing measurement read every .h as C
