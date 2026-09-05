@@ -6,6 +6,19 @@ All notable changes to this project are documented here. The format follows
 
 ## Unreleased
 
+### Added
+
+- Two predicates for ast rules, `(#has-descendant? @node "<sub-pattern>")` and
+  `(#not-has-descendant? @node "<sub-pattern>")`, which keep or reject a match
+  by whether the sub-pattern - a tree-sitter query in its own right, with its
+  own `#eq?` and `#match?`, compiled once at load against the same grammar -
+  matches inside the captured node's subtree. An optional third argument lists
+  node kinds that stop the descent, so `(#not-has-descendant? @fn
+  "(await_expression) @a" "arrow_function function_expression")` ignores an
+  `await` that belongs to a nested function; an unknown predicate name, a wrong
+  argument count, a sub-pattern that does not compile and an unknown stop kind
+  are load errors that name the rule.
+
 ### Fixed
 
 - A `.tsx` file is parsed with tree-sitter-typescript's TSX grammar rather than
