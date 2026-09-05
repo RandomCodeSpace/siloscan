@@ -159,9 +159,32 @@ csharp/positive.cs	3	reliability.csharp.rethrow-loses-stack	throwing the caught 
 csharp/positive.cs	5	reliability.csharp.identical-if-branches	both arms are the byte-identical block `{ return 1; }`
 csharp/negative.cs	1	NONE	the handler logs the exception, so the block is not empty
 csharp/negative.cs	2	NONE	the operands are different identifiers, which is an ordinary comparison
-csharp/negative.cs	3	NONE	a bare throw rethrows and keeps the stack trace
+csharp/negative.cs	3	NONE	a bare throw rethrows and keeps the stack trace, and the handler logs before it so the block does more than rethrow
 csharp/negative.cs	4	NONE	the method returns Task, so a fault reaches whoever awaits it
 csharp/negative.cs	5	NONE	the two arms return different values, so the condition decides something
+csharp/lock-on-weak-identity-positive.cs	1	reliability.csharp.lock-on-weak-identity	the monitor is taken on `this`, which any code holding the instance can also lock
+csharp/lock-on-weak-identity-positive.cs	2	reliability.csharp.lock-on-weak-identity	the monitor is taken on a typeof expression, which is the one Type instance the whole process shares
+csharp/lock-on-weak-identity-positive.cs	3	reliability.csharp.lock-on-weak-identity	the monitor is taken on a string literal, which the runtime interns and shares across assemblies
+csharp/lock-on-weak-identity-negative.cs	1	NONE	the monitor is taken on a private readonly field no other type can reach
+csharp/throw-in-finally-positive.cs	1	reliability.csharp.throw-in-finally	the throw is a direct statement of the finally block, so it replaces whatever exception is unwinding
+csharp/throw-in-finally-negative.cs	1	NONE	the finally block only calls the cleanup method, so nothing replaces the pending exception
+csharp/rethrow-only-catch-positive.cs	1	reliability.csharp.rethrow-only-catch	the bare throw is the catch block's only statement, so the handler handles nothing
+csharp/rethrow-only-catch-negative.cs	1	NONE	the handler logs the exception before rethrowing, so the block does more than rethrow
+csharp/mistaken-empty-statement-positive.cs	1	reliability.csharp.mistaken-empty-statement	a semicolon is the whole body of the while loop, and of the for loop written on the same line
+csharp/mistaken-empty-statement-negative.cs	1	NONE	both loops carry a block body, which is a different node and is written on purpose
+csharp/gc-collect-positive.cs	1	reliability.csharp.gc-collect	both calls force a full collection, one through the qualified name and one through the bare receiver
+csharp/gc-collect-negative.cs	1	NONE	the receivers are a parameter named GCManager and a lowercase gc, neither of which is the GC type
+csharp/sync-over-async-getresult-positive.cs	1	reliability.csharp.sync-over-async-getresult	both calls block the thread on the task GetAwaiter returned, once on a bare call and once on a member call
+csharp/sync-over-async-getresult-negative.cs	1	NONE	the first method awaits, and the second calls GetResult on a builder rather than on an awaiter
+csharp/blocking-on-async-call-positive.cs	1	reliability.csharp.blocking-on-async-call	one call reads Result and the other calls Wait, both directly on a method whose name ends in Async
+csharp/blocking-on-async-call-negative.cs	1	NONE	the method awaits the call rather than blocking on it
+csharp/blocking-on-async-call-negative.cs	2	NONE	the receiver of Result is a local, not the call itself, which the rule deliberately does not follow
+csharp/case-insensitive-tolower-comparison-positive.cs	1	reliability.csharp.case-insensitive-tolower-comparison	both operands are lowercased to compare them, which allocates two strings to answer a case-insensitive question
+csharp/case-insensitive-tolower-comparison-positive.cs	2	reliability.csharp.case-insensitive-tolower-comparison	the right operand is uppercased, so the same comparison is written with the case change on one side
+csharp/case-insensitive-tolower-comparison-negative.cs	1	NONE	the comparison passes a StringComparison, which is the overload the rule asks for
+csharp/case-insensitive-tolower-comparison-negative.cs	2	NONE	the case change feeds Equals rather than an equality operator, which is a different node
+csharp/self-assignment-positive.cs	1	reliability.csharp.self-assignment	the statement assigns the parameter to itself, so it has no effect
+csharp/self-assignment-negative.cs	1	NONE	the compound assignment, the this-qualified assignment and the object initializer are all different shapes
 ruby/positive.rb	3	reliability.ruby.rescue-exception	rescuing Exception catches SignalException and NoMemoryError as well
 ruby/positive.rb	7	reliability.ruby.rescue-modifier	the modifier swallows every StandardError with no way to see which
 ruby/positive.rb	11	reliability.ruby.self-assignment	the assignment writes `a` to itself and has no effect

@@ -5,18 +5,26 @@
 #
 # Identity: reliability-csharp@2. See crates/siloscan-core/src/profiles.rs.
 #
-# Two candidates from the rule matrix are deliberately absent, each removed on
-# the measurement recorded in tests/profiles-corpus/noise/limits.tsv rather
-# than re-tuned:
-#   self-assignment           the query does not constrain the `operator`
-#                             field and cannot tell an object initializer from
-#                             an assignment, so all four findings across the
-#                             three repositories are `new Source { Id = Id }`
-#                             or `s += s`, and none is a self-assignment.
+# One candidate from the rule matrix is deliberately absent, removed on the
+# measurement recorded in tests/profiles-corpus/noise/limits.tsv rather than
+# re-tuned:
 #   unreachable-after-return  every finding read is a comment, a `#pragma
 #                             warning restore` line, or a C# local function
 #                             declared after the return - and a local function
-#                             is hoisted, so it is reachable.
+#                             is hoisted, so it is reachable. #117 re-measured
+#                             a corrected query that names the dead statement
+#                             kinds instead of matching any node: the rate
+#                             qualifies, but both surviving findings are `#if`
+#                             regions that unbalance braces or split an
+#                             expression, so the rule stays removed.
+#
+# self-assignment was also removed in 2.1, because the query left the
+# `operator` field unconstrained and could not tell an object initializer from
+# an assignment, so all four findings were `new Source { Id = Id }` or `s += s`.
+# #117 measured the corrected query below, which pins `operator: "="` and
+# requires an `expression_statement` parent, at 0.0000 per kLOC on
+# Newtonsoft.Json, Dapper, AutoMapper and dotnet/eShop. It is reinstated here
+# on that measurement rather than re-tuned in place.
 #
 # Two more were removed on #122, on the 33-row noise set with dotnet/eShop
 # dotnet8 in it. Both are over the 2.2 warning ceiling of 0.25 findings per
@@ -35,6 +43,26 @@
 #                             VisualElementExtensions.cs. The catches are
 #                             genuinely empty, but one file's idiom carries the
 #                             whole breach and no path excludes it.
+#
+# Three candidates from the #103 C# pitfall list were measured under #103 on
+# Newtonsoft.Json, Dapper, AutoMapper and dotnet/eShop, and are absent for the
+# reason recorded against each:
+#   throw-reserved-exception  0.7198 per kLOC on eShop and 0.3163 on
+#                             Newtonsoft.Json, both over the 0.25 warning
+#                             ceiling. Every finding read is a real `throw new
+#                             Exception(...)`, but eShop's fourteen all sit in
+#                             application code under src/, so no single `paths`
+#                             exclusion brings the rate inside budget.
+#   recursive-property        0.3085 per kLOC on eShop, over the same ceiling,
+#                             and all thirteen findings on the three
+#                             repositories that produced any are explicit
+#                             interface implementations: `IFoo.X => X;`
+#                             forwards to the class's own `X`, which is a
+#                             different member and not recursion.
+#   task-returns-null         0.2057 per kLOC on eShop, inside the ceiling, but
+#                             all four findings are `async` methods whose
+#                             `return null;` yields a null result rather than a
+#                             null task, so awaiting one does not throw.
 version: 1
 rules:
   - id: reliability.csharp.self-comparison
@@ -67,3 +95,105 @@ rules:
            consequence: (block) @a
            alternative: (block) @b) @report
          (#eq? @a @b))
+
+  - id: reliability.csharp.lock-on-weak-identity
+    severity: warning
+    message: 'This lock takes a monitor on an object any other code can reach and lock, so it does not exclude what it appears to exclude.'
+    ast:
+      csharp: |
+        ((lock_statement "this") @report)
+        ((lock_statement (typeof_expression)) @report)
+        ((lock_statement (string_literal)) @report)
+
+  - id: reliability.csharp.throw-in-finally
+    severity: warning
+    message: 'Throwing from a finally block replaces the exception that is already unwinding, so the original failure is lost.'
+    ast:
+      csharp: |
+        (finally_clause (block (throw_statement) @report))
+
+  - id: reliability.csharp.rethrow-only-catch
+    severity: info
+    message: 'This catch block does nothing but rethrow, so it handles nothing and costs a second stack walk.'
+    ast:
+      csharp: |
+        ((catch_clause body: (block "{" . (throw_statement) @t . "}")) @report
+         (#match? @t "^throw[ \t\r\n]*;$"))
+
+  - id: reliability.csharp.mistaken-empty-statement
+    severity: warning
+    message: 'A stray semicolon is the whole body of this statement, so the code that follows it does not belong to it.'
+    ast:
+      csharp: |
+        (if_statement consequence: (empty_statement) @report)
+        (while_statement body: (empty_statement) @report)
+        (for_statement body: (empty_statement) @report)
+        (foreach_statement body: (empty_statement) @report)
+
+  - id: reliability.csharp.gc-collect
+    severity: info
+    message: 'Forcing a collection with GC.Collect usually papers over a leak and costs more throughput than it saves.'
+    ast:
+      csharp: |
+        ((invocation_expression function: (member_access_expression expression: (_) @o name: (identifier) @m)) @report
+         (#eq? @m "Collect")
+         (#match? @o "(^|\\.)GC$"))
+
+  - id: reliability.csharp.sync-over-async-getresult
+    severity: warning
+    message: 'Calling GetAwaiter().GetResult() blocks the calling thread on a task, which deadlocks under a single-threaded synchronization context.'
+    ast:
+      csharp: |
+        ((invocation_expression
+           function: (member_access_expression
+             expression: (invocation_expression function: (member_access_expression name: (identifier) @a))
+             name: (identifier) @g)) @report
+         (#eq? @a "GetAwaiter") (#eq? @g "GetResult"))
+        ((invocation_expression
+           function: (member_access_expression
+             expression: (invocation_expression function: (identifier) @a2)
+             name: (identifier) @g2)) @report
+         (#eq? @a2 "GetAwaiter") (#eq? @g2 "GetResult"))
+
+  - id: reliability.csharp.blocking-on-async-call
+    severity: warning
+    message: 'Blocking on an async call with Result or Wait holds the calling thread until the task completes and can deadlock.'
+    ast:
+      csharp: |
+        ((member_access_expression
+           expression: (invocation_expression function: (member_access_expression name: (identifier) @f))
+           name: (identifier) @p) @report (#match? @f "Async$") (#eq? @p "Result"))
+        ((member_access_expression
+           expression: (invocation_expression function: (identifier) @f2)
+           name: (identifier) @p2) @report (#match? @f2 "Async$") (#eq? @p2 "Result"))
+        ((invocation_expression
+           function: (member_access_expression
+             expression: (invocation_expression function: (member_access_expression name: (identifier) @w))
+             name: (identifier) @wt)) @report (#match? @w "Async$") (#eq? @wt "Wait"))
+        ((invocation_expression
+           function: (member_access_expression
+             expression: (invocation_expression function: (identifier) @w2)
+             name: (identifier) @wt2)) @report (#match? @w2 "Async$") (#eq? @wt2 "Wait"))
+
+  - id: reliability.csharp.case-insensitive-tolower-comparison
+    severity: info
+    message: 'This comparison changes the case of an operand to ignore case, which allocates a string and answers by the current culture rather than by a StringComparison.'
+    ast:
+      csharp: |
+        ((binary_expression
+           left: (invocation_expression function: (member_access_expression name: (identifier) @m))
+           operator: "==") @report
+         (#any-of? @m "ToLower" "ToUpper" "ToLowerInvariant" "ToUpperInvariant"))
+        ((binary_expression
+           operator: "=="
+           right: (invocation_expression function: (member_access_expression name: (identifier) @m2))) @report
+         (#any-of? @m2 "ToLower" "ToUpper" "ToLowerInvariant" "ToUpperInvariant"))
+
+  - id: reliability.csharp.self-assignment
+    severity: warning
+    message: 'This statement assigns a variable to itself, which changes nothing and is usually a mistyped name.'
+    ast:
+      csharp: |
+        ((expression_statement
+           (assignment_expression left: (identifier) @l operator: "=" right: (identifier) @r)) @report
+         (#eq? @l @r))
