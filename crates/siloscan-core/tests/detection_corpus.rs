@@ -44,7 +44,7 @@ const RECALL_FLOORS: &[(&str, f64)] = &[
     ("core", 0.9880), // measured 166/168: the netrc and word-password misses
     ("k8s", 0.8333),  // measured 15/18: `data:` decoding waits on #52/#53
     ("keys", 1.0),    // measured 4/4: every private-key format reported
-    ("urls", 0.4782), // measured 11/23: the #44 placeholder-vocabulary gap
+    ("urls", 0.9600), // measured 24/25: #44 closed bar the sub-floor entropy
     ("xml", 0.5925),  // measured 16/27: the #51 `=[^=]` gap and unlisted names
 ];
 
@@ -342,7 +342,10 @@ const WORDS: [&str; 5] = ["Passw0rd", "S3cretW", "T0kenB", "MyPassword", "Secr3t
 /// returned verbatim, so the value is byte-identical on every platform. Every
 /// entry is at least six characters, and every one except `SuperSecretKey`
 /// (Shannon entropy 2.95, under the rule's 3.0 floor) sits above the floor.
-const VOCAB_PASSWORDS: [&str; 12] = [
+/// `DbSecretKey` sits closest to it at 3.03, which is how little room the
+/// shape leaves once it is short: the floor, not the allowlist, is what the
+/// remaining miss in this family rests on.
+const VOCAB_PASSWORDS: [&str; 14] = [
     "AdminPassword",
     "SuperSecretKey",
     "MySecretToken",
@@ -355,6 +358,8 @@ const VOCAB_PASSWORDS: [&str; 12] = [
     "LetmeinAdminKey",
     "Super-Secret-Passphrase",
     "Admin.Password",
+    "DbSecretKey",
+    "SuperUserPassword",
 ];
 
 // Vendor prefixes, split so no line in this file spells a credential format.

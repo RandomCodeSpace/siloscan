@@ -168,10 +168,12 @@ not classify, then assert:
 
 Every floor is the MEASURED value at the time its family landed - descriptive,
 not aspirational. Families built to hold a known gap start low on purpose:
-`urls` contracts the ticket #44 placeholder-vocabulary URLs, `xml` the ticket
-#51 `=[^=]` markup allowlist plus names (`AccountKey`, `machineKey`, NuGet
-`apikeys`, Ivy `name=`/`value=`) no rule lists, and `k8s` the `data:` decoding
-that arrives with tickets #52/#53. A floor forbids regression below what was
+`xml` contracts the ticket #51 `=[^=]` markup allowlist plus names
+(`AccountKey`, `machineKey`, NuGet `apikeys`, Ivy `name=`/`value=`) no rule
+lists, and `k8s` the `data:` decoding that arrives with tickets #52/#53. `urls`
+was one of them and is the worked example of the rest: it landed at 0.4782
+holding the ticket #44 placeholder-vocabulary URLs, and the commit that split
+that allowlist raised it to 0.9600. A floor forbids regression below what was
 measured; the ticket that closes a gap raises the floor in the same commit
 that moves the number. The pure-noise families carry no positives and so no
 recall floor - they exist to hold the precision line, and `RECALL_FLOORS` must

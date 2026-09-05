@@ -443,9 +443,9 @@ settings.py	23	NONE	a dotted class reference
 settings.py	24	NONE	a path to a key file
 settings.py	25	NONE	a header name
 settings.py	26	NONE	a list of origins
-urls/.env	5	secrets.generic-credentialed-url	postgres URL whose password is admin+password, entirely placeholder vocabulary; the anchored placeholder allowlist suppresses it, the ticket #44 gap
-urls/.env	6	secrets.generic-credentialed-url	mysql URL whose password is super+secret+key, the ticket #44 gap; at 2.95 it also sits under the rule's 3.0 entropy floor
-urls/.env	7	secrets.generic-credentialed-url	empty-username redis URL whose password is hunter2+passphrase, entirely placeholder vocabulary, the ticket #44 gap
+urls/.env	5	secrets.generic-credentialed-url	postgres URL whose password is admin+password, entirely descriptive vocabulary in mixed case, with no stand-in word in it - the ticket #44 shape, reported since the vocabulary split
+urls/.env	6	secrets.generic-credentialed-url	mysql URL whose password is super+secret+key; the allowlist releases it after the vocabulary split, and at 2.95 the rule's 3.0 entropy floor still holds it - the one documented miss left in this family
+urls/.env	7	secrets.generic-credentialed-url	empty-username redis URL whose password is hunter2+passphrase, entirely descriptive vocabulary, the ticket #44 shape
 urls/.env	10	secrets.generic-credentialed-url	control: amqp URL carrying a 20-character generated password, the already-detected shape
 urls/.env	11	secrets.generic-credentialed-url	control: mongodb URL whose password spells a placeholder word plus a random tail, which 1.4.1 stopwords dropped
 urls/.env	12	secrets.generic-credentialed-url	control: empty-username redis URL carrying a base64url token as its password
@@ -461,14 +461,24 @@ urls/SETUP.md	14	NONE	key_1234, the exact counter password the rule's own commen
 urls/SETUP.md	18	NONE	the dotenv vault example URI shipped in its error message, reported five times in one node_modules before the counter allowlist
 urls/SETUP.md	24	NONE	${REPORTING_DB_PASSWORD} environment interpolation in a deploy-template example
 urls/SETUP.md	25	NONE	your-password-here, hyphen-joined placeholder vocabulary used as an actual placeholder
-urls/backup.sh	9	secrets.generic-credentialed-url	pg_dump URL whose password is root+admin+secret, entirely placeholder vocabulary, the ticket #44 gap
-urls/backup.sh	13	secrets.generic-credentialed-url	mysqldump URL whose password is letmein+admin+key, entirely placeholder vocabulary, the ticket #44 gap
+urls/SETUP.md	36	NONE	password, the bare vocabulary word every quickstart ships; lower case throughout, and under the 3.0 entropy floor besides
+urls/SETUP.md	37	NONE	example, a documentation stand-in that is also a stand-in word in the vocabulary
+urls/SETUP.md	38	NONE	secret, the bare descriptive word at the six-character password minimum
+urls/SETUP.md	39	NONE	placeholder at entropy 3.10, over the rule's floor, so the lower-case allowlist entry is the only thing holding it
+urls/SETUP.md	40	NONE	a run of x, the shape a redacted example uses; the x{3,} vocabulary token covers it in either case
+urls/SETUP.md	41	NONE	your-db-password-here, the hyphen-joined placeholder the ticket #44 change had to keep suppressed
+urls/SETUP.md	42	NONE	insert-password-here, the imperative form of the same placeholder
+urls/SETUP.md	43	NONE	PASSWORD in upper case: no stand-in word in it, so no allowlist entry reaches it and the 3.0 entropy floor is what holds it at 2.75
+urls/SETUP.md	44	NONE	REPLACE_ME, held by the same entropy floor at 2.85; me is not in the vocabulary, so no allowlist entry reaches this one either, before the change or after it
+urls/SETUP.md	45	NONE	<password>, the angle-bracket placeholder; the brackets sit outside the password value class, so nothing is captured to allowlist
+urls/backup.sh	9	secrets.generic-credentialed-url	pg_dump URL whose password is root+admin+secret, entirely descriptive vocabulary, the ticket #44 shape
+urls/backup.sh	13	secrets.generic-credentialed-url	mysqldump URL whose password is letmein+admin+key, a weak-but-chosen password built from descriptive vocabulary, the ticket #44 shape
 urls/backup.sh	16	secrets.generic-credentialed-url	control: mongodump URI carrying a 20-character generated password
 urls/backup.sh	19	secrets.generic-credentialed-url	control: redis-cli -u URL carrying a punctuated generated password
 urls/backup.sh	22	NONE	$(vault kv get ...) command substitution in the password position of a shell assignment
 urls/backup.sh	26	NONE	${METRICS_TOKEN} environment interpolation in the password position
-urls/celeryconfig.py	9	secrets.generic-credentialed-url	empty-username amqp broker URL whose password is secret+token+value, entirely placeholder vocabulary, the ticket #44 gap
-urls/celeryconfig.py	10	secrets.generic-credentialed-url	empty-username redis backend URL whose password is Super-Secret-Passphrase, hyphen-joined placeholder vocabulary, the ticket #44 gap
+urls/celeryconfig.py	9	secrets.generic-credentialed-url	empty-username amqp broker URL whose password is secret+token+value; value describes rather than stands in, so the split releases it - the ticket #44 shape
+urls/celeryconfig.py	10	secrets.generic-credentialed-url	empty-username redis backend URL whose password is Super-Secret-Passphrase, hyphen-joined descriptive vocabulary in mixed case, the ticket #44 shape
 urls/celeryconfig.py	13	secrets.generic-credentialed-url	control: amqp URL carrying a 43-character base64url token, the shape a 256-bit value encodes to
 urls/celeryconfig.py	17	NONE	guest:guest RabbitMQ default in a development fallback, below the six-character password minimum
 urls/celeryconfig.py	18	NONE	credential-free redis URL; host:port must not read as user:password
@@ -476,14 +486,16 @@ urls/celeryconfig.py	21	NONE	{{ flower_password }} template interpolation left v
 urls/database.yml	12	NONE	changeme development default in a Rails database.yml
 urls/database.yml	16	NONE	password1, lowercase vocabulary plus counter, the test-environment example shape
 urls/database.yml	20	NONE	ERB ENV interpolation in the password position; the angle brackets sit outside the value class
-urls/database.yml	24	secrets.generic-credentialed-url	production postgres URL whose password is my+database+password, entirely placeholder vocabulary, the ticket #44 gap
-urls/database.yml	25	secrets.generic-credentialed-url	mysql replica URL whose password is db+user+password, entirely placeholder vocabulary, the ticket #44 gap
+urls/database.yml	24	secrets.generic-credentialed-url	production postgres URL whose password is my+database+password; my describes whose it is rather than standing in, so the split releases it - the ticket #44 shape
+urls/database.yml	25	secrets.generic-credentialed-url	mysql replica URL whose password is db+user+password, entirely descriptive vocabulary, the ticket #44 shape
 urls/database.yml	26	secrets.generic-credentialed-url	control: empty-username amqp URL carrying a 16-character generated password
 urls/database.yml	27	secrets.generic-credentialed-url	control: empty-username redis URL whose password spells a placeholder word plus a random tail
-urls/settings.ini	3	secrets.generic-credentialed-url	mysql URL whose password is Admin.Password, dot-separated placeholder vocabulary, the ticket #44 gap
+urls/database.yml	28	secrets.generic-credentialed-url	analytics postgres URL whose password is db+secret+key, mixed case with no stand-in word in it: the ticket #44 shape at its shortest, entropy 3.03 against a 3.0 floor
+urls/database.yml	29	secrets.generic-credentialed-url	search mysql URL whose password is super+user+password, entirely descriptive vocabulary, the ticket #44 shape
+urls/settings.ini	3	secrets.generic-credentialed-url	mysql URL whose password is Admin.Password, dot-separated descriptive vocabulary in mixed case, the ticket #44 shape
 urls/settings.ini	4	secrets.generic-credentialed-url	control: mysql replica URL carrying a punctuated generated password
-urls/settings.ini	8	secrets.generic-credentialed-url	multi-host mongodb URI whose password is my+secret+token, entirely placeholder vocabulary, the ticket #44 gap
-urls/settings.ini	12	secrets.generic-credentialed-url	empty-username amqp URL whose password is topsecret+creds, entirely placeholder vocabulary, the ticket #44 gap
+urls/settings.ini	8	secrets.generic-credentialed-url	multi-host mongodb URI whose password is my+secret+token, entirely descriptive vocabulary, the ticket #44 shape
+urls/settings.ini	12	secrets.generic-credentialed-url	empty-username amqp URL whose password is topsecret+creds, entirely descriptive vocabulary, the ticket #44 shape
 urls/settings.ini	13	secrets.generic-credentialed-url	control: amqp URL carrying a 32-character base64 token
 urls/settings.ini	16	secrets.generic-credentialed-url	control: empty-username redis URL carrying a 24-character generated password
 urls/settings.ini	17	NONE	changeit, the JVM-keystore flavor of changeme, on a localhost cache URL

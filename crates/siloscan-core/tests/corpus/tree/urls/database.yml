@@ -25,3 +25,5 @@ production:
   replica_url: mysql://storefront_ro:{{VOCABPW_9_414}}@mysql-replica.internal:3306/storefront_analytics
   queue_url: amqp://:{{PWA_16_415}}@rabbit.internal:5672/storefront
   cache_url: redis://:{{WORDPW_16_416}}@redis.internal:6379/0
+  analytics_url: postgres://analytics:{{VOCABPW_13_424}}@pg-analytics.internal:5432/storefront_analytics
+  search_url: mysql://search:{{VOCABPW_14_425}}@mysql-search.internal:3306/storefront_search

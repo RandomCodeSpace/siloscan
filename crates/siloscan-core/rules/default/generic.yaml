@@ -64,7 +64,37 @@ rules:
           # `your-db-password-here` is suppressed and `MyPassword123` is not.
           # Every word that was a stopword before is still here, which makes
           # this strictly less suppressive than what it replaces.
-          - '(?i)^(?:(?:[-_.+~*]|%20)*(?:pass(?:wd|word|phrase)?|word|secret|token|credentials?|creds|api|apikey|key|db|database|user(?:name)?|admin|root|host|local(?:host)?|changeme|changeit|change|replace|insert|enter|put|set|goes|here|with|your|my|our|the|some|own|new|real|actual|not(?:real)?|none|null|empty|unset|undefined|todo|fixme|value|string|placeholder|redacted|hidden|masked|example|sample|dummy|fake|invalid|test(?:ing)?|demo|sandbox|super|top(?:secret)?|mysecret|hunter2|letmein|x{3,}))+(?:[-_.+~*]|%20)*$'
+          #
+          # Composition on its own was still too much (ticket #44). Half the
+          # vocabulary is descriptive - `admin`, `secret`, `key`, `password`,
+          # `hunter2` - and a weak-but-real password is built out of exactly
+          # those words, so `AdminPassword`, `SuperSecretKey` and
+          # `hunter2Passphrase` decomposed cleanly and were never reported,
+          # while `MyPassword123` was. Written as two entries now, and a value
+          # is a placeholder when it satisfies either one:
+          #
+          #   the whole value in lower case. This is the 2.2 entry with `(?i)`
+          #   dropped, and it is the argument the counter entry below already
+          #   makes: `mypassword` and `your-db-password-here` are what a
+          #   quickstart ships, and whoever chose a weak password capitalised
+          #   it. Case is the only signal the value itself carries here, since
+          #   both readings spell the same words.
+          #
+          #   any case, but carrying at least one word that stands in for a
+          #   value instead of describing one - `your`, `changeme`, `here`,
+          #   `example`, `insert`, `replace`, `todo`, `xxx`. `ChangeMe` and
+          #   `Your-DB-Password-Here` are placeholders whatever their case,
+          #   because a word in them asks the reader to put something else
+          #   there. Nothing in `AdminPassword` does.
+          #
+          # The vocabulary is the same list as before, split at that line: the
+          # descriptive half first, the stand-in half second, no word added and
+          # none dropped. So `my`, `value` and `string` sit in the descriptive
+          # half - `MySecretToken` and `SecretTokenValue` are values someone
+          # typed, not instructions - and `set`, `new` and `real` sit in the
+          # stand-in half, where `not-set` and `your-new-password` need them.
+          - '^(?:(?:[-_.+~*]|%20)*(?:pass(?:wd|word|phrase)?|word|secret|token|credentials?|creds|api|apikey|key|db|database|user(?:name)?|admin|root|host|local(?:host)?|my|mysecret|super|top(?:secret)?|hunter2|letmein|value|string|changeme|changeit|change|replace|insert|enter|put|set|goes|here|with|your|our|the|some|own|new|real|actual|not(?:real)?|none|null|empty|unset|undefined|todo|fixme|placeholder|redacted|hidden|masked|example|sample|dummy|fake|invalid|test(?:ing)?|demo|sandbox|x{3,}))+(?:[-_.+~*]|%20)*$'
+          - '(?i)^(?:(?:[-_.+~*]|%20)*(?:pass(?:wd|word|phrase)?|word|secret|token|credentials?|creds|api|apikey|key|db|database|user(?:name)?|admin|root|host|local(?:host)?|my|mysecret|super|top(?:secret)?|hunter2|letmein|value|string|changeme|changeit|change|replace|insert|enter|put|set|goes|here|with|your|our|the|some|own|new|real|actual|not(?:real)?|none|null|empty|unset|undefined|todo|fixme|placeholder|redacted|hidden|masked|example|sample|dummy|fake|invalid|test(?:ing)?|demo|sandbox|x{3,}))*(?:[-_.+~*]|%20)*(?:changeme|changeit|change|replace|insert|enter|put|set|goes|here|with|your|our|the|some|own|new|real|actual|not(?:real)?|none|null|empty|unset|undefined|todo|fixme|placeholder|redacted|hidden|masked|example|sample|dummy|fake|invalid|test(?:ing)?|demo|sandbox|x{3,})(?:(?:[-_.+~*]|%20)*(?:pass(?:wd|word|phrase)?|word|secret|token|credentials?|creds|api|apikey|key|db|database|user(?:name)?|admin|root|host|local(?:host)?|my|mysecret|super|top(?:secret)?|hunter2|letmein|value|string|changeme|changeit|change|replace|insert|enter|put|set|goes|here|with|your|our|the|some|own|new|real|actual|not(?:real)?|none|null|empty|unset|undefined|todo|fixme|placeholder|redacted|hidden|masked|example|sample|dummy|fake|invalid|test(?:ing)?|demo|sandbox|x{3,}))*(?:[-_.+~*]|%20)*$'
           # The same vocabulary with a counter after it - `key_1234`,
           # `password1`, `token-42` - which is what a documented example URL
           # carries. Deliberately not `(?i)`: the whole argument for the
