@@ -113,6 +113,13 @@ c/strcmp-nonzero-comparison-positive.c	3	reliability.c.strcmp-nonzero-comparison
 c/strcmp-nonzero-comparison-negative.c	3	NONE	comparing against zero tests the sign, which is the specified use
 c/strncat-destination-sizeof-positive.c	3	reliability.c.strncat-destination-sizeof	strncat's third argument is the number of bytes to append, not the size of the destination
 c/strncat-destination-sizeof-negative.c	3	NONE	the count is a separate argument rather than the size of the destination
+c/null-check-wrong-operator-positive.c	3	reliability.c.null-check-wrong-operator	the || guard runs the member access exactly when the pointer is null
+c/null-check-wrong-operator-positive.c	6	reliability.c.null-check-wrong-operator	the same bug one node deeper, which the descendant search reaches and a fixed-depth pattern missed
+c/null-check-wrong-operator-negative.c	3	NONE	&& runs the member access only when the pointer is not null, which is the correct guard
+c/null-check-wrong-operator-negative.c	6	NONE	the right operand dereferences nothing, so the || is an ordinary condition
+c/unreachable-after-return-positive.c	3	reliability.c.unreachable-after-return	the second return directly follows the first in the same block, so it can never run
+c/unreachable-after-return-negative.c	7	NONE	the return is guarded by the if the preprocessor branches supply, whichever branch the build takes
+c/unreachable-after-return-negative.c	8	NONE	the parser drops the guard off the return above, so this return only looks like dead code; the block holds a preprocessor directive and is skipped
 cpp/positive.cpp	2	reliability.cpp.self-assignment	the assignment writes `a` to itself and has no effect
 cpp/positive.cpp	5	reliability.cpp.assignment-in-condition	the condition assigns rather than compares, with no second pair of parentheses
 cpp/positive.cpp	11	reliability.cpp.identical-if-branches	both arms are the byte-identical block `{ return 1; }`
