@@ -4,7 +4,7 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## Unreleased
+## 2.2.0 - 2026-09-05
 
 ### Added
 
@@ -36,23 +36,6 @@ All notable changes to this project are documented here. The format follows
   findings added and 0 removed: 1.2 GB of published crates under a cargo
   registry stays at 515 and 2.5 GB of `/usr/share` stays at 26, with the rule's
   keywords present in 690 files across the two.
-
-### Changed
-
-- Rule patterns compile under a 32 MiB program size limit rather than the
-  `regex` crate's 10 MiB default, which is what admitted the two wide bounded
-  repetitions above. `secrets.pypi-upload-token` and
-  `secrets.vault-batch-token` are translated with `\w` spelled as its ASCII
-  class `[0-9A-Za-z_-]`, which is what gitleaks means by `\w` and what keeps
-  each program at 1 MiB and single-digit milliseconds to build.
-- `secrets.nuget-config-password` reports its captured value rather than the
-  whole `<add key=... />` element, so the upstream allowlist that stands down
-  on `%ENVIRONMENT_VARIABLE%` placeholders applies, as it does in gitleaks.
-
-## 2.2.0 - 2026-09-05
-
-### Added
-
 - Two predicates for ast rules, `(#has-descendant? @node "<sub-pattern>")` and
   `(#not-has-descendant? @node "<sub-pattern>")`, which keep or reject a match
   by whether the sub-pattern - a tree-sitter query in its own right, with its
@@ -82,6 +65,30 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- Rule patterns compile under a 32 MiB program size limit rather than the
+  `regex` crate's 10 MiB default, which is what admitted the two wide bounded
+  repetitions above. `secrets.pypi-upload-token` and
+  `secrets.vault-batch-token` are translated with `\w` spelled as its ASCII
+  class `[0-9A-Za-z_-]`, which is what gitleaks means by `\w` and what keeps
+  each program at 1 MiB and single-digit milliseconds to build.
+- `secrets.nuget-config-password` reports its captured value rather than the
+  whole `<add key=... />` element, so the upstream allowlist that stands down
+  on `%ENVIRONMENT_VARIABLE%` placeholders applies, as it does in gitleaks.
+- `secrets.generic-credentialed-url`: the anchored placeholder-vocabulary
+  allowlist entry is split into two, one matching the whole value in lower case
+  only and one, in any case, requiring at least one stand-in word (`your`,
+  `changeme`, `here`, `example`, and the like); an all-vocabulary password
+  written in mixed case such as `AdminPassword` or `SuperSecretKey` is now
+  reported, which closed ticket #44. Ten quickstart placeholder URLs were added
+  to the corpus as negatives and the `urls` family recall floor rose from 0.4782
+  to 0.9600.
+- `secrets.generic-markup-config-secret`: the blanket `=[^=]` allowlist entry,
+  which stood down on every markup value carrying an interior `=`, is replaced
+  by the word-shaped assignment entry the assignment rules already use, closing
+  ticket #51. Five corpus positives (a Maven password, a .csproj symbol-server
+  password, an MSBuild deploy secret, a web.config secret, two Azure SAS `sig=`
+  fragments) are now reported; the `xml` family recall floor rose from 0.5925
+  to 0.7777; two real trees of 3.7 GB measured no change.
 - `reliability.ruby.rescue-exception`, `reliability.ruby.rescue-modifier`,
   `reliability.rust.unimplemented-marker`, and
   `reliability.c.assignment-in-condition` are `info` rather than `warning`. A
