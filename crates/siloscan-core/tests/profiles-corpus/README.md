@@ -99,7 +99,7 @@ rust/negative.rs	2	NONE	the operands are different identifiers, which is an ordi
 ## The noise set
 
 `noise/limits.tsv` also carries `max_per_kloc`, the ceiling a rule may reach on
-any single repository of the twenty-nine pinned external repositories recorded
+any single repository of the thirty-three pinned external repositories recorded
 in `research/embedded-profiles/noise-set.md`. `scripts/profile_noise.py` clones
 them at their pinned commits, scans each one, and fails when a rule exceeds its
 ceiling. The thousand lines are the code lines of that repository's own pinned
