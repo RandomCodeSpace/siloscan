@@ -54,6 +54,30 @@
 #                             in a digit-emitting loop. A compound assignment
 #                             cannot be a mistyped comparison, which is the
 #                             whole pitfall, so the yield here is zero.
+#
+# throw-escaping-destructor is one of the needs-primitive items the #111 list
+# recorded, rescued by the has-descendant predicates #114 asked for and #127
+# added. The list refused the text-predicate stand-in because `#match? @body
+# "throw"` fires on the word in a comment or a string literal; the query below
+# asks the tree instead, with `try_statement` stopping the descent so a throw
+# the destructor catches itself does not count. Measured on 2026-09-05 at
+# 0.0000 per kLOC on fmt, nlohmann/json and abseil-cpp - no finding on any of
+# the three, which item 2's neighbours already established is what this class
+# of mistake looks like in maintained C++.
+#
+# non-virtual-destructor-in-polymorphic-class was rescued by the same
+# predicates, measured, and dropped. At 0.0683 per kLOC on fmt it is inside the
+# 0.25 warning ceiling, but all six findings read across fmt and abseil-cpp are
+# false positives, and both causes are outside what a query can see: a
+# destructor is virtual when it carries `override` or when the base declares it
+# virtual - gtest's `~DeathTestImpl() override`, `~ThreadLocal()` under a
+# virtual base, abseil's `~CRCImpl() override = default` - and a protected
+# non-virtual destructor is the correct spelling for a base nobody deletes
+# polymorphically, which is `~scan_buffer() = default` in fmt and both abseil
+# findings, one of which carries a `#pragma GCC diagnostic ignored
+# "-Wnon-virtual-dtor"` saying so. Deciding either needs the access section a
+# declaration sits in or the base class's own declaration, and neither is in
+# reach of a subtree predicate.
 version: 1
 rules:
   - id: reliability.cpp.self-assignment
@@ -158,3 +182,14 @@ rules:
            right: (number_literal) @z) @report
          (#eq? @m "size")
          (#eq? @z "0"))
+
+  - id: reliability.cpp.throw-escaping-destructor
+    severity: warning
+    message: 'This destructor throws outside a try block, which terminates the process when it runs during stack unwinding.'
+    ast:
+      cpp: |
+        ((function_definition
+           declarator: (function_declarator
+             declarator: [(destructor_name) @report (qualified_identifier name: (destructor_name) @report)])
+           body: (compound_statement) @body)
+         (#has-descendant? @body "(throw_statement) @t" "try_statement"))

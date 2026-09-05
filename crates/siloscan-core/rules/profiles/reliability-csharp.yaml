@@ -5,18 +5,24 @@
 #
 # Identity: reliability-csharp@2. See crates/siloscan-core/src/profiles.rs.
 #
-# One candidate from the rule matrix is deliberately absent, removed on the
-# measurement recorded in tests/profiles-corpus/noise/limits.tsv rather than
-# re-tuned:
-#   unreachable-after-return  every finding read is a comment, a `#pragma
-#                             warning restore` line, or a C# local function
-#                             declared after the return - and a local function
-#                             is hoisted, so it is reachable. #117 re-measured
-#                             a corrected query that names the dead statement
-#                             kinds instead of matching any node: the rate
-#                             qualifies, but both surviving findings are `#if`
-#                             regions that unbalance braces or split an
-#                             expression, so the rule stays removed.
+# unreachable-after-return was removed in 2.1, because the query anchored the
+# statement after the return as `(_)` and every finding read was a comment, a
+# `#pragma warning restore` line, or a C# local function declared after the
+# return - and a local function is hoisted, so it is reachable. #117 measured a
+# corrected query that names the twenty-two dead statement kinds instead of
+# matching any node: the rate qualified at 0.0075 per kLOC on Newtonsoft.Json
+# and 0.0514 on eShop, but both surviving findings were false positives, a `#if`
+# family region whose branches unbalance braces (Newtonsoft.Json's JValue.cs)
+# or split a fluent chain (eShop's MauiProgram.cs), so it stayed removed. It
+# returns here with the guard #117 named: a `#not-has-descendant?` over the
+# enclosing block, listing every preprocessor node kind
+# tree-sitter-c-sharp has, so a block holding a directive is skipped. Measured
+# on 2026-09-05 the guarded query reports 0.0000 per kLOC on Newtonsoft.Json,
+# Dapper, AutoMapper and eShop; the same run with the guard removed reproduces
+# exactly the two #117 findings, so the guard costs no true positive on the
+# noise set. The recall trade the corrected query already carried stands: `.`
+# is a strict-adjacency anchor, so a comment between the return and the dead
+# statement suppresses the match.
 #
 # self-assignment was also removed in 2.1, because the query left the
 # `operator` field unconstrained and could not tell an object initializer from
@@ -63,6 +69,20 @@
 #                             all four findings are `async` methods whose
 #                             `return null;` yields a null result rather than a
 #                             null task, so awaiting one does not throw.
+#
+# thread-sleep-in-async and async-without-await are the two needs-primitive
+# items the #112 list recorded - its P1, a descendant-scoped child pattern, and
+# its P2, a negative descendant assertion - rescued by the has-descendant
+# predicates #114 asked for and #127 added. Both scope to the body of a method
+# carrying the `async` modifier and stop the descent at `lambda_expression`,
+# `anonymous_method_expression` and `local_function_statement`, so a nested
+# function's sleep is not charged to the method around it and a nested
+# function's await does not excuse it. `async-without-await` counts `await
+# foreach`, `await using` and `await using var` as awaits: the grammar spells
+# those as an `await` token on the statement rather than as an
+# `await_expression`, and the first measurement reported both of Dapper's
+# `await foreach` tests before the query said so. Measured on 2026-09-05 both
+# report 0.0000 per kLOC on Newtonsoft.Json, Dapper, AutoMapper and eShop.
 version: 1
 rules:
   - id: reliability.csharp.self-comparison
@@ -197,3 +217,41 @@ rules:
         ((expression_statement
            (assignment_expression left: (identifier) @l operator: "=" right: (identifier) @r)) @report
          (#eq? @l @r))
+
+  - id: reliability.csharp.thread-sleep-in-async
+    severity: warning
+    message: 'This async method blocks a pool thread with Thread.Sleep instead of awaiting Task.Delay.'
+    ast:
+      csharp: |
+        ((method_declaration
+           (modifier) @mod
+           name: (identifier) @report
+           body: (block) @body)
+         (#eq? @mod "async")
+         (#has-descendant? @body "((invocation_expression function: (member_access_expression expression: [(identifier) @o (member_access_expression name: (identifier) @o)] name: (identifier) @m)) @c (#eq? @m \"Sleep\") (#eq? @o \"Thread\"))" "lambda_expression anonymous_method_expression local_function_statement"))
+
+  - id: reliability.csharp.async-without-await
+    severity: warning
+    message: 'This method is declared async but never awaits, so it runs synchronously and faults through the returned task.'
+    ast:
+      csharp: |
+        ((method_declaration
+           (modifier) @mod
+           name: (identifier) @report
+           body: (block) @body)
+         (#eq? @mod "async")
+         (#not-has-descendant? @body "[(await_expression) (foreach_statement \"await\") (using_statement \"await\") (local_declaration_statement \"await\")] @a" "lambda_expression anonymous_method_expression local_function_statement"))
+
+  - id: reliability.csharp.unreachable-after-return
+    severity: warning
+    message: 'This statement follows a return in the same block and never runs.'
+    ast:
+      csharp: |
+        ((block (return_statement) .
+           [(expression_statement) (if_statement) (return_statement) (for_statement)
+            (foreach_statement) (while_statement) (do_statement) (switch_statement)
+            (try_statement) (throw_statement) (using_statement) (lock_statement)
+            (break_statement) (continue_statement) (yield_statement)
+            (local_declaration_statement) (block) (goto_statement) (unsafe_statement)
+            (checked_statement) (fixed_statement) (labeled_statement)] @report) @enclosing
+         (#not-has-descendant? @enclosing "[(preproc_arg) (preproc_define) (preproc_elif) (preproc_else) (preproc_endregion) (preproc_error) (preproc_if) (preproc_if_in_attribute_list) (preproc_line) (preproc_nullable) (preproc_pragma) (preproc_region) (preproc_undef) (preproc_warning)] @p"))

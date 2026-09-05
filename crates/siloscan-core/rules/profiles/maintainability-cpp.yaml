@@ -22,6 +22,30 @@
 # Dropping the one name brought the rule to 0.3018 per kLOC on the same
 # repository; that is the removal the #111 list predicted, not a tuned
 # threshold.
+#
+# incomplete-special-members is one of the needs-primitive items the #111 list
+# recorded, rescued by the has-descendant predicates #114 asked for and #127
+# added: "declares a destructor" is a positive pattern, "and does not declare a
+# copy constructor or a copy assignment" is the negation the query language
+# has no operator for. The destructor sub-pattern requires a user-provided
+# destructor - a declaration, or a definition with a body - so `~T() = default`
+# and `~T() = delete` do not arm the rule, because a compiler-generated
+# destructor makes the compiler-generated copies exactly as correct. The
+# move-only idiom is excluded for free: `T(const T&) = delete` is a copy
+# constructor declaration and the negated sub-pattern sees it.
+#
+# It carries the one `paths` exclusion the 2.2 policy allows. Measured on
+# 2026-09-05 without it, fmt reports 1.0238 per kLOC against the 1.0 ceiling
+# for an info rule, and 44 of the 45 findings are in test/, which on fmt is the
+# vendored gtest and gmock amalgamation - one third-party file carrying the
+# whole breach. Excluding test trees brings fmt to 0.0228 and leaves
+# nlohmann/json at 0.0000 and abseil-cpp at 0.2012, all inside the ceiling. Ten
+# of abseil's 34 were read: eight are real - scope guards whose destructor
+# restores something a copy would restore twice (ErrnoSaver, ScopedSetEnv,
+# SchedulingHelper, ScopedEnable, ComplexityGuard), a sink that flushes
+# (FormatSinkImpl), and two null streams that call `_exit` - and two are
+# abstract polymorphic interfaces that cannot be copied anyway
+# (FlagStateInterface, ZoneInfoSource).
 version: 1
 rules:
   - id: maintainability.cpp.using-namespace-in-header
@@ -142,3 +166,19 @@ rules:
            right: (number_literal) @z) @report
          (#any-of? @m "size" "length")
          (#eq? @z "0"))
+
+  - id: maintainability.cpp.incomplete-special-members
+    severity: info
+    message: 'This class defines a destructor but neither declares nor deletes a copy constructor and a copy assignment operator.'
+    paths:
+      exclude:
+        - '**/test/**'
+        - '**/tests/**'
+    ast:
+      cpp: |
+        ((class_specifier
+           name: (type_identifier) @report
+           body: (field_declaration_list) @body)
+         (#has-descendant? @body "[(declaration declarator: (function_declarator declarator: (destructor_name))) (function_definition declarator: (function_declarator declarator: (destructor_name)) body: (compound_statement))] @d" "class_specifier struct_specifier union_specifier")
+         (#not-has-descendant? @body "(function_declarator declarator: (identifier) parameters: (parameter_list (parameter_declaration declarator: [(reference_declarator) (abstract_reference_declarator)]))) @cc" "class_specifier struct_specifier union_specifier")
+         (#not-has-descendant? @body "((operator_name) @o (#eq? @o \"operator=\"))" "class_specifier struct_specifier union_specifier"))

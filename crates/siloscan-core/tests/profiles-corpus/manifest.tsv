@@ -171,6 +171,14 @@ cpp/container-size-zero-comparison-positive.cpp	2	maintainability.cpp.container-
 cpp/container-size-zero-comparison-positive.cpp	3	maintainability.cpp.container-size-zero-comparison	length() != 0 asks a yes-or-no question that empty() answers directly
 cpp/container-size-zero-comparison-negative.cpp	2	NONE	empty() is the spelling the rule asks for
 cpp/container-size-zero-comparison-negative.cpp	3	NONE	comparing against one is a count question, not an emptiness question
+cpp/incomplete-special-members-positive.cpp	1	maintainability.cpp.incomplete-special-members	the class defines a destructor over an owned pointer and declares neither a copy constructor nor a copy assignment operator
+cpp/incomplete-special-members-negative.cpp	1	NONE	the move-only type deletes both copy members, which is a declaration of each
+cpp/incomplete-special-members-negative.cpp	7	NONE	the class declares both copy members, so the rule of three is complete
+cpp/incomplete-special-members-negative.cpp	13	NONE	the class declares no destructor, so nothing says it owns a resource
+cpp/incomplete-special-members-negative.cpp	17	NONE	a defaulted destructor is not user-provided, so the compiler-generated copies are as correct as it is
+cpp/throw-escaping-destructor-positive.cpp	2	reliability.cpp.throw-escaping-destructor	the destructor throws from inside an if with no try around it, so the throw escapes
+cpp/throw-escaping-destructor-negative.cpp	2	NONE	the word throw appears only inside a string literal, which is the text-predicate false positive the query replaces
+cpp/throw-escaping-destructor-negative.cpp	7	NONE	the rethrow sits inside a catch clause of a try statement, which is a stop kind of the descent
 csharp/metric-over.cs	2	maintainability.csharp.function-length	the method spans 121 lines, one over the profile's 120
 csharp/metric-over.cs	125	maintainability.csharp.parameter-count	the method takes 8 parameters, one over the profile's 7
 csharp/metric-over.cs	130	maintainability.csharp.nesting-depth	six nested if statements, one over the profile's 5
@@ -210,6 +218,21 @@ csharp/case-insensitive-tolower-comparison-negative.cs	1	NONE	the comparison pas
 csharp/case-insensitive-tolower-comparison-negative.cs	2	NONE	the case change feeds Equals rather than an equality operator, which is a different node
 csharp/self-assignment-positive.cs	1	reliability.csharp.self-assignment	the statement assigns the parameter to itself, so it has no effect
 csharp/self-assignment-negative.cs	1	NONE	the compound assignment, the this-qualified assignment and the object initializer are all different shapes
+csharp/thread-sleep-in-async-positive.cs	1	reliability.csharp.thread-sleep-in-async	the async method blocks the pool thread with Thread.Sleep before awaiting
+csharp/thread-sleep-in-async-negative.cs	1	NONE	the method is not async and the call is not Thread.Sleep
+csharp/thread-sleep-in-async-negative.cs	2	NONE	a synchronous poll loop may sleep, and the rule only reads async methods
+csharp/thread-sleep-in-async-negative.cs	4	NONE	the sleep belongs to the nested lambda, which is a stop kind of the descent
+csharp/async-without-await-positive.cs	1	reliability.csharp.async-without-await	the method carries the async modifier and its body has no await
+csharp/async-without-await-positive.cs	3	reliability.csharp.async-without-await	the only await belongs to the nested async lambda, which is a stop kind, so the method around it still never awaits
+csharp/async-without-await-negative.cs	1	NONE	the method is not async, so there is nothing to await
+csharp/async-without-await-negative.cs	2	NONE	the method awaits, which is what the rule looks for
+csharp/async-without-await-negative.cs	4	NONE	await foreach is an await token on the foreach statement rather than an await expression, and the rule counts it
+csharp/async-without-await-negative.cs	9	NONE	await using is an await token on the local declaration, and the rule counts it
+csharp/unreachable-after-return-positive.cs	1	reliability.csharp.unreachable-after-return	the call is the next statement after a return in the same block and never runs
+csharp/unreachable-after-return-negative.cs	1	NONE	a local function is hoisted, so it is reachable wherever it is written
+csharp/unreachable-after-return-negative.cs	2	NONE	a pragma is not a statement and never matches the alternation
+csharp/unreachable-after-return-negative.cs	5	NONE	a comment is not a statement and never matches the alternation
+csharp/unreachable-after-return-negative-preprocessor.cs	6	NONE	the enclosing block holds a #if directive, which is the guard #117 asked for: a block whose braces or expressions a preprocessor region can split is skipped
 ruby/positive.rb	3	reliability.ruby.rescue-exception	rescuing Exception catches SignalException and NoMemoryError as well
 ruby/positive.rb	7	reliability.ruby.rescue-modifier	the modifier swallows every StandardError with no way to see which
 ruby/positive.rb	11	reliability.ruby.self-assignment	the assignment writes `a` to itself and has no effect
@@ -281,6 +304,12 @@ ruby/redundant-string-coercion-positive.rb	2	maintainability.ruby.redundant-stri
 ruby/redundant-string-coercion-negative.rb	2	NONE	to_s(2) takes a base and is not redundant
 ruby/redundant-string-coercion-negative.rb	6	NONE	to_s(:db) takes a format and is not redundant
 ruby/redundant-string-coercion-negative.rb	10	NONE	the interpolation has no explicit coercion
+ruby/missing-respond-to-missing-positive.rb	1	reliability.ruby.missing-respond-to-missing	the class defines method_missing and no respond_to_missing?
+ruby/missing-respond-to-missing-negative.rb	1	NONE	the class defines both, which is the pair the rule asks for
+ruby/missing-respond-to-missing-negative.rb	11	NONE	the class defines neither, so it forwards nothing dynamically
+ruby/missing-respond-to-missing-negative.rb	17	NONE	the outer class defines both; the nested class is behind a stop kind and neither definition leaks across
+ruby/missing-respond-to-missing-negative.rb	26	NONE	the nested class defines respond_to_missing? and no method_missing, so it has nothing to answer for
+ruby/missing-respond-to-missing-negative.rb	33	NONE	the method_missing belongs to a Module.new block and to a singleton of another object, both behind stop kinds, so neither is the class's own
 # rust
 rust/dbg-macro-positive.rs	2	maintainability.rust.dbg-macro	dbg! is a debugging aid left in the source
 rust/dbg-macro-negative.rs	2	NONE	the statement is an ordinary binding with no debugging macro

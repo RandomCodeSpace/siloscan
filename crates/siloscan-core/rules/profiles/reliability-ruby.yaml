@@ -61,6 +61,22 @@
 #                             alias-then-redefine idiom in `ERB::Util`, where
 #                             the first definition is aliased before the second
 #                             replaces it.
+#
+# missing-respond-to-missing is the one needs-primitive item the #113 list
+# recorded - its absent-sibling assertion - rescued by the has-descendant
+# predicates #114 asked for and #127 added. The descent stops at `class`,
+# `module`, `singleton_class`, `do_block`, `block` and `lambda`, so a nested
+# class's `method_missing` and one defined inside a `Module.new do` block are
+# not charged to the class around them, and `singleton_method` counts only when
+# its receiver is `self`, so `def obj.method_missing` on some other object is
+# not either. Both stops were written after the first measurement reported
+# sinatra's `DelegatorTest` and `HelpersTest` for exactly those two shapes.
+# Measured on 2026-09-05 at 0.2253 per kLOC on sinatra against the 0.25 warning
+# ceiling, 0.0000 on puma and 0.0511 on rails. All four sinatra findings were
+# read and all four are real: `Sinatra::Base::AcceptEntry`,
+# `Sinatra::Extension::DontCall`, `Sinatra::RespondWith::Format` and the test
+# suite's `Mirror` each define `method_missing` and none defines
+# `respond_to_missing?`.
 version: 1
 rules:
   - id: reliability.ruby.rescue-exception
@@ -189,3 +205,12 @@ rules:
     ast:
       ruby: |
         ((ensure) @report (#match? @report "^ensure\\s*$"))
+
+  - id: reliability.ruby.missing-respond-to-missing
+    severity: warning
+    message: 'This class defines method_missing without respond_to_missing?, so respond_to? and Object#method lie about the methods it handles.'
+    ast:
+      ruby: |
+        ((class name: (constant) @report body: (body_statement) @body)
+         (#has-descendant? @body "([(method name: (identifier) @m) (singleton_method object: (self) name: (identifier) @m)] @mm (#eq? @m \"method_missing\"))" "class module singleton_class do_block block lambda")
+         (#not-has-descendant? @body "([(method name: (identifier) @r) (singleton_method object: (self) name: (identifier) @r)] @rm (#eq? @r \"respond_to_missing?\"))" "class module singleton_class do_block block lambda"))
