@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
 use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
-use regex::Regex;
+use regex::{Regex, RegexBuilder};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tree_sitter::Query;
@@ -14,6 +14,42 @@ use tree_sitter::Query;
 use crate::parsers;
 
 const SUPPORTED_VERSION: u32 = 1;
+
+/// Compiled-program budget for a rule's pattern, raised from the `regex`
+/// crate's 10 MiB default.
+///
+/// The default is a library's conservatism about patterns from untrusted
+/// input. A rule pattern is not that: it ships in the pack or is written by
+/// whoever runs the scan. Two gitleaks patterns - `pypi-upload-token` and
+/// `vault-batch-token` - are wide bounded repetitions (`{50,1000}`,
+/// `{138,300}`) whose programs are valid and past the default, and that was
+/// the only reason they were not translated.
+///
+/// Measured, on the two, at the spelling each is written in upstream: with
+/// Rust's Unicode `\w`, vault's program needs 16 MiB and pypi's 64 MiB, and
+/// pypi takes seconds to build. 32 MiB is the budget: it admits a pattern of
+/// that shape, and it stops short of the size where compiling one stops being
+/// free. The one that did not fit is not what the upstream rule means -
+/// gitleaks reads `\w` as ASCII - so the converter ships both with the ASCII
+/// class, at which point each program measures 1 MiB and builds in single-digit
+/// milliseconds. That is what
+/// `the_widest_pack_patterns_compile_inside_the_size_limit` records.
+///
+/// The cost is paid per pattern that actually has to match, and only up to
+/// what that pattern needs: the limit is a ceiling, not an allocation.
+/// `oversized_pattern_loads_and_fails_at_first_use` holds the other end - a
+/// pattern past even this limit is refused, not truncated.
+const PATTERN_SIZE_LIMIT: usize = 32 * 1024 * 1024;
+
+/// Build one rule pattern under [`PATTERN_SIZE_LIMIT`]. Every regex a rule
+/// carries is built here - eagerly for a regex payload, on first use for a
+/// secret one - so no two paths can disagree about the budget or about the
+/// error a pattern past it reports.
+fn build_regex(pattern: &str) -> Result<Regex, regex::Error> {
+    RegexBuilder::new(pattern)
+        .size_limit(PATTERN_SIZE_LIMIT)
+        .build()
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -153,6 +189,16 @@ pub struct RawRule {
 pub struct RawPaths {
     pub include: Option<Vec<String>>,
     pub exclude: Option<Vec<String>>,
+    /// Match `include` and `exclude` without regard to case. Absent means
+    /// false, so every rule written before this field keeps the exact matching
+    /// it was written against.
+    ///
+    /// Opt-in per rule rather than global because case sensitivity is a
+    /// property of what the rule describes, not of the scanner: `Makefile` and
+    /// `makefile` are different files, while a `.P12` keystore is a keystore.
+    /// The translated gitleaks rules set it because their upstream path
+    /// constraints are `(?i)` regexes.
+    pub case_insensitive: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -349,7 +395,7 @@ impl LazyRegex {
     /// limit - and the caller must fail rather than skip the rule.
     pub fn get(&self) -> Result<&Regex, &RegexCompileError> {
         match self.compiled.get_or_init(|| {
-            Regex::new(&self.pattern).map_err(|e| {
+            build_regex(&self.pattern).map_err(|e| {
                 Box::new(RegexCompileError {
                     rule_id: self.rule_id.to_string(),
                     detail: format!("{}{e}", self.context),
@@ -532,6 +578,15 @@ pub enum CompiledPayload {
         /// A function reports when its measure is strictly greater than this.
         max: u32,
     },
+    /// The file existing at a matching path is the whole finding. Carries no
+    /// data: everything it reports - the id, the severity, the message and the
+    /// `paths` envelope that selects the files - already sits on the rule.
+    ///
+    /// Written as a rule with a `paths.include` and no payload block. A
+    /// committed keystore is a finding because of what it is, not because of
+    /// anything readable inside it, which is also why this is the one rule
+    /// shape that reports on a file the scan never read as text.
+    Presence,
 }
 
 fn id_pattern() -> &'static Regex {
@@ -741,10 +796,23 @@ fn compile_rule(raw: RawRule, origin: &str) -> Result<CompiledRule, LoadError> {
 
     match kinds.len() {
         0 => {
-            return Err(LoadError::NoPayload {
-                origin: origin.to_string(),
-                detail: raw.id,
-            });
+            // A rule with no payload block is a presence rule: the file
+            // existing at a path the envelope selects is the finding. The
+            // envelope is therefore the whole rule, and a rule without one
+            // would either report every file in the tree or, with only an
+            // `exclude`, be a rule nobody can read the intent of. Both are a
+            // missing payload rather than a rule shape, so this is still the
+            // no-payload error, with a detail that says what is missing.
+            if !has_include(raw.paths.as_ref()) {
+                return Err(LoadError::NoPayload {
+                    origin: origin.to_string(),
+                    detail: format!(
+                        "{}: a rule with no payload is a presence rule and must set paths.include",
+                        raw.id
+                    ),
+                });
+            }
+            kinds.push("presence");
         }
         1 => {}
         _ => {
@@ -764,9 +832,11 @@ fn compile_rule(raw: RawRule, origin: &str) -> Result<CompiledRule, LoadError> {
 
     // Boundary, coverage and duplication rules are evaluated per silo, per
     // report and per metrics set, not per source language, so a `languages`
-    // filter would be meaningless.
+    // filter would be meaningless. A presence rule reports a file the scan
+    // never read, and a language is detected from content, so a `languages`
+    // filter on one could only ever match nothing.
     if raw.languages.is_some()
-        && let Some(kind) = ["boundary", "coverage", "duplication"]
+        && let Some(kind) = ["boundary", "coverage", "duplication", "presence"]
             .into_iter()
             .find(|k| kinds.contains(k))
     {
@@ -809,18 +879,19 @@ fn compile_rule(raw: RawRule, origin: &str) -> Result<CompiledRule, LoadError> {
         }
         compile_metric(&raw.id, spec, origin)?
     } else {
-        // Unreachable: the payload count was checked above.
-        return Err(LoadError::NoPayload {
-            origin: origin.to_string(),
-            detail: raw.id,
-        });
+        // The only payload left: the count was checked above, and a zero count
+        // with an include was turned into `presence` there.
+        CompiledPayload::Presence
     };
 
     let (include, exclude) = match raw.paths {
-        Some(paths) => (
-            compile_globs(paths.include, origin)?,
-            compile_globs(paths.exclude, origin)?,
-        ),
+        Some(paths) => {
+            let fold_case = paths.case_insensitive.unwrap_or(false);
+            (
+                compile_globs(paths.include, origin, fold_case)?,
+                compile_globs(paths.exclude, origin, fold_case)?,
+            )
+        }
         None => (None, None),
     };
 
@@ -865,7 +936,11 @@ fn compile_secret(id: &str, spec: RawSecret, origin: &str) -> Result<CompiledPay
         allow_patterns.push(lazy_pattern(id, pattern, None, origin, "allowlist: ")?);
     }
 
-    let allow_paths = compile_globs(allowlist.paths, origin)?;
+    // Case-sensitive, always: an allowlist path is written by whoever wrote the
+    // rule, and the rule-level `case_insensitive` is about the shapes an
+    // upstream constraint describes, not about how this rule's own exemptions
+    // are spelled.
+    let allow_paths = compile_globs(allowlist.paths, origin, false)?;
 
     Ok(CompiledPayload::Secret {
         pattern,
@@ -1002,6 +1077,14 @@ fn compile_ast(
     Ok(queries)
 }
 
+/// Whether a `paths` envelope names at least one include glob. A presence rule
+/// is exactly the rule that needs one.
+fn has_include(paths: Option<&RawPaths>) -> bool {
+    paths
+        .and_then(|paths| paths.include.as_ref())
+        .is_some_and(|include| !include.is_empty())
+}
+
 fn lowercased(values: Option<Vec<String>>) -> Vec<String> {
     values
         .unwrap_or_default()
@@ -1011,7 +1094,7 @@ fn lowercased(values: Option<Vec<String>>) -> Vec<String> {
 }
 
 fn compile_pattern(id: &str, pattern: &str, origin: &str) -> Result<Regex, LoadError> {
-    Regex::new(pattern).map_err(|e| LoadError::BadPattern {
+    build_regex(pattern).map_err(|e| LoadError::BadPattern {
         origin: origin.to_string(),
         detail: format!("{id}: {e}"),
     })
@@ -1075,6 +1158,7 @@ fn check_group_count(
 fn compile_globs(
     patterns: Option<Vec<String>>,
     origin: &str,
+    case_insensitive: bool,
 ) -> Result<Option<GlobSet>, LoadError> {
     let patterns = match patterns {
         Some(p) => p,
@@ -1088,6 +1172,7 @@ fn compile_globs(
         // Windows default of treating it as a separator.
         let glob = GlobBuilder::new(pattern)
             .backslash_escape(true)
+            .case_insensitive(case_insensitive)
             .build()
             .map_err(|e| LoadError::BadGlob {
                 origin: origin.to_string(),
@@ -1288,9 +1373,10 @@ rules:
         assert!(allow[0].is_compiled(), "a match consults the allowlist");
     }
 
-    /// Valid syntax, but the compiled program is far past the regex size limit.
-    /// `regex_syntax` accepts it, so it survives load and only fails when a rule
-    /// actually needs it.
+    /// Valid syntax, but the compiled program is far past
+    /// [`PATTERN_SIZE_LIMIT`], never mind the crate default under it.
+    /// `regex_syntax` accepts it, so it survives load and only fails when a
+    /// rule actually needs it.
     const OVERSIZED: &str = r"needle-(?:[A-Za-z0-9]{1000}){1000}";
 
     fn oversized_rules() -> Vec<CompiledRule> {
@@ -1303,8 +1389,10 @@ rules:
     #[test]
     fn oversized_pattern_loads_and_fails_at_first_use() {
         // The eager path rejects it outright; the deferred path must not lose
-        // that rejection, only move it.
-        assert!(Regex::new(OVERSIZED).is_err());
+        // that rejection, only move it. Both are measured against the pack's
+        // raised limit, not the crate default: a raised limit must still be a
+        // limit.
+        assert!(build_regex(OVERSIZED).is_err());
 
         let rules = oversized_rules();
         let (pattern, _) = secret_payload(&rules[0]);
@@ -1314,13 +1402,91 @@ rules:
         assert_eq!(err.rule_id, "a.b");
         assert_eq!(
             err.detail,
-            Regex::new(OVERSIZED).unwrap_err().to_string(),
+            build_regex(OVERSIZED).unwrap_err().to_string(),
             "the detail must be the error an eager compile reports"
         );
         assert!(
             err.to_string().contains("a.b"),
             "the message must name the rule: {err}"
         );
+    }
+
+    /// The two widest patterns in the shipped pack, as translated: bounded
+    /// repetitions of a character class wide enough that the crate's default
+    /// 10 MiB program limit refused them. They are what
+    /// [`PATTERN_SIZE_LIMIT`] was raised for, so what they actually cost is
+    /// measured rather than assumed.
+    const WIDE_PACK_PATTERNS: [(&str, &str); 2] = [
+        (
+            "secrets.pypi-upload-token",
+            r"pypi-AgEIcHlwaS5vcmc[0-9A-Za-z_-]{50,1000}",
+        ),
+        (
+            "secrets.vault-batch-token",
+            r#"\b(hvb\.[0-9A-Za-z_-]{138,300})(?:[\x60'"\s;]|\\[nr]|$)"#,
+        ),
+    ];
+
+    /// The smallest compiled-program budget `pattern` builds inside, to the
+    /// nearest MiB. This is the crate's own accounting of the program's size:
+    /// it refuses to build past the limit it is given, so the smallest limit
+    /// that succeeds is the size.
+    fn program_size_mib(pattern: &str) -> usize {
+        (1..=256)
+            .find(|mib| {
+                RegexBuilder::new(pattern)
+                    .size_limit(mib * 1024 * 1024)
+                    .build()
+                    .is_ok()
+            })
+            .unwrap_or_else(|| panic!("{pattern} does not compile inside 256 MiB"))
+    }
+
+    /// The measurement behind [`PATTERN_SIZE_LIMIT`]: both of the patterns it
+    /// was raised for build well inside it, and quickly. The bound asserted is
+    /// the program size, which is deterministic; the compile time is printed
+    /// because it depends on the machine, and the decision it fed was that
+    /// neither is worth rewriting the rules over.
+    #[test]
+    fn the_widest_pack_patterns_compile_inside_the_size_limit() {
+        for (id, pattern) in WIDE_PACK_PATTERNS {
+            let start = std::time::Instant::now();
+            let compiled = build_regex(pattern);
+            let elapsed = start.elapsed();
+            assert!(compiled.is_ok(), "{id} does not compile: {pattern}");
+
+            let mib = program_size_mib(pattern);
+            println!("{id}: {mib} MiB program, compiled in {elapsed:?}");
+            assert!(
+                mib * 1024 * 1024 <= PATTERN_SIZE_LIMIT / 2,
+                "{id} needs {mib} MiB, over half the {} MiB budget",
+                PATTERN_SIZE_LIMIT / (1024 * 1024)
+            );
+        }
+    }
+
+    /// The pack's two widest patterns are ASCII by construction. Rust's `\w`
+    /// is Unicode-aware, and a thousand repetitions of it is a program two
+    /// orders of magnitude past any size limit worth setting; RE2's `\w`,
+    /// which the upstream rules are written against, is `[0-9A-Za-z_]`. The
+    /// converter therefore ships the ASCII spelling, and this is the check
+    /// that the spelling it ships is the one the pack carries.
+    #[test]
+    fn the_pack_ships_the_measured_spelling_of_its_widest_patterns() {
+        let rules = load_str(crate::default_pack::default_rules(), "default-pack")
+            .expect("the default pack loads");
+        for (id, pattern) in WIDE_PACK_PATTERNS {
+            let rule = rules
+                .iter()
+                .find(|rule| rule.id == id)
+                .unwrap_or_else(|| panic!("{id} is missing from the pack"));
+            let (shipped, _) = secret_payload(rule);
+            assert_eq!(
+                shipped.pattern(),
+                pattern,
+                "{id} ships a pattern other than the one measured above"
+            );
+        }
     }
 
     #[test]
@@ -1453,6 +1619,91 @@ rules:
         let err = load_str(src, "test").unwrap_err();
         assert!(matches!(err, LoadError::BadPattern { .. }));
         assert!(err.to_string().contains("allowlist"));
+    }
+
+    /// `case_insensitive` is opt-in, so the same globs decide differently
+    /// depending on nothing but that flag. Both directions are asserted: a rule
+    /// written before the field existed must keep matching exactly.
+    #[test]
+    fn paths_fold_case_only_when_the_rule_asks() {
+        let rule = |flag: &str| {
+            format!(
+                "version: 1\nrules:\n  - id: a.b\n    severity: info\n    message: m\n    paths:\n{flag}      include: ['**/*.p12']\n      exclude: ['**/testdata/*.p12']\n    secret:\n      pattern: 'x'\n"
+            )
+        };
+
+        let folded = load_str(&rule("      case_insensitive: true\n"), "test").expect("loads");
+        let include = folded[0].include.as_ref().expect("include");
+        let exclude = folded[0].exclude.as_ref().expect("exclude");
+        assert!(include.is_match("certs/server.P12"));
+        assert!(include.is_match("certs/server.p12"));
+        // The flag covers both halves of the envelope, or an exclusion written
+        // beside a folded include would stop covering what it names.
+        assert!(exclude.is_match("testdata/Server.P12"));
+
+        let exact = load_str(&rule(""), "test").expect("loads");
+        let include = exact[0].include.as_ref().expect("include");
+        assert!(!include.is_match("certs/server.P12"));
+        assert!(include.is_match("certs/server.p12"));
+    }
+
+    #[test]
+    fn a_rule_with_no_payload_and_an_include_is_a_presence_rule() {
+        let src = r#"
+version: 1
+rules:
+  - id: a.keystore
+    severity: error
+    message: a committed keystore
+    paths:
+      include: ['**/*.p12']
+"#;
+        let rules = load_str(src, "test").expect("a presence rule loads");
+        assert!(matches!(rules[0].payload, CompiledPayload::Presence));
+        assert!(
+            rules[0]
+                .include
+                .as_ref()
+                .expect("include")
+                .is_match("a.p12")
+        );
+    }
+
+    /// The envelope is the whole rule, so a rule without one is the payload
+    /// error it has always been - with a detail that says what is missing.
+    #[test]
+    fn a_rule_with_no_payload_and_no_include_is_fatal() {
+        for paths in ["", "    paths:\n      exclude: ['**/*.p12']\n"] {
+            let src = format!(
+                "version: 1\nrules:\n  - id: a.keystore\n    severity: error\n    message: m\n{paths}"
+            );
+            let err = load_str(&src, "test").expect_err("no payload, no include");
+            assert!(matches!(err, LoadError::NoPayload { .. }));
+            assert!(
+                err.to_string().contains("paths.include"),
+                "the message must name what is missing: {err}"
+            );
+        }
+    }
+
+    /// A language is detected from content, and a presence rule reports files
+    /// nothing read. A `languages` filter on one could only ever match nothing,
+    /// so it is refused at load rather than silently disabling the rule.
+    #[test]
+    fn a_presence_rule_may_not_carry_languages() {
+        let src = r#"
+version: 1
+rules:
+  - id: a.keystore
+    severity: error
+    message: m
+    languages: ["rust"]
+    paths:
+      include: ['**/*.p12']
+"#;
+        let err = load_str(src, "test").expect_err("languages on a presence rule");
+        assert!(matches!(err, LoadError::PayloadLanguages { .. }));
+        assert!(err.to_string().contains("presence"), "{err}");
     }
 
     #[test]

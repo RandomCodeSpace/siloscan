@@ -653,6 +653,11 @@ fn scan_prepared_with_workers(
         return Err(error.clone());
     }
 
+    // Every path the walk produced, in walk order, whatever the reader made of
+    // it. A presence rule reports a file for existing, so its input is this
+    // list and not the subset that read back as text.
+    let mut walked: Vec<String> = Vec::with_capacity(results.len());
+
     for result in results {
         let FileResult {
             path_rel,
@@ -660,6 +665,7 @@ fn scan_prepared_with_workers(
             outcome,
             ..
         } = result;
+        walked.push(path_rel.clone());
         match outcome {
             // Binary files are not scannable input, and not a failure either -
             // but they are still files nothing was reported for, so they are
@@ -715,6 +721,14 @@ fn scan_prepared_with_workers(
     let paths: Vec<String> = scanned.keys().cloned().collect();
     let mut whole_tree: Vec<Finding> = Vec::new();
     let mut boundary_edges: Vec<(String, String, String)> = Vec::new();
+
+    // Presence rules run here, off the walked path list, for the same reason
+    // the boundary engine does: their input is the tree rather than one file's
+    // contents. Joining the other whole-tree findings puts them through inline
+    // suppression, the baseline and the canonical sort like any other finding -
+    // and through nothing else, since they are computed from the path and the
+    // rules alone and so are never filed in the per-file cache.
+    whole_tree.extend(crate::engines::presence::scan_paths(&rules.rules, &walked));
 
     if let (Some(config), Some(sets)) = (options.config, &silo_sets) {
         let modules = crate::engines::boundary::go_modules(&go_mod_sources(&scanned));
@@ -2157,6 +2171,75 @@ rules:
         assert_eq!(report.findings[0].path, "ok.txt");
         assert!(!report.metrics.files.contains_key("blob.bin"));
         assert!(report.metrics.files.contains_key("ok.txt"));
+    }
+
+    /// A presence rule: the file existing where the glob points is the finding,
+    /// with no pattern and nothing read.
+    fn presence_ruleset() -> RuleSet {
+        const SRC: &str = r#"
+version: 1
+rules:
+  - id: a.keystore
+    severity: error
+    message: a committed PKCS 12 keystore
+    paths:
+      case_insensitive: true
+      include: ['**/*.p12']
+"#;
+        RuleSet {
+            rules: load_str(SRC, "presence").expect("rules should load"),
+            sources: vec![("presence".to_string(), SRC.to_string())],
+        }
+    }
+
+    /// The point of the rule shape: a keystore is binary, the reader stops at
+    /// its first NUL, and the finding is about the file being there at all. So
+    /// the same file is both reported and recorded as skipped, which is the
+    /// truth - nothing read it, and it is still a finding.
+    #[test]
+    fn a_presence_rule_reports_a_binary_file_the_scan_never_read() {
+        let dir = tempdir();
+        write(dir.path(), "certs/server.P12", b"\0\0keystore bytes\0\0");
+        write(dir.path(), "certs/server.pem", b"not a keystore\n");
+
+        let report = scan(dir.path(), &presence_ruleset(), None);
+
+        assert_eq!(report.findings.len(), 1);
+        let finding = &report.findings[0];
+        assert_eq!(finding.rule_id, "a.keystore");
+        assert_eq!(finding.path, "certs/server.P12");
+        assert_eq!((finding.line, finding.column), (1, 1));
+        assert_eq!(finding.matched, "server.P12");
+        assert_eq!(
+            finding.fingerprint,
+            crate::findings::fingerprint("a.keystore", "certs/server.P12", "server.P12", 0)
+        );
+        assert_eq!(report.skipped.len(), 1);
+        assert_eq!(report.skipped[0].path, "certs/server.P12");
+        assert_eq!(report.skipped[0].reason, BINARY_SKIP_REASON);
+    }
+
+    /// A presence finding is computed from the walked path and the rules, and
+    /// is never filed in the per-file cache. A warm run has to produce it
+    /// anyway - a cache that could swallow it would make a keystore a
+    /// first-run-only finding.
+    #[test]
+    fn a_presence_finding_survives_a_warm_cache() {
+        let dir = tempdir();
+        write(dir.path(), "certs/server.p12", b"\0\0keystore bytes\0\0");
+        write(dir.path(), "notes.txt", b"nothing here\n");
+
+        let rules = presence_ruleset();
+        let cache_home = cache_base();
+        let cache = cache_for(cache_home.path(), dir.path(), &rules);
+        let cold = cached_scan(dir.path(), &rules, &cache);
+        let warm = cached_scan(dir.path(), &rules, &cache);
+
+        assert_eq!(cold.findings.len(), 1);
+        assert_eq!(
+            serde_json::to_string(&cold).unwrap(),
+            serde_json::to_string(&warm).unwrap()
+        );
     }
 
     /// The entries are merged by whichever worker produced them, so the list is

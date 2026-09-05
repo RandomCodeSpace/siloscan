@@ -61,10 +61,13 @@ const BINARIES: [(&str, &str); 2] = [
     ("ss", env!("CARGO_BIN_EXE_ss")),
 ];
 
-/// The embedded pack's published identity, and the rule count v2.0.0 ships. No
-/// ecosystem add-on exists, so this number is the same for every fixture below.
+/// The embedded pack's published identity, and the rule count it ships: 221
+/// translated gitleaks rules and the 6 generic ones. It was 220 through v2.2.0
+/// and moved with ticket #53, which recovered seven rules the converter used to
+/// skip. No ecosystem add-on exists, so this number is the same for every
+/// fixture below.
 const EMBEDDED_PACK: &str = "default-secrets@1";
-const EMBEDDED_RULES: usize = 220;
+const EMBEDDED_RULES: usize = 227;
 
 /// The four fields that make a report a v2 resolved report.
 const MARKERS: [&str; 4] = ["report_kind", "scope", "outcome", "setup"];
@@ -604,7 +607,7 @@ fn the_bare_journey_detects_scans_saves_and_says_how_to_review() {
 /// that lost or gained rules cannot pass the journey above by still calling
 /// itself the same thing.
 #[test]
-fn the_named_pack_is_the_unchanged_220_rule_pack() {
+fn the_named_pack_is_the_whole_227_rule_pack() {
     let rules = siloscan_core::rules::load_str(
         siloscan_core::default_pack::default_rules(),
         "default-pack",

@@ -222,6 +222,22 @@ rules:
       redact: false
 ```
 
+A rule with a `paths.include` and no payload at all is a presence rule: the
+file existing where the globs point is the finding, reported at line 1 even
+when the file is binary and nothing could read it. Set `case_insensitive` when
+the name is a format rather than a spelling:
+
+```yaml
+version: 1
+rules:
+  - id: keys.pkcs12-file
+    severity: error
+    message: "PKCS #12 keystore committed to the repository"
+    paths:
+      case_insensitive: true
+      include: ["**/*.p12", "**/*.pfx"]
+```
+
 Save it under `rules/`, then run:
 
 ```sh

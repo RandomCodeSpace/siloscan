@@ -26,8 +26,9 @@ Each family measures one territory, and each holds its own recall floor
 
     core             the original mixed corpus: .env, compose, properties,
                      JSON, Dockerfile, source files in six languages
-    keys             private-key material in four formats, plus public
-                     material that must stay quiet
+    keys             private-key material in four formats, a committed
+                     PKCS #12 keystore, plus public material and a keystore
+                     under another name that must stay quiet
     k8s              Kubernetes and Helm: Secret data:/stringData:, chart
                      values, kustomize generators, multi-document manifests
     urls             credentialed URLs across .env, shell, Python, YAML, INI
@@ -170,15 +171,17 @@ Every floor is the MEASURED value at the time its family landed - descriptive,
 not aspirational. Families built to hold a known gap start low on purpose:
 `xml` contracts the names (`AccountKey`, `machineKey`, NuGet `apikeys`, Ivy
 `name=`/`value=`) no rule lists, and `k8s` the `data:` decoding that arrives
-with tickets #52/#53. `urls` was one of them and is the worked example of the
-rest: it landed at 0.4782 holding the ticket #44 placeholder-vocabulary URLs,
-and the commit that split that allowlist raised it to 0.9600. `xml` is the
-second: it landed at 0.5925 holding the ticket #51 `=[^=]` markup allowlist,
-and the commit that replaced that entry raised it to 0.7777. A floor forbids
-regression below what was measured; the ticket that closes a gap raises the
-floor in the same commit that moves the number. The pure-noise families carry
-no positives and so no recall floor - they exist to hold the precision line,
-and `RECALL_FLOORS` must not name them.
+with ticket #52 - `secrets.kubernetes-secret-yaml` landed with ticket #53 and
+reports a Secret manifest once, at the `kind:` line its match starts on, which
+is not the line each encoded value sits on. `urls` was one of them and is the
+worked example of the rest: it landed at 0.4782 holding the ticket #44
+placeholder-vocabulary URLs, and the commit that split that allowlist raised it
+to 0.9600. `xml` is the second: it landed at 0.5925 holding the ticket #51
+`=[^=]` markup allowlist, and the commit that replaced that entry raised it to
+0.7777. A floor forbids regression below what was measured; the ticket that
+closes a gap raises the floor in the same commit that moves the number. The
+pure-noise families carry no positives and so no recall floor - they exist to
+hold the precision line, and `RECALL_FLOORS` must not name them.
 
 ### What the floors do not measure
 
