@@ -28,7 +28,7 @@ existed.
 | rust | `unreachable-after-return` | 0.0118 (tokio) | none | 1:0 | reinstate at `warning` |
 | python | `unreachable-after-return` | 0.0167 (black) | boto 0.0121 | 3:0 | reinstate at `warning` |
 | javascript | `unreachable-after-return` | 0.0000 | none | none to inspect | reinstate at `warning` |
-| typescript | `unreachable-after-return` | 0.0000 | mantine 0.0968 | 0:35 | stay removed until `.tsx` is parsed with the TSX grammar; qualifies at `warning` on the gate |
+| typescript | `unreachable-after-return` | 0.0000 | mantine 0.0000 | none to inspect | reinstate at `warning` (re-measured after #124) |
 | go | `unreachable-after-return` | 0.0000 | none | none to inspect | reinstate at `warning` |
 | java | `unreachable-after-return` | 0.0000 | none | none to inspect | reinstate at `warning` |
 | c | `unreachable-after-return` | 0.0055 (curl) | none | 0:1 | stay removed |
@@ -40,10 +40,11 @@ existed.
 | javascript | `loose-equality` | 41.9396 (lodash) | none | 0:8 | stay removed |
 | typescript | `loose-equality` | 0.1093 (rxjs) | mantine 0.0083 | 0:13 | stay removed |
 
-Notes on the table. The typescript `unreachable-after-return` findings are all
-`.tsx` parse artefacts, so the 0:35 column is a property of the scanner and not
-of the query. The cpp list declined to write a corrected query and the ruby list
-deferred the decision to #103, so neither was measured.
+Notes on the table. The typescript `unreachable-after-return` row carries the
+numbers re-measured after #124; the 35 findings #117 recorded on mantine were
+all `.tsx` parse artefacts and none of them survives the grammar fix. The cpp
+list declined to write a corrected query and the ruby list deferred the decision
+to #103, so neither was measured.
 
 ## `unreachable-after-return`
 
@@ -192,6 +193,40 @@ and all 35 are false positives caused by `.tsx` being parsed with the non-JSX
 grammar at `crates/siloscan-core/src/lang.rs:115`. Reinstating it would ship a
 rule that fires only on React code and is wrong every time it does. The rule
 itself was not shown to be wrong, only unmeasurable.
+
+Re-measured on 2026-09-05, after #124 landed and `.tsx` is parsed with the TSX
+grammar, using a `target/release/siloscan` binary of sha256
+`b4c67794118761b18d2b9e94e6f7cd128dea501d8fc3c2a6f4c8c4b8b4d0231c`. Two queries
+were run side by side: the fixed-capture query, which moves `@report` onto the
+alternation so the finding lands on the dead statement, and the #117 whole-block
+query verbatim.
+
+| repo | code_lines | fixed capture findings | fixed capture per_kloc | whole block findings | whole block per_kloc |
+| --- | --- | --- | --- | --- | --- |
+| zod | 24499 | 0 | 0.0000 | 0 | 0.0000 |
+| rxjs | 73201 | 0 | 0.0000 | 0 | 0.0000 |
+| nest | 105989 | 0 | 0.0000 | 0 | 0.0000 |
+| mantine (supplementary, 2.2 addition) | 361643 | 0 | 0.0000 | 0 | 0.0000 |
+
+All four repositories are silent under both queries, so the 35 mantine findings
+of #117 are gone. `code_lines` and `files_scanned` are unchanged from #117 on
+every repository, and both queries load and fire on a positive example file, so
+the silence is silence and not a rule that failed to load. The two queries
+cannot be told apart by count on this corpus; they differ in reported location
+on every finding, and the whole-block form would collapse two
+return-then-statement pairs in one block into a single finding.
+
+The fixed-capture query is the one to ship, because it reports the dead
+statement rather than the enclosing block's opening brace, which is what the
+JavaScript sibling rule already does:
+
+```scheme
+(statement_block (return_statement) . [(expression_statement) (if_statement) (for_statement) (while_statement) (switch_statement) (try_statement) (return_statement) (throw_statement) (lexical_declaration) (variable_declaration)] @report)
+```
+
+Verdict after #124: reinstate at `warning`. The rule measures 0.0000 per kLOC on
+all four pinned repositories, zod, rxjs, nest and mantine, with no finding to
+misclassify, so the only reason #117 held it back no longer exists.
 
 ### go
 
@@ -546,6 +581,32 @@ Verdict: stay removed. The rule is inside the `warning` threshold on the gate
 positive, split between rxjs and nest test fixtures comparing same-typed values
 and mantine `.tsx` parse artefacts, so false positives dominate absolutely.
 
+Re-measured on 2026-09-05 after #124, with the same binary of sha256
+`b4c67794118761b18d2b9e94e6f7cd128dea501d8fc3c2a6f4c8c4b8b4d0231c`:
+
+| repo | code_lines | findings | per_kloc |
+| --- | --- | --- | --- |
+| zod | 24499 | 0 | 0.0000 |
+| rxjs | 73201 | 8 | 0.1093 |
+| nest | 105989 | 2 | 0.0189 |
+| mantine (supplementary, 2.2 addition) | 361643 | 0 | 0.0000 |
+
+All three mantine findings are gone.
+`packages/@mantine/charts/src/MatrixChart/MatrixChart.tsx:382` is the case #117
+flagged specifically, and it is now excluded by the null guard: with the TSX
+grammar the right operand of `label == null` is the `null` literal, so the
+`(#not-eq? @r "null")` predicate fires, where under the old misparse the right
+operand was a mangled multi-line node whose text was not `null` and the
+predicate failed open. The other two mantine rows were spans of JSX in files
+that contain no `==` or `!=` at all. The ten findings that remain on rxjs and
+nest are the same lines #117 inspected, file for file and line for line, and all
+ten are still false positives: TP:FP 0:10.
+
+Verdict after #124: stay removed. The rate still qualifies at `warning` (worst
+case 0.1093 per kLOC on rxjs against 0.25), but every remaining finding compares
+same-typed numbers in rxjs specs or function references in nest, so the rule
+fails the true-positive criterion rather than the rate criterion.
+
 ### Other languages
 
 `loose-equality` is a JavaScript and TypeScript rule only; no other pitfall list
@@ -560,7 +621,9 @@ operator to correct for.
    and tree-sitter's error recovery invents nodes. All 38 mantine findings, 35
    unreachable and 3 loose-equality, were in `.tsx` files and none in the
    repository's 1,848 `.ts` files. A two-file probe of the same component logic
-   with and without JSX reproduces the difference exactly.
+   with and without JSX reproduces the difference exactly. #124 fixed this by
+   handing `.tsx` to the TSX grammar, and all 38 mantine findings disappear on
+   re-measurement.
 
 2. **The C and C# unreachable false positives share one cause.** In all three
    cases a preprocessor region interleaved with code reshapes the tree: curl's
@@ -577,7 +640,8 @@ operator to correct for.
    block capture also emits one finding per block, so a block with two
    return-then-statement pairs would count once; the implementation package must
    move `@report` onto the alternation, as the JavaScript query already does, and
-   re-measure.
+   re-measure. That fixed capture has now been measured after #124 and is the
+   query shown in the typescript `unreachable-after-return` section above.
 
 4. **JS and TS loose-equality disagree on `undefined`.** The TypeScript query
    excludes both `null` and `undefined` by comparing the operand text with
@@ -612,6 +676,7 @@ edit `limits.tsv`; the implementation package pastes these.
 reliability.rust.unreachable-after-return	0	0.011759	2026-09-05	#117: max of tokio 0.0118, ripgrep 0.0000, serde 0.0000
 reliability.python.unreachable-after-return	0	0.016677	2026-09-05	#117: max of black 0.0167, requests 0.0000, flask 0.0000
 reliability.javascript.unreachable-after-return	0	0.000000	2026-09-05	#117: no finding on express, lodash or axios
+reliability.typescript.unreachable-after-return	0	0.000000	2026-09-05	#117 after #124: no finding on zod, rxjs, nest or mantine
 reliability.go.unreachable-after-return	0	0.000000	2026-09-05	#117: no finding on cobra, gin or prometheus/client_golang
 reliability.java.unreachable-after-return	0	0.000000	2026-09-05	#117: no finding on gson, commons-lang or guava
 reliability.java.self-assignment	0	0.000000	2026-09-05	#117: no finding on gson, commons-lang or guava
