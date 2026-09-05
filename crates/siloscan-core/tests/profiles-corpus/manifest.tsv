@@ -315,3 +315,40 @@ javascript/nested-ternary-in-consequence-positive.js	2	maintainability.javascrip
 javascript/nested-ternary-in-consequence-positive.js	5	maintainability.javascript.nested-ternary-in-consequence	a ternary is nested in the consequence of another ternary
 javascript/nested-ternary-in-consequence-negative.js	2	NONE	the nesting is in the alternative, which reads as a chain, or there is no nesting
 javascript/nested-ternary-in-consequence-negative.js	5	NONE	the nesting is in the alternative, which reads as a chain, or there is no nesting
+# typescript, #103 pitfall list
+typescript/throw-non-error-literal-positive.ts	2	reliability.typescript.throw-non-error-literal	an object literal is thrown, so the caught value carries no stack trace
+typescript/throw-non-error-literal-negative.ts	2	NONE	an Error instance is thrown, which is the shape every catch expects
+typescript/async-promise-executor-positive.ts	1	reliability.typescript.async-promise-executor	the executor is async, so a throw inside it leaves the promise unsettled
+typescript/async-promise-executor-negative.ts	1	NONE	the executor is synchronous, and the type argument does not change the shape
+typescript/typeof-invalid-string-positive.ts	2	reliability.typescript.typeof-invalid-string	typeof never returns 'strng', so the branch is dead
+typescript/typeof-invalid-string-negative.ts	2	NONE	'undefined' is one of the eight strings typeof can return
+typescript/nan-comparison-positive.ts	2	reliability.typescript.nan-comparison	NaN on the right of an equality, which is always false
+typescript/nan-comparison-positive.ts	6	reliability.typescript.nan-comparison	NaN on the left of an equality, the second pattern of the same rule
+typescript/nan-comparison-negative.ts	2	NONE	x !== x is the canonical NaN test and is deliberately not reported
+typescript/unsafe-finally-positive.ts	4	reliability.typescript.unsafe-finally	the finally block returns, which discards whatever the try was returning
+typescript/unsafe-finally-negative.ts	4	NONE	the finally block only calls cleanup, so nothing overrides the try
+typescript/assignment-in-condition-positive.ts	2	reliability.typescript.assignment-in-condition	an if condition that assigns, one character from the comparison it reads as
+typescript/assignment-in-condition-positive.ts	8	reliability.typescript.assignment-in-condition	the same shape in a while condition, the second pattern of the rule
+typescript/assignment-in-condition-negative.ts	2	NONE	the deliberate form wraps the assignment in its own parentheses, which the query does not match
+typescript/extra-non-null-assertion-positive.ts	2	reliability.typescript.extra-non-null-assertion	a doubled non-null assertion, where the second asserts nothing the first did not
+typescript/extra-non-null-assertion-negative.ts	2	NONE	the assertions are on different subexpressions, so they do not nest
+typescript/non-null-after-optional-chain-positive.ts	2	reliability.typescript.non-null-after-optional-chain	a non-null assertion on an optional member access, which defeats the chain
+typescript/non-null-after-optional-chain-positive.ts	6	reliability.typescript.non-null-after-optional-chain	the same contradiction on an optional index, the second pattern of the rule
+typescript/non-null-after-optional-chain-negative.ts	2	NONE	the chain stays optional throughout and the nullish coalesce supplies the default
+typescript/duplicate-object-key-positive.ts	1	reliability.typescript.duplicate-object-key	the identifier key a is set twice, so the first value is dead
+typescript/duplicate-object-key-positive.ts	2	reliability.typescript.duplicate-object-key	the same duplication with string keys, the second pattern of the rule
+typescript/duplicate-object-key-negative.ts	1	NONE	the repeated b is nested in its own object, so the two keys are not siblings
+typescript/unreachable-after-return-positive.tsx	4	reliability.typescript.unreachable-after-return	the log call follows a return in the same block and can never run; the file is tsx so the JSX around it is parsed by the tsx grammar
+typescript/unreachable-after-return-negative.tsx	3	NONE	a hoisted function declaration after a return is still reachable, which is what the 2.1 query got wrong
+typescript/unreachable-after-return-negative.tsx	10	NONE	a component whose block ends in a JSX return has nothing after it; this is the shape #117 reported 35 times before the tsx grammar landed
+typescript/var-declaration-positive.ts	1	maintainability.typescript.var-declaration	var is function-scoped and hoisted where the rest of the file uses let and const
+typescript/var-declaration-negative.ts	1	NONE	let and const are lexical_declaration, which the query does not reach
+typescript/var-declaration-ambient.d.ts	1	NONE	declare var is the conventional spelling for an ambient global, which the rule's **/*.d.ts exclusion keeps out
+typescript/require-import-positive.ts	1	maintainability.typescript.require-import	a require in a const declaration, which the compiler infers nothing about
+typescript/require-import-positive.ts	2	maintainability.typescript.require-import|maintainability.typescript.var-declaration	the same require in a var declaration, the rule's second pattern; the var rule owns the same line and is named here so neither is charged a false positive
+typescript/require-import-negative.ts	1	NONE	import x = require(...) is an import_alias, the sanctioned typed spelling
+typescript/unnecessary-type-constraint-positive.ts	1	maintainability.typescript.unnecessary-type-constraint	extends any is satisfied by every type, so the constraint restricts nothing
+typescript/unnecessary-type-constraint-negative.ts	1	NONE	extends string is a real constraint
+typescript/literal-type-assertion-positive.ts	1	maintainability.typescript.literal-type-assertion	a literal asserted to its own literal type, which as const says once
+typescript/literal-type-assertion-negative.ts	1	NONE	as const is the spelling the rule is arguing for
+typescript/literal-type-assertion-negative.ts	2	NONE	1 as 2 is the near miss the capture-to-capture comparison has to reject

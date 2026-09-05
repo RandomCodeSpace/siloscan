@@ -169,3 +169,22 @@ reliability.typescript.constant-condition	0	0.0000	2026-09-03	#78 P4a
 maintainability.typescript.parameter-count	0	0.0661	2026-09-03	#78 P4a
 maintainability.typescript.nesting-depth	0	0.4082	2026-09-03	#78 P4a
 maintainability.typescript.cyclomatic-complexity	0	0.2450	2026-09-03	#78 P4a
+# typescript, #103 pitfall list, measured against zod 3.23.8, rxjs 7.8.1,
+# nest 12.0.1 and mantine 9.6.0. mantine is the 2.2 addition that gives the
+# typescript rows a repository with real .tsx, which none of the other three
+# has. maintainability.typescript.var-declaration is measured with its
+# **/*.d.ts exclusion in place; without it rxjs reads 0.0273.
+reliability.typescript.throw-non-error-literal	0	0.000000	2026-09-05	#103 typescript: max of zod 0.000000, rxjs 0.000000, nest 0.000000, mantine 0.000000
+reliability.typescript.async-promise-executor	0	0.000000	2026-09-05	#103 typescript: max of zod 0.000000, rxjs 0.000000, nest 0.000000, mantine 0.000000
+reliability.typescript.typeof-invalid-string	0	0.000000	2026-09-05	#103 typescript: max of zod 0.000000, rxjs 0.000000, nest 0.000000, mantine 0.000000
+reliability.typescript.nan-comparison	0	0.000000	2026-09-05	#103 typescript: max of zod 0.000000, rxjs 0.000000, nest 0.000000, mantine 0.000000
+reliability.typescript.unsafe-finally	0	0.000000	2026-09-05	#103 typescript: max of zod 0.000000, rxjs 0.000000, nest 0.000000, mantine 0.000000
+reliability.typescript.assignment-in-condition	0	0.000000	2026-09-05	#103 typescript: max of zod 0.000000, rxjs 0.000000, nest 0.000000, mantine 0.000000
+reliability.typescript.extra-non-null-assertion	0	0.000000	2026-09-05	#103 typescript: max of zod 0.000000, rxjs 0.000000, nest 0.000000, mantine 0.000000
+reliability.typescript.non-null-after-optional-chain	0	0.009435	2026-09-05	#103 typescript: max of zod 0.000000, rxjs 0.000000, nest 0.009435, mantine 0.000000
+reliability.typescript.duplicate-object-key	0	0.000000	2026-09-05	#103 typescript: max of zod 0.000000, rxjs 0.000000, nest 0.000000, mantine 0.000000
+reliability.typescript.unreachable-after-return	0	0.000000	2026-09-05	#103 typescript: max of zod 0.000000, rxjs 0.000000, nest 0.000000, mantine 0.000000
+maintainability.typescript.var-declaration	0	0.013662	2026-09-05	#103 typescript: max of zod 0.000000, rxjs 0.013662, nest 0.000000, mantine 0.000000
+maintainability.typescript.require-import	0	0.040984	2026-09-05	#103 typescript: max of zod 0.000000, rxjs 0.040984, nest 0.000000, mantine 0.002766
+maintainability.typescript.unnecessary-type-constraint	0	0.000000	2026-09-05	#103 typescript: max of zod 0.000000, rxjs 0.000000, nest 0.000000, mantine 0.000000
+maintainability.typescript.literal-type-assertion	0	0.000000	2026-09-05	#103 typescript: max of zod 0.000000, rxjs 0.000000, nest 0.000000, mantine 0.000000

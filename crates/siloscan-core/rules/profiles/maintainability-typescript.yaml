@@ -16,6 +16,30 @@
 # one repository's naming convention fits is tuning a rule to its
 # corpus, so the rule is out. javascript keeps its own, which the same
 # exclusion brings to 0.3399 per kLOC.
+#
+# Three candidates from the #108 typescript pitfall list are deliberately
+# absent, each removed on what its findings were rather than re-tuned:
+#   namespace-declaration      1.0065 per kLOC on mantine, over the info
+#                              gate of 1.0. All 364 findings are the
+#                              `export namespace X { export type ... }`
+#                              declaration-merging container that attaches
+#                              types to a component, and zod's 10 are the
+#                              same shape around conditional-type helpers.
+#                              No single `paths` entry reaches them: they
+#                              are spread over the whole source tree.
+#   triple-slash-reference     0.0546 per kLOC on rxjs, inside the gate,
+#                              but 3 of the 5 findings are the sanctioned
+#                              `lib=` and `types=` forms that declare an
+#                              ambient dependency rather than pull in a
+#                              file. Only the `path=` form is the pitfall,
+#                              and narrowing the shape to it is a rewrite
+#                              this ticket did not measure.
+#   empty-interface-body       0.0083 per kLOC on mantine, inside the gate
+#                              and zero elsewhere, but all three findings
+#                              are `export interface XOverride {}` module
+#                              augmentation points. An empty interface is
+#                              the only shape declaration merging accepts,
+#                              so the rule reports intent, not mistakes.
 version: 1
 rules:
   - id: maintainability.typescript.parameter-count
@@ -39,3 +63,38 @@ rules:
     metric:
       measure: cyclomatic-complexity
       max: 25
+  - id: maintainability.typescript.var-declaration
+    severity: info
+    message: "var is function-scoped and hoisted, which is not the scoping the rest of the file uses"
+    # `.d.ts` is excluded because `declare var module: NodeModule;` is the
+    # conventional spelling for an ambient global, and it was the only
+    # false positive the rule produced on the four pinned repositories.
+    paths:
+      exclude:
+        - "**/*.d.ts"
+    ast:
+      typescript: |
+        (variable_declaration) @report
+  - id: maintainability.typescript.require-import
+    severity: info
+    message: "this require call is outside the module graph the compiler checks, so nothing about it is typed"
+    ast:
+      typescript: |
+        ((lexical_declaration (variable_declarator value: (call_expression function: (identifier) @f))) @report
+         (#eq? @f "require"))
+        ((variable_declaration (variable_declarator value: (call_expression function: (identifier) @f))) @report
+         (#eq? @f "require"))
+  - id: maintainability.typescript.unnecessary-type-constraint
+    severity: info
+    message: "every type satisfies this constraint, so it restricts nothing"
+    ast:
+      typescript: |
+        ((type_parameter constraint: (constraint (predefined_type) @t)) @report
+         (#any-of? @t "any" "unknown"))
+  - id: maintainability.typescript.literal-type-assertion
+    severity: info
+    message: "this asserts a literal to its own literal type, which as const says once"
+    ast:
+      typescript: |
+        ((as_expression [(string) (number) (true) (false)] @v (literal_type [(string) (number) (true) (false)] @t)) @report
+         (#eq? @v @t))
