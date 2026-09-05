@@ -29,6 +29,26 @@
 #                             `new Set([,-0])` probe for whether the engine
 #                             keeps negative zero - repeated across nine
 #                             generated per-method bundles. TP:FP 0:9.
+#
+# async-function-without-await and getter-without-return are the two
+# "needs primitive" items of the javascript pitfall list (#107), rescued by the
+# has-descendant predicates added under #114. Each is an absence over a
+# subtree - no await under this async function, no return under this getter -
+# with the descent stopped at the nested function kinds the list named, which
+# is the shape the list asked for and which no query could state before.
+# async-function-without-await also treats `yield` and `for await` as
+# asynchrony, so an async generator such as axios' `async *encode()` is not
+# reported for work it carries in the iterator protocol rather than in an
+# await.
+#
+# async-function-without-await excludes test trees by path. Without the
+# exclusion it measured 0.6459 per kLOC on axios, over the 0.25 warning gate,
+# and 15 of the 19 findings sat under tests/, every one an async stub standing
+# in for an async contract - `vi.stubGlobal('fetch', async () => ...)`,
+# `adapter: async (config) => ...`, `lookup: async (hostname, opt) => ...`.
+# With the exclusion the rule measures 0.1020 per kLOC on axios and zero on
+# express and lodash. It is the same exclusion prototype-builtin-call and
+# maintainability.javascript.function-length already carry.
 version: 1
 rules:
   - id: reliability.javascript.self-assignment
@@ -134,6 +154,34 @@ rules:
     message: "a setter discards the value it returns"
     ast:
       javascript: '(method_definition "set" body: (statement_block (return_statement (_)) @report))'
+  - id: reliability.javascript.async-function-without-await
+    severity: warning
+    message: "this async function never awaits, so it wraps its result in a promise for no reason"
+    paths:
+      exclude:
+        - "**/test/**"
+        - "**/tests/**"
+        - "**/__tests__/**"
+        - "**/*.test.*"
+        - "**/*.spec.*"
+        - "**/*_test.*"
+    ast:
+      javascript: |
+        ((function_declaration "async" body: (statement_block)) @report
+         (#not-has-descendant? @report "[(await_expression) (yield_expression) (for_in_statement \"await\")] @a" "function_declaration function_expression arrow_function method_definition generator_function generator_function_declaration"))
+        ((function_expression "async" body: (statement_block)) @report
+         (#not-has-descendant? @report "[(await_expression) (yield_expression) (for_in_statement \"await\")] @a" "function_declaration function_expression arrow_function method_definition generator_function generator_function_declaration"))
+        ((arrow_function "async" body: (statement_block)) @report
+         (#not-has-descendant? @report "[(await_expression) (yield_expression) (for_in_statement \"await\")] @a" "function_declaration function_expression arrow_function method_definition generator_function generator_function_declaration"))
+        ((method_definition "async" body: (statement_block)) @report
+         (#not-has-descendant? @report "[(await_expression) (yield_expression) (for_in_statement \"await\")] @a" "function_declaration function_expression arrow_function method_definition generator_function generator_function_declaration"))
+  - id: reliability.javascript.getter-without-return
+    severity: warning
+    message: "this getter never returns, so reading the property yields undefined"
+    ast:
+      javascript: |
+        ((method_definition "get" body: (statement_block)) @report
+         (#not-has-descendant? @report "(return_statement) @r" "function_declaration function_expression arrow_function method_definition generator_function generator_function_declaration"))
   - id: reliability.javascript.unreachable-after-return
     severity: warning
     message: "this statement follows a return in the same block and can never run"

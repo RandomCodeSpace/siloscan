@@ -22,6 +22,42 @@
 # findings on mantine were artefacts of `.tsx` being parsed with the
 # non-JSX grammar. #124 fixed the grammar routing and the rule now
 # measures 0.0000 per kLOC on zod, rxjs, nest and mantine alike.
+#
+# switch-case-fallthrough is one of the two "needs primitive" items of the
+# typescript pitfall list (#108), rescued by the has-descendant predicates
+# added under #114. The list asked for a terminal-child anchor with a negated
+# type set; what landed is a subtree absence, so the shipped rule is the
+# narrower question "this case runs statements and contains no break, return,
+# throw or continue at all", with the descent stopped at nested function kinds
+# so a return belonging to a callback does not count. It reports a subset of
+# what the list described - a case that breaks only under an `if` is not
+# reported - and every report is a case that falls through. A trailing anchor
+# requires a following sibling, so the last case, which cannot fall through,
+# is never reported, and a case with no statements, which is the deliberate
+# grouped-fallthrough idiom, has no body child to match. It measures 0.0000
+# per kLOC on zod, rxjs, nest and mantine; the same pattern with the negation
+# inverted finds 61 correctly terminated cases on nest, so the zero is an
+# absence of the bug and not a dead query.
+#
+# async-without-await is the other "needs primitive" item and is deliberately
+# absent, dropped on the measurement recorded here rather than re-tuned:
+#   async-without-await  4.0193 per kLOC on nest, 1.7960 on zod, 0.3042 on
+#                        mantine, 0.0273 on rxjs, against the 0.25 warning
+#                        ceiling. No path class carries the breach: dropping
+#                        every test, sample and integration tree still leaves
+#                        54 findings under nest's own packages/, 0.5095 per
+#                        kLOC. All six read are the idiom the list predicted -
+#                        an async member that exists to satisfy a
+#                        Promise-returning interface whose other
+#                        implementations do await: `async transform()` on the
+#                        parse pipes, `async intercept()` on
+#                        InterceptorsConsumer, `async apply()` on
+#                        PipesConsumer, `public async init() {}` on the http
+#                        adapter, `public async dispose() {}` on the ws
+#                        adapter, `async wait()` returning a stored promise.
+#                        TP:FP 0:6. The javascript twin ships, because
+#                        javascript has no interface to conform to and the
+#                        idiom does not appear there.
 version: 1
 rules:
   - id: reliability.typescript.self-assignment
@@ -115,6 +151,13 @@ rules:
          (#eq? @a @b))
         ((object (pair key: (string (string_fragment) @a)) (pair key: (string (string_fragment) @b))) @report
          (#eq? @a @b))
+  - id: reliability.typescript.switch-case-fallthrough
+    severity: warning
+    message: "this case runs statements and never breaks, returns, throws or continues, so control falls into the case below it"
+    ast:
+      typescript: |
+        ((switch_body (switch_case body: (_)) @report . (_))
+         (#not-has-descendant? @report "[(break_statement) (return_statement) (throw_statement) (continue_statement)] @t" "function_declaration function_expression arrow_function method_definition generator_function generator_function_declaration"))
   - id: reliability.typescript.unreachable-after-return
     severity: warning
     message: "this statement follows a return in the same block and can never run"
