@@ -126,6 +126,28 @@ maintainability.javascript.function-length	0	0.3400	2026-09-03	#78 P4a
 maintainability.javascript.parameter-count	0	0.3674	2026-09-03	#78 P4a
 maintainability.javascript.nesting-depth	0	0.1700	2026-09-03	#78 P4a
 maintainability.javascript.cyclomatic-complexity	0	0.1020	2026-09-03	#78 P4a
+# javascript, the 2.2 pitfall list (#107) measured under #103 against the
+# same three repositories on 2026-09-05.
+# reliability.javascript.prototype-builtin-call carries the test-tree path
+# exclusion its document header records; without it the rule measured
+# 0.6119 per kLOC on axios, over the 0.25 warning gate.
+reliability.javascript.async-promise-executor	0	0.000000	2026-09-05	#103 javascript: max of express 0.000000, lodash 0.000000, axios 0.000000
+reliability.javascript.duplicate-object-key	0	0.000000	2026-09-05	#103 javascript: max of express 0.000000, lodash 0.000000, axios 0.000000
+reliability.javascript.duplicate-else-if-condition	0	0.000000	2026-09-05	#103 javascript: max of express 0.000000, lodash 0.000000, axios 0.000000
+reliability.javascript.duplicate-switch-case	0	0.000000	2026-09-05	#103 javascript: max of express 0.000000, lodash 0.000000, axios 0.000000
+reliability.javascript.compare-neg-zero	0	0.000000	2026-09-05	#103 javascript: max of express 0.000000, lodash 0.000000, axios 0.000000
+reliability.javascript.invalid-typeof-comparison	0	0.000000	2026-09-05	#103 javascript: max of express 0.000000, lodash 0.000000, axios 0.000000
+reliability.javascript.empty-destructuring-pattern	0	0.000000	2026-09-05	#103 javascript: max of express 0.000000, lodash 0.000000, axios 0.000000
+reliability.javascript.throw-literal	0	0.000000	2026-09-05	#103 javascript: max of express 0.000000, lodash 0.000000, axios 0.000000
+reliability.javascript.return-in-finally	0	0.000000	2026-09-05	#103 javascript: max of express 0.000000, lodash 0.000000, axios 0.000000
+reliability.javascript.unsafe-negation	0	0.000000	2026-09-05	#103 javascript: max of express 0.000000, lodash 0.000000, axios 0.000000
+reliability.javascript.dynamic-code-execution	0	0.000000	2026-09-05	#103 javascript: max of express 0.000000, lodash 0.000000, axios 0.000000
+reliability.javascript.prototype-builtin-call	0	0.061177	2026-09-05	#103 javascript: max of express 0.061177, lodash 0.000000, axios 0.000000
+reliability.javascript.self-assignment-member	0	0.000000	2026-09-05	#103 javascript: max of express 0.000000, lodash 0.000000, axios 0.000000
+reliability.javascript.new-wrapper-object	0	0.000000	2026-09-05	#103 javascript: max of express 0.000000, lodash 0.000000, axios 0.000000
+reliability.javascript.setter-returns-value	0	0.000000	2026-09-05	#103 javascript: max of express 0.000000, lodash 0.000000, axios 0.000000
+reliability.javascript.unreachable-after-return	0	0.000000	2026-09-05	#103 javascript: max of express 0.000000, lodash 0.000000, axios 0.000000
+maintainability.javascript.nested-ternary-in-consequence	0	0.693892	2026-09-05	#103 javascript: max of express 0.000000, lodash 0.693892, axios 0.067988
 # typescript, measured against zod 3.23.8, rxjs 7.8.1 and nest 12.0.1. There is
 # no maintainability.typescript.function-length row because there is no such
 # rule: at 150 with the same exclusion it still measured 2.0765 per kLOC on

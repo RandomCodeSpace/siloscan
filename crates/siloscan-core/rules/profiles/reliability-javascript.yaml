@@ -5,6 +5,30 @@
 #
 # Every rule is a concept-only citation. No pattern text, query text or
 # message text is taken from any upstream project.
+#
+# reliability.javascript.prototype-builtin-call excludes test trees by path.
+# Without the exclusion it measured 0.6119 per kLOC on axios, over the 0.25
+# warning gate, and all eighteen findings sat in one file,
+# tests/unit/prototypePollution.test.js, which calls hasOwnProperty on a
+# deliberately polluted object because that is the thing under test. With the
+# exclusion the rule reports one finding across the three gate repositories -
+# express's own params.hasOwnProperty(name) - which is the shape the rule is
+# for. It is the same exclusion maintainability.javascript.function-length
+# already carries.
+#
+# Two candidates from the javascript pitfall list (#107) are deliberately
+# absent, each dropped on the measurement recorded under #103 rather than
+# re-tuned:
+#   assignment-in-condition   0.1224 per kLOC on express, inside the gate, but
+#                             both findings are the deliberate truthy-assign:
+#                             `if (ret = params[i](name, fn))` in the router
+#                             and the `if (captures = regexp.exec(...))` scan
+#                             loop. TP:FP 0:2.
+#   sparse-array-hole         0.0918 per kLOC on lodash, inside the gate, but
+#                             all nine findings are one construct - the
+#                             `new Set([,-0])` probe for whether the engine
+#                             keeps negative zero - repeated across nine
+#                             generated per-method bundles. TP:FP 0:9.
 version: 1
 rules:
   - id: reliability.javascript.self-assignment
@@ -27,3 +51,91 @@ rules:
     message: "this condition is a literal, so the branch is decided before the program runs"
     ast:
       javascript: "(if_statement condition: (parenthesized_expression [(true) (false)]) @report)"
+  - id: reliability.javascript.async-promise-executor
+    severity: warning
+    message: "an async Promise executor swallows its own rejections, so a throw inside it never reaches the promise being constructed"
+    ast:
+      javascript: '((new_expression constructor: (identifier) @c arguments: (arguments [(arrow_function) (function_expression)] @f)) @report (#eq? @c "Promise") (#match? @f "^async[ (]"))'
+  - id: reliability.javascript.duplicate-object-key
+    severity: warning
+    message: "this object literal writes the same key twice, so the earlier value is discarded"
+    ast:
+      javascript: '((object (pair key: (property_identifier) @a) (pair key: (property_identifier) @b)) @report (#eq? @a @b))'
+  - id: reliability.javascript.duplicate-else-if-condition
+    severity: warning
+    message: "this else-if repeats the condition above it, so its branch can never run"
+    ast:
+      javascript: '((if_statement condition: (parenthesized_expression) @c alternative: (else_clause (if_statement condition: (parenthesized_expression) @d))) @report (#eq? @c @d))'
+  - id: reliability.javascript.duplicate-switch-case
+    severity: warning
+    message: "this switch repeats a case value, so the later case can never run"
+    ast:
+      javascript: '((switch_body (switch_case value: (_) @a) (switch_case value: (_) @b)) @report (#eq? @a @b))'
+  - id: reliability.javascript.compare-neg-zero
+    severity: warning
+    message: "this comparison against negative zero is also true for positive zero, so the sign it cares about is discarded"
+    ast:
+      javascript: '((binary_expression operator: ["===" "==" "!==" "!=" ">=" "<="] right: (unary_expression operator: "-" argument: (number) @n)) @report (#eq? @n "0"))'
+  - id: reliability.javascript.invalid-typeof-comparison
+    severity: warning
+    message: "typeof never returns this string, so the comparison is always false"
+    ast:
+      javascript: '((binary_expression left: (unary_expression operator: "typeof") operator: ["===" "==" "!==" "!="] right: (string (string_fragment) @s)) @report (#not-any-of? @s "undefined" "object" "boolean" "number" "string" "function" "symbol" "bigint"))'
+  - id: reliability.javascript.empty-destructuring-pattern
+    severity: warning
+    message: "this destructuring pattern binds nothing"
+    ast:
+      javascript: '(object_pattern "{" . "}") @report'
+  - id: reliability.javascript.throw-literal
+    severity: warning
+    message: "throwing a literal carries no stack, so every catch that reads a message gets undefined"
+    ast:
+      javascript: '(throw_statement [(string) (number) (template_string)] @report)'
+  - id: reliability.javascript.return-in-finally
+    severity: warning
+    message: "leaving finally this way discards the pending return value and swallows a pending exception"
+    ast:
+      javascript: '(finally_clause body: (statement_block [(return_statement) (break_statement) (continue_statement)] @report))'
+  - id: reliability.javascript.unsafe-negation
+    severity: warning
+    message: "the negation binds to the left operand here, so this test is always false"
+    ast:
+      javascript: '(binary_expression left: (unary_expression operator: "!") operator: ["in" "instanceof"]) @report'
+  - id: reliability.javascript.dynamic-code-execution
+    severity: warning
+    message: "this compiles source text at runtime, which no static check can follow"
+    ast:
+      javascript: '[((call_expression function: (identifier) @f) @report (#eq? @f "eval")) ((call_expression function: (identifier) @g arguments: (arguments . [(string) (template_string)])) @report (#any-of? @g "setTimeout" "setInterval")) ((new_expression constructor: (identifier) @h) @report (#eq? @h "Function"))]'
+  - id: reliability.javascript.prototype-builtin-call
+    severity: warning
+    message: "calling this prototype method on the object itself throws on a null-prototype object and can be shadowed by a property of the same name"
+    paths:
+      exclude:
+        - "**/test/**"
+        - "**/tests/**"
+        - "**/__tests__/**"
+        - "**/*.test.*"
+        - "**/*.spec.*"
+        - "**/*_test.*"
+    ast:
+      javascript: '((call_expression function: (member_expression object: (_) property: (property_identifier) @p)) @report (#any-of? @p "hasOwnProperty" "isPrototypeOf" "propertyIsEnumerable"))'
+  - id: reliability.javascript.self-assignment-member
+    severity: warning
+    message: "this assignment writes a property to itself and has no effect"
+    ast:
+      javascript: '((assignment_expression left: (member_expression) @l right: (member_expression) @r) @report (#eq? @l @r))'
+  - id: reliability.javascript.new-wrapper-object
+    severity: warning
+    message: "this constructs a wrapper object rather than a primitive, so typeof reports object and the value is always truthy"
+    ast:
+      javascript: '((new_expression constructor: (identifier) @c) @report (#any-of? @c "String" "Number" "Boolean" "Symbol" "BigInt"))'
+  - id: reliability.javascript.setter-returns-value
+    severity: warning
+    message: "a setter discards the value it returns"
+    ast:
+      javascript: '(method_definition "set" body: (statement_block (return_statement (_)) @report))'
+  - id: reliability.javascript.unreachable-after-return
+    severity: warning
+    message: "this statement follows a return in the same block and can never run"
+    ast:
+      javascript: '(statement_block (return_statement) . [(expression_statement) (lexical_declaration) (variable_declaration) (return_statement) (if_statement) (for_statement) (for_in_statement) (while_statement) (do_statement) (switch_statement) (try_statement) (throw_statement) (break_statement) (continue_statement) (class_declaration) (statement_block) (empty_statement) (labeled_statement) (with_statement) (debugger_statement)] @report)'

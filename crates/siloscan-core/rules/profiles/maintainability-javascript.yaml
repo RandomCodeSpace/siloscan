@@ -51,3 +51,8 @@ rules:
     metric:
       measure: cyclomatic-complexity
       max: 25
+  - id: maintainability.javascript.nested-ternary-in-consequence
+    severity: info
+    message: "a ternary nested in the consequence of another ternary makes the reader track two conditions to reach one of four values"
+    ast:
+      javascript: '(ternary_expression consequence: [(ternary_expression) (parenthesized_expression (ternary_expression))]) @report'
