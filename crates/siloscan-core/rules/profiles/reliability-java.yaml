@@ -38,6 +38,19 @@
 #                            declared alongside a correct equals(Object), so
 #                            TP:FP is 0:1.
 # maintainability-java.yaml records the fourth, catch-rethrow.
+#
+# equals-without-hashcode is that list's sibling-absence row, rescued by the
+# #114 predicates: a class body that carries an equals(Object) and no hashCode,
+# asked as one `#has-descendant?` and one `#not-has-descendant?` with class_body
+# stopping the descent so an inner class never answers for the class around it.
+# It measures 0.1338 per kLOC on gson, inside the warning gate, and every one of
+# the five findings is a class gson itself annotates
+# @SuppressWarnings("EqualsHashCode") for the missing override. Demanding the
+# single Object parameter is what makes it usable: without it the static
+# `equals(Type, Type)` helper in GsonTypes reported, and so did five
+# commons-lang classes whose equals is an overload.
+# maintainability-java.yaml records the two rows from the same list that stayed
+# out.
 version: 1
 rules:
   - id: reliability.java.self-comparison
@@ -187,3 +200,12 @@ rules:
         (while_statement body: ";" @report)
         (for_statement body: ";" @report)
         (enhanced_for_statement body: ";" @report)
+
+  - id: reliability.java.equals-without-hashcode
+    severity: warning
+    message: 'This class overrides equals without hashCode, so its instances misbehave in every hash-based collection.'
+    ast:
+      java: |
+        ((class_declaration name: (identifier) @report body: (class_body) @body)
+          (#has-descendant? @body "(method_declaration name: (identifier) @n parameters: (formal_parameters . (formal_parameter type: (type_identifier) @t) .) (#eq? @n \"equals\") (#eq? @t \"Object\"))" "class_body")
+          (#not-has-descendant? @body "(method_declaration name: (identifier) @n (#eq? @n \"hashCode\"))" "class_body"))

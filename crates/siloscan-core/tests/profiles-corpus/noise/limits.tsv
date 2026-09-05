@@ -51,6 +51,7 @@ reliability.java.finalize-override	0	0.031223	2026-09-05	#103 java: max of gson 
 reliability.java.empty-control-body	0	0.000000	2026-09-05	#103 java: max of gson 0.0000, commons-lang 0.0000, guava 0.0000
 maintainability.java.redundant-wrapper-instantiation	0	0.000000	2026-09-05	#103 java: max of gson 0.0000, commons-lang 0.0000, guava 0.0000
 maintainability.java.boolean-literal-redundancy	0	0.000000	2026-09-05	#103 java: max of gson 0.0000, commons-lang 0.0000, guava 0.0000
+reliability.java.equals-without-hashcode	0	0.133787	2026-09-05	#103 java rescued: max of gson 0.1338, commons-lang 0.0000, guava 0.0351
 maintainability.c.cyclomatic-complexity	0	0.775134	2026-09-03	#78 P4b: max of curl 0.7751, jq 0.7284, redis 0.7033
 maintainability.c.function-length	0	0.819428	2026-09-03	#78 P4b: max of curl 0.8194, jq 0.7867, redis 0.7365
 maintainability.c.nesting-depth	0	0.710506	2026-09-03	#98 D1: max of curl 0.6699, jq 0.5245, redis 0.7105; re-measured after the .h fix moved two Qt C++ headers out of redis' own-language denominator
@@ -147,6 +148,11 @@ maintainability.rust.bool-literal-comparison	0	0.028203	2026-09-05	#103 rust: ma
 maintainability.rust.let-and-return	0	0.056405	2026-09-05	#103 rust: max of ripgrep 0.0564, tokio 0.0353, serde 0.0000
 maintainability.rust.wildcard-import	0	0.258702	2026-09-05	#103 rust: max of ripgrep 0.0846, tokio 0.2587, serde 0.1501
 maintainability.rust.blanket-lint-allow	0	0.000000	2026-09-05	#103 rust: max of ripgrep 0.0000, tokio 0.0000, serde 0.0000
+# rust, the needs-primitive rows of the same list rescued by the #114
+# predicates, measured against the same three repositories.
+reliability.rust.blocking-call-in-async	0	0.000000	2026-09-05	#103 rust rescued: max of ripgrep 0.0000, tokio 0.0000, serde 0.0000, after the test and bench exclusion
+reliability.rust.unnecessary-unwrap	0	0.000000	2026-09-05	#103 rust rescued: max of ripgrep 0.0000, tokio 0.0000, serde 0.0000
+maintainability.rust.empty-if-body	0	0.000000	2026-09-05	#103 rust rescued: max of ripgrep 0.0000, tokio 0.0000, serde 0.0000
 # go, measured against cobra 1.10.2 and gin 1.12.0, with
 # maintainability.go.function-length raised once from 120 to 150 lines.
 reliability.go.self-comparison	0	0.0000	2026-09-03	#78 P4a
@@ -171,6 +177,10 @@ reliability.go.empty-error-branch	0	0.000000	2026-09-05	#103 go: max of cobra 0.
 reliability.go.redundant-boolean-comparison	0	0.079675	2026-09-05	#103 go: max of cobra 0.0797, gin 0.0704, client_golang 0.0000
 reliability.go.errors-new-sprintf	0	0.000000	2026-09-05	#103 go: max of cobra 0.0000, gin 0.0000, client_golang 0.0000
 maintainability.go.struct-tag-malformed	0	0.000000	2026-09-05	#103 go: max of cobra 0.0000, gin 0.0000, client_golang 0.0000
+# go, the needs-primitive rows of the same list rescued by the #114
+# predicates, measured against the same three repositories.
+reliability.go.defer-in-nested-block	0	0.000000	2026-09-05	#103 go rescued: max of cobra 0.0000, gin 0.0000, client_golang 0.0000
+reliability.go.testing-goroutine-fatal	0	0.000000	2026-09-05	#103 go rescued: max of cobra 0.0000, gin 0.0000, client_golang 0.0000
 # python, measured against requests 2.34.2, flask 3.1.2, black 26.5.1 and,
 # from #122 onwards, boto v2.13.2.
 reliability.python.self-comparison	0	0.0000	2026-09-03	#78 P4a

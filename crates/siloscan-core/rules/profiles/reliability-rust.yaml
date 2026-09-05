@@ -35,6 +35,31 @@
 #                             five findings are `mem::zeroed()` for a #[repr(C)]
 #                             libc struct in one FFI test, where the all-zero
 #                             value is valid and is how the C API is cleared.
+#
+# blocking-call-in-async and unnecessary-unwrap are the reliability half of the
+# rust pitfall list's needs-primitive rows, rescued by the #114 predicates: both
+# ask "this node anywhere beneath that one", which `#has-descendant?` now says,
+# with nested functions and closures stopping the descent. Measured under the
+# 2.2 noise policy on ripgrep, tokio and serde, where neither reports anything.
+# blocking-call-in-async carries the one `paths` exclusion the policy allows.
+# Before it the rule measured 0.0235 per kLOC on tokio, inside the warning gate,
+# but both findings were tokio's own tests sleeping on purpose - one to prove
+# that paused time does not advance, one to give a worker something slow to do -
+# so test and bench trees are excluded. unnecessary-unwrap keeps the receiver
+# out of the comparison: a sub-pattern's captures are private to it, so the
+# `#eq?` that would tie the unwrap's receiver to the condition's cannot be
+# written, and the rule asks only that the unwrap sit under a proved `is_some`.
+#
+# One candidate from the same rows is deliberately absent, removed on a
+# measurement over the pinned noise set rather than re-tuned:
+#   undocumented-unsafe-block 1.8462 per kLOC on tokio, over the warning gate.
+#                             The 157 findings sit in sync, runtime, net, util,
+#                             io, process and task, so no one path exclusion
+#                             brings it back inside. Of five read, four are
+#                             genuinely uncommented and the fifth carries its
+#                             safety comment inside the unsafe block rather than
+#                             above it, which a preceding-sibling test cannot
+#                             see.
 version: 1
 rules:
   - id: reliability.rust.self-comparison
@@ -82,3 +107,25 @@ rules:
     message: "this statement follows a return in the same block and never runs"
     ast:
       rust: "(block (expression_statement (return_expression)) . [(expression_statement) (let_declaration)] @report)"
+
+  # Excluded from test and bench trees: both findings on tokio were fixtures
+  # blocking the executor on purpose, which is what those trees are for.
+  - id: reliability.rust.blocking-call-in-async
+    severity: warning
+    message: "this async function calls the blocking thread::sleep, which stalls the executor thread"
+    paths:
+      exclude:
+        - '**/tests/**'
+        - '**/benches/**'
+    ast:
+      rust: |
+        ((function_item (function_modifiers "async") name: (identifier) @report body: (block) @body)
+          (#has-descendant? @body "(call_expression function: (scoped_identifier path: [(identifier) @p (scoped_identifier name: (identifier) @p)] name: (identifier) @f) (#eq? @f \"sleep\") (#eq? @p \"thread\"))" "closure_expression function_item"))
+  - id: reliability.rust.unnecessary-unwrap
+    severity: info
+    message: "this branch already proved the value is present, so the unwrap inside it is redundant"
+    ast:
+      rust: |
+        ((if_expression condition: (call_expression function: (field_expression value: (identifier) field: (field_identifier) @c)) @report consequence: (block) @body)
+          (#eq? @c "is_some")
+          (#has-descendant? @body "(call_expression function: (field_expression field: (field_identifier) @m) (#eq? @m \"unwrap\"))" "closure_expression function_item"))

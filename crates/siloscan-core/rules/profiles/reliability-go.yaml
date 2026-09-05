@@ -14,6 +14,26 @@
 # inside statement_list, so it reported trailing comments. Demanding the
 # _statement supertype instead reports no comment, and the rule measures
 # 0.0000 per kLOC on all three gate repositories.
+#
+# defer-in-nested-block and testing-goroutine-fatal are that list's
+# needs-primitive rows, rescued by the #114 predicates: both are a bounded
+# subtree search that stops at a func_literal, read in opposite directions - one
+# refuses to descend into a closure, the other refuses to leave the one it
+# started in. Neither reports anything on cobra, gin or
+# prometheus/client_golang.
+#
+# One candidate from the same rows is deliberately absent, removed on a
+# measurement over those repositories rather than re-tuned:
+#   unchecked-type-assertion 0.3662 per kLOC on prometheus/client_golang, over
+#                            the warning gate. The list asked for an ancestor
+#                            constraint, which the new predicates do not supply,
+#                            so the nearest expressible form scopes the negation
+#                            to the enclosing function body and reaches only an
+#                            assertion that is a statement of that body. All
+#                            twelve findings are false positives: eleven are
+#                            tests asserting a constructor's concrete type, and
+#                            the twelfth is the sync.Pool Get idiom in vec.go,
+#                            where the pool's New decides the type.
 version: 1
 rules:
   - id: reliability.go.self-comparison
@@ -110,3 +130,17 @@ rules:
     ast:
       go: |
         ((call_expression function: (selector_expression operand: (identifier) @pkg field: (field_identifier) @fn) arguments: (argument_list . (call_expression function: (selector_expression operand: (identifier) @p2 field: (field_identifier) @f2)) .)) @report (#eq? @pkg "errors") (#eq? @fn "New") (#eq? @p2 "fmt") (#eq? @f2 "Sprintf"))
+  - id: reliability.go.defer-in-nested-block
+    severity: warning
+    message: "this defer sits in a nested block inside a loop, so it runs when the function returns and not at the end of the iteration"
+    ast:
+      go: |
+        ((for_statement body: (block (statement_list [(if_statement) (expression_switch_statement) (type_switch_statement) (select_statement) (labeled_statement) (block)] @inner))) @report
+          (#has-descendant? @inner "(defer_statement) @d" "func_literal"))
+  - id: reliability.go.testing-goroutine-fatal
+    severity: warning
+    message: "this goroutine calls a t.Fatal-family method, which exits the goroutine instead of failing the test"
+    ast:
+      go: |
+        ((go_statement (call_expression function: (func_literal) @lit)) @report
+          (#has-descendant? @lit "(call_expression function: (selector_expression operand: (identifier) @t field: (field_identifier) @m) (#eq? @t \"t\") (#any-of? @m \"Fatal\" \"Fatalf\" \"FailNow\" \"Fatalln\"))" "func_literal"))

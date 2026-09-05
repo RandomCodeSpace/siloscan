@@ -70,6 +70,9 @@ java/boolean-literal-redundancy-negative.java	2	NONE	the value is returned direc
 java/boolean-literal-redundancy-negative.java	3	NONE	the negation is written directly rather than through a literal comparison
 java/boolean-literal-redundancy-negative.java	4	NONE	the ternary yields numbers, not the boolean it tested
 java/boolean-literal-redundancy-negative.java	5	NONE	Boolean.TRUE is a field access, not the boolean literal node
+# java, #103 rescued by the #114 predicates
+java/equals-without-hashcode-positive.java	1	reliability.java.equals-without-hashcode	the class overrides equals(Object) and declares no hashCode, so the two halves of the contract disagree
+java/equals-without-hashcode-negative.java	1	NONE	the class declares both halves, which is the ordinary value class
 c/positive.c	2	reliability.c.self-comparison	both operands are the identical identifier, so the comparison is constant
 c/positive.c	5	reliability.c.self-assignment	the assignment writes `a` to itself and has no effect
 c/positive.c	8	reliability.c.assignment-in-condition	the condition assigns rather than compares, with no second pair of parentheses
@@ -325,6 +328,13 @@ rust/blanket-lint-allow-positive.rs	1	maintainability.rust.blanket-lint-allow	an
 rust/blanket-lint-allow-positive.rs	2	maintainability.rust.blanket-lint-allow	an outer attribute switching off a whole lint group for the item
 rust/blanket-lint-allow-negative.rs	1	NONE	the attribute names one lint, not a group
 rust/blanket-lint-allow-negative.rs	2	NONE	a second attribute naming one lint
+# rust, #103 rescued by the #114 predicates
+rust/blocking-call-in-async-positive.rs	2	reliability.rust.blocking-call-in-async	the blocking sleep is one block down inside the async body, which is the depth the descendant predicate reaches
+rust/blocking-call-in-async-negative.rs	1	NONE	tokio::time::sleep is the awaited asynchronous sleep and yields the thread
+rust/unnecessary-unwrap-positive.rs	1	reliability.rust.unnecessary-unwrap|maintainability.rust.let-and-return	the unwrap sits inside a let one block down, which the direct-child query missed; the same line is also the binding-returned-immediately idiom, so both ids account for it
+rust/unnecessary-unwrap-negative.rs	1	NONE	unwrap_or supplies the missing value instead of panicking, so the check is not re-done
+rust/empty-if-body-positive.rs	1	maintainability.rust.empty-if-body	the then-branch is empty and no else follows, so the condition is evaluated for nothing
+rust/empty-if-body-negative.rs	2	NONE	the empty arm is the point: the else carries the work and the condition stays unnegated
 # go
 go/function-length-over.go	3	maintainability.go.function-length	the function is 151 lines, one over the profile's 150
 go/function-length-under.go	3	NONE	the function is 150 lines, which the profile allows
@@ -370,6 +380,11 @@ go/struct-tag-malformed-negative.go	7	NONE	the values carry a colon and a space,
 go/struct-tag-malformed-negative.go	8	NONE	the values carry commas and an equals sign, which a well-formed tag allows
 go/struct-tag-malformed-negative.go	9	NONE	the tag holds two keys whose values carry protobuf punctuation
 go/struct-tag-malformed-negative.go	11	NONE	an empty tag has no key to malform
+# go, #103 rescued by the #114 predicates
+go/defer-in-nested-block-positive.go	4	reliability.go.defer-in-nested-block	the defer is inside an if inside the loop body, which the direct-child query cannot reach
+go/defer-in-nested-block-negative.go	4	NONE	the defer belongs to the immediately invoked closure, so it runs at the end of each iteration
+go/testing-goroutine-fatal-positive.go	6	reliability.go.testing-goroutine-fatal	t.Fatal is called from the goroutine's body one conditional down, where it exits the goroutine instead of the test
+go/testing-goroutine-fatal-negative.go	6	NONE	t.Error records the failure and lets the goroutine finish
 # python
 python/function-length-over.py	1	maintainability.python.function-length	the function is 121 lines, one over the profile's 120
 python/function-length-under.py	1	NONE	the function is 120 lines, which the profile allows
