@@ -1,0 +1,68 @@
+name: CodeQL
+
+# This workflow replaces the repository's CodeQL default setup. Default setup has
+# no way to exclude paths (PATCH /code-scanning/default-setup only accepts state,
+# runner_type, runner_label, query_suite, threat_model and languages), and the
+# detection corpus fixtures deliberately contain unsafe constructs, so every such
+# fixture raised alerts that had to be dismissed by hand. The exclusions live in
+# .github/codeql/codeql-config.yml. See #140.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Default setup scanned weekly; keep the same cadence.
+    - cron: '25 4 * * 1'
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    # The job name has to stay "Analyze (<language>)" so the check names match the
+    # ones default setup produced.
+    name: Analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write
+      contents: read
+      actions: read
+    strategy:
+      fail-fast: false
+      matrix:
+        # Languages mirror what default setup analysed. Build modes mirror it too:
+        # default setup uses build-mode "none" for C/C++, C#, Java and Rust, and
+        # falls back to autobuild for languages where "none" is unsupported, which
+        # here is Go. Languages that are not compiled take no build mode.
+        include:
+          - language: actions
+          - language: c-cpp
+            build-mode: none
+          - language: csharp
+            build-mode: none
+          - language: go
+            build-mode: autobuild
+          - language: java-kotlin
+            build-mode: none
+          - language: javascript-typescript
+          - language: python
+          - language: ruby
+          - language: rust
+            build-mode: none
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: ${{ matrix.build-mode }}
+          config-file: ./.github/codeql/codeql-config.yml
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
+        with:
+          category: "/language:${{ matrix.language }}"
