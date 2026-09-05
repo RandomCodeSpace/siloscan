@@ -5,23 +5,29 @@
 #
 # Every rule is a concept-only citation. No pattern text, query text or
 # message text is taken from any upstream project.
+#
+# Two candidates are deliberately absent, each removed on the measurement
+# recorded on #122 rather than re-tuned. Both were measured over the 33-row
+# noise set with boto v2.13.2 in it, and both are over the 2.2 warning ceiling
+# of 0.25 findings per kLOC on boto with no path class to exclude:
+#   bare-except               68 findings on boto, 0.8198 per kLOC. Every one
+#                             read is a real bare `except:` in shipping library
+#                             code - boto/pyami/config.py, boto/utils.py,
+#                             boto/resultset.py - so the rule is right and the
+#                             repository is simply pre-2015 Python. 50 of the
+#                             68 are under boto/ itself: excluding tests still
+#                             leaves 0.7113.
+#   mutable-default-argument  24 findings on boto, 0.2893 per kLOC, every one
+#                             a genuine `=[]` or `={}` default. 16 are under
+#                             boto/ and 0.1929 per kLOC on their own;
+#                             excluding tests alone leaves 0.2652, still over.
 version: 1
 rules:
-  - id: reliability.python.mutable-default-argument
-    severity: warning
-    message: "a mutable default argument is built once and shared by every call"
-    ast:
-      python: "(default_parameter value: [(list) (dictionary) (set)] @report)\n(typed_default_parameter value: [(list) (dictionary) (set)] @report)"
   - id: reliability.python.self-comparison
     severity: warning
     message: "both operands of this comparison are the same identifier, so its result is fixed"
     ast:
       python: "((comparison_operator (identifier) @l \"==\" (identifier) @r) @report (#eq? @l @r))"
-  - id: reliability.python.bare-except
-    severity: warning
-    message: "a bare except also catches KeyboardInterrupt and SystemExit"
-    ast:
-      python: "(except_clause \"except\" . \":\") @report"
   - id: reliability.python.identical-if-branches
     severity: warning
     message: "both arms of this if have the same body, so the condition decides nothing"
