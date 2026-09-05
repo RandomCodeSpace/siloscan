@@ -1,7 +1,10 @@
 use std::collections::HashSet;
 use std::path::Path;
 
-use tree_sitter::{Node, Query, QueryCursor, QueryMatch, StreamingIterator, Tree};
+use tree_sitter::{
+    Language, Node, Query, QueryCursor, QueryMatch, QueryPredicate, QueryPredicateArg,
+    StreamingIterator, Tree,
+};
 
 use super::{LineIndex, Occurrences, applies};
 use crate::findings::{Finding, fingerprint};
@@ -10,6 +13,14 @@ use crate::rules::{CompiledPayload, CompiledRule};
 /// Capture name that narrows the reported span; without it the whole first
 /// capture of a match is reported.
 const REPORT_CAPTURE: &str = "report";
+
+/// `(#has-descendant? @node "<pattern>" ["<kind> <kind>"])`: keep the match
+/// only if the sub-pattern matches inside `@node`'s subtree.
+const HAS_DESCENDANT: &str = "has-descendant?";
+
+/// `(#not-has-descendant? @node "<pattern>" ["<kind> <kind>"])`: the same
+/// search, rejecting the match when it finds something.
+const NOT_HAS_DESCENDANT: &str = "not-has-descendant?";
 
 /// One combined tree-sitter query per grammar, carrying every ast rule's
 /// patterns for that grammar's language.
@@ -42,6 +53,29 @@ struct CombinedQuery {
     /// this index, so such a match still falls back to its own first capture,
     /// exactly as it did when the rule owned the whole query.
     report: Option<u32>,
+    /// One entry per pattern index of `query`, holding that pattern's subtree
+    /// predicates in source order. Most patterns carry none.
+    subtrees: Vec<Vec<Subtree>>,
+}
+
+/// One `#has-descendant?` or `#not-has-descendant?` predicate of one pattern,
+/// compiled against one grammar.
+///
+/// The sub-pattern is a query in its own right, compiled once at load, and its
+/// captures are private to it: it shares nothing with the pattern it qualifies
+/// but the node the search starts from.
+#[derive(Debug)]
+struct Subtree {
+    /// Index, in the combined query, of the capture whose subtree is searched.
+    capture: u32,
+    /// The sub-pattern. Its own `#eq?`, `#match?` and the rest are applied by
+    /// tree-sitter when the sub-query runs.
+    query: Query,
+    /// Node kind ids the descent must not pass through. Empty means no stop.
+    stops: Vec<u16>,
+    /// `#not-has-descendant?`: a surviving sub-match rejects the match instead
+    /// of keeping it.
+    negated: bool,
 }
 
 /// A language's patterns as they are gathered, before the concatenation is
@@ -63,6 +97,11 @@ impl AstQueries {
     /// capture names are resolved per query, so a name two rules share simply
     /// shares an index. The `Err` is the escape hatch for a rule pack that
     /// proves that wrong, and names the language and the rule it broke on.
+    ///
+    /// This is also where each pattern's subtree predicates are validated and
+    /// their sub-patterns compiled, so a rule naming an unknown predicate, a
+    /// sub-pattern that does not compile or an unknown stop kind fails here
+    /// rather than matching nothing in silence.
     pub fn build(rules: &[CompiledRule]) -> Result<AstQueries, String> {
         let mut pending: Vec<Pending> = Vec::new();
 
@@ -158,12 +197,107 @@ fn compile_combined(
     }
     let report = query.capture_index_for_name(REPORT_CAPTURE);
 
+    // Every predicate tree-sitter does not evaluate itself lands here, so this
+    // is also the gate that rejects a predicate name the engine would
+    // otherwise ignore in silence.
+    let mut subtrees = Vec::with_capacity(query.pattern_count());
+    for pattern in 0..query.pattern_count() {
+        let rule = &rules[pending.rules[pending.owners[pattern]]].id;
+        subtrees.push(
+            query
+                .general_predicates(pattern)
+                .iter()
+                .map(|predicate| compile_subtree(predicate, &language, grammar, rule))
+                .collect::<Result<Vec<Subtree>, String>>()?,
+        );
+    }
+
     Ok(CombinedQuery {
         grammar: grammar.to_string(),
         query,
         rules: pending.rules.clone(),
         owners: pending.owners.clone(),
         report,
+        subtrees,
+    })
+}
+
+/// Validate one general predicate and compile its sub-pattern against the
+/// grammar the enclosing query is being compiled for.
+///
+/// A typescript rule is compiled twice, so its sub-patterns and stop kinds have
+/// to hold under both the `typescript` and the `tsx` grammar.
+fn compile_subtree(
+    predicate: &QueryPredicate,
+    language: &Language,
+    grammar: &str,
+    rule: &str,
+) -> Result<Subtree, String> {
+    let operator = predicate.operator.as_ref();
+    let negated = match operator {
+        HAS_DESCENDANT => false,
+        NOT_HAS_DESCENDANT => true,
+        _ => {
+            return Err(format!(
+                "the {grammar} ast query of rule {rule} uses the unknown predicate #{operator}"
+            ));
+        }
+    };
+    let bad = |detail: String| {
+        format!(
+            "the {grammar} ast query of rule {rule} has an invalid #{operator} predicate: {detail}"
+        )
+    };
+
+    if !(2..=3).contains(&predicate.args.len()) {
+        return Err(bad(format!(
+            "expected a capture, a sub-pattern and optionally a list of stop kinds, got {} argument(s)",
+            predicate.args.len()
+        )));
+    }
+    let QueryPredicateArg::Capture(capture) = predicate.args[0] else {
+        return Err(bad("the first argument must be a capture".to_string()));
+    };
+    let QueryPredicateArg::String(source) = &predicate.args[1] else {
+        return Err(bad(
+            "the second argument must be a sub-pattern in quotes, not a capture".to_string(),
+        ));
+    };
+
+    let query = Query::new(language, source)
+        .map_err(|error| bad(format!("the sub-pattern does not compile: {error}")))?;
+    // The engine evaluates these predicates for the patterns of the combined
+    // query only. One nested inside a sub-pattern would be read by nobody, so
+    // it is a load error rather than a silent no-op.
+    if (0..query.pattern_count()).any(|pattern| !query.general_predicates(pattern).is_empty()) {
+        return Err(bad(
+            "the sub-pattern carries a predicate of its own that nothing evaluates".to_string(),
+        ));
+    }
+
+    let stops = match predicate.args.get(2) {
+        None => Vec::new(),
+        Some(QueryPredicateArg::Capture(_)) => {
+            return Err(bad(
+                "the third argument must be node kinds in quotes, not a capture".to_string(),
+            ));
+        }
+        Some(QueryPredicateArg::String(kinds)) => kinds
+            .split_whitespace()
+            .map(|kind| match language.id_for_node_kind(kind, true) {
+                0 => Err(bad(format!(
+                    "{kind} is not a node kind of the {grammar} grammar"
+                ))),
+                id => Ok(id),
+            })
+            .collect::<Result<Vec<u16>, String>>()?,
+    };
+
+    Ok(Subtree {
+        capture,
+        query,
+        stops,
+        negated,
     })
 }
 
@@ -247,10 +381,23 @@ pub fn scan_file(
     // set are per rule, and both are order-sensitive.
     let mut matched: Vec<(usize, usize, usize)> = Vec::new();
     let mut cursor = QueryCursor::new();
+    // One cursor for every subtree predicate of this file: the sub-queries run
+    // one at a time, and the outer cursor is borrowed by the match iterator.
+    let mut subtree_cursor = QueryCursor::new();
     let mut matches = cursor.matches(&combined.query, tree.root_node(), content.as_bytes());
     while let Some(pattern_match) = matches.next() {
         let owner = combined.owners[pattern_match.pattern_index];
         if !applicable[owner] {
+            continue;
+        }
+        // Evaluated on matches of the enclosing pattern only, so the cost is
+        // bounded by the subtree that already matched.
+        if !subtrees_hold(
+            &combined.subtrees[pattern_match.pattern_index],
+            pattern_match,
+            content,
+            &mut subtree_cursor,
+        ) {
             continue;
         }
         let Some(node) = report_node(pattern_match, combined.report) else {
@@ -324,6 +471,78 @@ fn report_node<'tree>(
     }
 
     pattern_match.captures.first().map(|capture| capture.node)
+}
+
+/// Whether every subtree predicate of the match's pattern holds, in source
+/// order.
+///
+/// The capture a predicate names can be absent from a match when it sits in an
+/// optional part of the pattern. There is then no subtree to search, which
+/// counts as "nothing found": `#has-descendant?` fails and
+/// `#not-has-descendant?` passes.
+fn subtrees_hold(
+    subtrees: &[Subtree],
+    pattern_match: &QueryMatch<'_, '_>,
+    content: &str,
+    cursor: &mut QueryCursor,
+) -> bool {
+    subtrees.iter().all(|subtree| {
+        let found = pattern_match
+            .captures
+            .iter()
+            .find(|capture| capture.index == subtree.capture)
+            .is_some_and(|capture| has_descendant(subtree, capture.node, content, cursor));
+        found != subtree.negated
+    })
+}
+
+/// Whether the sub-pattern matches inside `root`'s subtree without the descent
+/// passing through a stop kind.
+fn has_descendant(
+    subtree: &Subtree,
+    root: Node<'_>,
+    content: &str,
+    cursor: &mut QueryCursor,
+) -> bool {
+    let mut matches = cursor.matches(&subtree.query, root, content.as_bytes());
+    while let Some(found) = matches.next() {
+        // A sub-pattern with no capture gives tree-sitter's binding no node to
+        // hand back, so such a sub-match is taken to sit on `root` itself:
+        // nothing lies between the two, and the stop list cannot exclude it.
+        let Some(capture) = found.captures.first() else {
+            return true;
+        };
+        if !stopped(capture.node, root, &subtree.stops) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Whether the walk from `node` up to `root` passes through a stop kind.
+///
+/// Only the nodes strictly between the two are stops: neither `root`, which is
+/// the captured node the search started from, nor the sub-match itself.
+fn stopped(node: Node<'_>, root: Node<'_>, stops: &[u16]) -> bool {
+    if stops.is_empty() {
+        return false;
+    }
+
+    let mut current = node;
+    while current.id() != root.id() {
+        let Some(parent) = current.parent() else {
+            return false;
+        };
+        if parent.id() == root.id() {
+            return false;
+        }
+        if stops.contains(&parent.kind_id()) {
+            return true;
+        }
+        current = parent;
+    }
+
+    false
 }
 
 #[cfg(all(test, feature = "tree-sitter-rust", feature = "tree-sitter-python"))]
@@ -763,5 +982,266 @@ rules:
                 ("rust.outer", "foo"),
             ]
         );
+    }
+
+    /// A sub-pattern with its own `#eq?`, run over the body of every function.
+    #[test]
+    fn has_descendant_keeps_only_the_function_that_contains_the_call() {
+        let compiled = rules(
+            r#"
+version: 1
+rules:
+  - id: rust.blocking-sleep
+    severity: warning
+    message: m
+    ast:
+      rust: |
+        ((function_item name: (identifier) @report body: (block) @body)
+          (#has-descendant? @body "(call_expression function: (scoped_identifier name: (identifier) @f) (#eq? @f \"sleep\"))"))
+"#,
+        );
+        let content = "async fn naps() {\n    std::thread::sleep(d);\n}\nasync fn works() {\n    work();\n}\n";
+        let found = scan(&compiled, "src/main.rs", "rust", content);
+
+        assert_eq!(
+            found
+                .iter()
+                .map(|finding| finding.matched.as_str())
+                .collect::<Vec<_>>(),
+            vec!["naps"]
+        );
+    }
+
+    #[cfg(feature = "tree-sitter-javascript")]
+    #[test]
+    fn not_has_descendant_keeps_the_function_without_the_sub_match() {
+        let compiled = rules(
+            r#"
+version: 1
+rules:
+  - id: javascript.async-without-await
+    severity: info
+    message: m
+    ast:
+      javascript: |
+        ((function_declaration name: (identifier) @report) @fn
+          (#not-has-descendant? @fn "(await_expression) @a"))
+"#,
+        );
+        let content = "async function a() {\n  await f();\n}\nasync function b() {\n  g();\n}\n";
+        let found = scan(&compiled, "app.js", "javascript", content);
+
+        assert_eq!(
+            found
+                .iter()
+                .map(|finding| finding.matched.as_str())
+                .collect::<Vec<_>>(),
+            vec!["b"]
+        );
+    }
+
+    /// The await belongs to the nested arrow function, not to `outer`. With the
+    /// two function kinds stopping the descent it does not rescue `outer`;
+    /// without them it does.
+    #[cfg(feature = "tree-sitter-javascript")]
+    #[test]
+    fn stop_kinds_cut_the_descent_at_a_nested_function() {
+        const CONTENT: &str =
+            "async function outer() {\n  const inner = async () => {\n    await g();\n  };\n}\n";
+
+        let stopping = rules(
+            r#"
+version: 1
+rules:
+  - id: javascript.stopped
+    severity: info
+    message: m
+    ast:
+      javascript: |
+        ((function_declaration name: (identifier) @report) @fn
+          (#not-has-descendant? @fn "(await_expression) @a" "arrow_function function_expression"))
+"#,
+        );
+        let found = scan(&stopping, "app.js", "javascript", CONTENT);
+        assert_eq!(
+            found
+                .iter()
+                .map(|finding| finding.matched.as_str())
+                .collect::<Vec<_>>(),
+            vec!["outer"]
+        );
+
+        let descending = rules(
+            r#"
+version: 1
+rules:
+  - id: javascript.descending
+    severity: info
+    message: m
+    ast:
+      javascript: |
+        ((function_declaration name: (identifier) @report) @fn
+          (#not-has-descendant? @fn "(await_expression) @a"))
+"#,
+        );
+        assert!(scan(&descending, "app.js", "javascript", CONTENT).is_empty());
+    }
+
+    /// A sub-pattern that captures nothing leaves the binding no node to report,
+    /// so its sub-match counts as sitting on the captured node itself and the
+    /// stop list cannot exclude it.
+    #[cfg(feature = "tree-sitter-javascript")]
+    #[test]
+    fn a_capture_less_sub_pattern_is_not_stopped() {
+        let compiled = rules(
+            r#"
+version: 1
+rules:
+  - id: javascript.capture-less
+    severity: info
+    message: m
+    ast:
+      javascript: |
+        ((function_declaration name: (identifier) @report) @fn
+          (#has-descendant? @fn "(await_expression)" "arrow_function"))
+"#,
+        );
+        let content =
+            "async function outer() {\n  const inner = async () => {\n    await g();\n  };\n}\n";
+        let found = scan(&compiled, "app.js", "javascript", content);
+
+        assert_eq!(
+            found
+                .iter()
+                .map(|finding| finding.matched.as_str())
+                .collect::<Vec<_>>(),
+            vec!["outer"]
+        );
+    }
+
+    /// Two predicates on one pattern, both carrying a sub-pattern with its own
+    /// `#eq?`: a class that defines `equals` and no `hashCode`.
+    #[cfg(feature = "tree-sitter-java")]
+    #[test]
+    fn two_sub_patterns_with_their_own_predicates_agree_on_one_class() {
+        let compiled = rules(
+            r#"
+version: 1
+rules:
+  - id: java.equals-without-hashcode
+    severity: warning
+    message: m
+    ast:
+      java: |
+        ((class_declaration name: (identifier) @report body: (class_body) @body)
+          (#has-descendant? @body "(method_declaration name: (identifier) @m (#eq? @m \"equals\"))")
+          (#not-has-descendant? @body "(method_declaration name: (identifier) @m (#eq? @m \"hashCode\"))"))
+"#,
+        );
+        let content = concat!(
+            "class A {\n  public boolean equals(Object o) { return false; }\n}\n",
+            "class B {\n  public boolean equals(Object o) { return false; }\n",
+            "  public int hashCode() { return 0; }\n}\n",
+            "class C {\n  public int size() { return 0; }\n}\n",
+        );
+        let found = scan(&compiled, "src/A.java", "java", content);
+
+        assert_eq!(
+            found
+                .iter()
+                .map(|finding| finding.matched.as_str())
+                .collect::<Vec<_>>(),
+            vec!["A"]
+        );
+    }
+
+    /// The sub-pattern is compiled once per grammar, so a typescript rule that
+    /// carries one still fires on a `.tsx` file.
+    #[cfg(feature = "tree-sitter-typescript")]
+    #[test]
+    fn a_typescript_subtree_predicate_fires_under_both_grammars() {
+        let compiled = rules(
+            r#"
+version: 1
+rules:
+  - id: typescript.eval-in-function
+    severity: warning
+    message: m
+    ast:
+      typescript: |
+        ((function_declaration name: (identifier) @report) @fn
+          (#has-descendant? @fn "(call_expression function: (identifier) @c (#eq? @c \"eval\"))"))
+"#,
+        );
+
+        let tsx = "export function Widget() {\n  const value = eval(\"1\");\n  return <div>{value}</div>;\n}\nexport function Plain() {\n  return <div />;\n}\n";
+        let found = scan(&compiled, "src/Widget.tsx", "typescript", tsx);
+        assert_eq!(
+            found
+                .iter()
+                .map(|finding| finding.matched.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Widget"]
+        );
+
+        let ts = "export function widget(): number {\n  return eval(\"1\");\n}\n";
+        let found = scan(&compiled, "src/widget.ts", "typescript", ts);
+        assert_eq!(
+            found
+                .iter()
+                .map(|finding| finding.matched.as_str())
+                .collect::<Vec<_>>(),
+            vec!["widget"]
+        );
+    }
+
+    /// Every way a subtree predicate can be wrong is a load error that names
+    /// the rule it came from.
+    #[test]
+    fn a_broken_subtree_predicate_names_its_rule() {
+        fn build_error(query: &str) -> String {
+            let src = format!(
+                "version: 1\nrules:\n  - id: rust.broken\n    severity: info\n    message: m\n    ast:\n      rust: |\n        {query}\n"
+            );
+            let compiled = rules(&src);
+            AstQueries::build(&compiled).expect_err("the predicate should be rejected")
+        }
+
+        let unknown = build_error(r#"((identifier) @x (#nonsense? @x "(identifier) @i"))"#);
+        assert!(unknown.contains("rust.broken"), "{unknown}");
+        assert!(
+            unknown.contains("unknown predicate #nonsense?"),
+            "{unknown}"
+        );
+
+        let arity = build_error("((identifier) @x (#has-descendant? @x))");
+        assert!(arity.contains("rust.broken"), "{arity}");
+        assert!(arity.contains("1 argument(s)"), "{arity}");
+
+        let literal = build_error(r#"((identifier) @x (#has-descendant? "x" "(identifier) @i"))"#);
+        assert!(literal.contains("rust.broken"), "{literal}");
+        assert!(
+            literal.contains("first argument must be a capture"),
+            "{literal}"
+        );
+
+        let broken = build_error(r#"((identifier) @x (#has-descendant? @x "(call_expression"))"#);
+        assert!(broken.contains("rust.broken"), "{broken}");
+        assert!(broken.contains("does not compile"), "{broken}");
+
+        let kind = build_error(
+            r#"((identifier) @x (#has-descendant? @x "(identifier) @i" "no_such_kind"))"#,
+        );
+        assert!(kind.contains("rust.broken"), "{kind}");
+        assert!(
+            kind.contains("no_such_kind is not a node kind of the rust grammar"),
+            "{kind}"
+        );
+
+        let nested = build_error(
+            r#"((identifier) @x (#has-descendant? @x "((identifier) @i (#has-descendant? @i \"(identifier) @j\"))"))"#,
+        );
+        assert!(nested.contains("rust.broken"), "{nested}");
+        assert!(nested.contains("nothing evaluates"), "{nested}");
     }
 }
