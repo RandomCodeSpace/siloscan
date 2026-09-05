@@ -17,7 +17,10 @@ would suppress the profiles along with it. Every run therefore reports
 ``secrets.*`` findings as well, and those belong to the detection corpus and its
 own gates, not to a profile's noise budget. So the tally keeps only ids whose
 first segment is ``reliability`` or ``maintainability`` - the same closed family
-set ``tests/profile_corpus.rs`` enforces on every shipped document.
+set ``tests/profile_corpus.rs`` enforces on every shipped document. Rule
+directories passed with ``--rules`` are measured on the same terms: their
+findings arrive in the same report and are counted here only when the rule id's
+first segment is one of those two families.
 
 **The denominator is the repository's own language.** ``metrics.totals.code_lines``
 sums every tier-1 language in the tree, so a TypeScript repository carrying
@@ -438,23 +441,40 @@ def clone(repo: Repository, dest: Path) -> None:
         )
 
 
-def scan(binary: Path, tree: Path, profiles: str) -> tuple[dict, float]:
-    """One scan of one repository, and how long it took.
+def scan_command(
+    binary: Path | str,
+    tree: Path | str,
+    profiles: str,
+    rules: list[Path] | tuple[Path, ...] = (),
+) -> list[str]:
+    """The argv of one scan.
 
     ``--no-cache`` because a cached result is a result measured by an earlier
     binary, and the whole point is what this binary does to this tree.
     ``--format json`` because the per-rule counts and the scanned line total
-    are both in it.
+    are both in it. Every ``--rules`` directory is passed straight through, so a
+    research rule can be measured against the pinned set without being embedded
+    first; the binary loads them on top of the built-in pack rather than instead
+    of it, which is why ``tally`` still has to filter by family.
+
+    The header prints this same list, so what a result file says was measured
+    cannot drift from what was run.
     """
-    command = [
-        str(binary),
-        str(tree),
-        "--profiles",
-        profiles,
-        "--no-cache",
-        "--format",
-        "json",
-    ]
+    command = [str(binary), str(tree), "--profiles", profiles]
+    for path in rules:
+        command += ["--rules", str(path)]
+    command += ["--no-cache", "--format", "json"]
+    return command
+
+
+def scan(
+    binary: Path,
+    tree: Path,
+    profiles: str,
+    rules: list[Path] | tuple[Path, ...] = (),
+) -> tuple[dict, float]:
+    """One scan of one repository, and how long it took."""
+    command = scan_command(binary, tree, profiles, rules)
     started = time.monotonic()
     completed = subprocess.run(command, capture_output=True, text=True, check=False)
     elapsed = time.monotonic() - started
@@ -518,7 +538,13 @@ def sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def header(binary: Path, profiles: str, noise_set: Path, limits: Path) -> list[str]:
+def header(
+    binary: Path,
+    profiles: str,
+    noise_set: Path,
+    limits: Path,
+    rules: list[Path] | tuple[Path, ...] = (),
+) -> list[str]:
     """The oracle-style block every result file opens with."""
     return [
         f"# generated={datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}",
@@ -526,7 +552,7 @@ def header(binary: Path, profiles: str, noise_set: Path, limits: Path) -> list[s
         f"# binary_sha256={sha256(binary)}",
         f"# host={platform.system()} {platform.release()} {platform.machine()}",
         f"# python={platform.python_version()}",
-        f"# command=siloscan REPO --profiles {profiles} --no-cache --format json",
+        f"# command={' '.join(scan_command('siloscan', 'REPO', profiles, rules))}",
         f"# noise_set={noise_set}",
         f"# limits={limits}",
     ]
@@ -609,6 +635,13 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         default="auto",
         help="what to pass to --profiles; 'auto' or a comma-separated identity list",
     )
+    parser.add_argument(
+        "--rules",
+        action="append",
+        type=Path,
+        default=[],
+        help="extra rule directory passed through to the binary; repeatable",
+    )
     parser.add_argument("--noise-set", type=Path, default=DEFAULT_NOISE_SET)
     parser.add_argument("--limits", type=Path, default=DEFAULT_LIMITS)
     parser.add_argument(
@@ -624,6 +657,12 @@ def main(argv: list[str]) -> int:
     if not args.binary.is_file():
         print(f"error: {args.binary} is not a file", file=sys.stderr)
         return 2
+    for path in args.rules:
+        # The binary reads a --rules path with read_dir: a file there is exit 2
+        # on every repository, after the first clone rather than before it.
+        if not path.is_dir():
+            print(f"error: {path} is not a directory", file=sys.stderr)
+            return 2
 
     try:
         repositories = parse_noise_set(args.noise_set.read_text(encoding="utf-8"))
@@ -642,7 +681,7 @@ def main(argv: list[str]) -> int:
         repositories = [repo for repo in repositories if repo.name in wanted]
 
     args.out.mkdir(parents=True, exist_ok=True)
-    head = header(args.binary, args.profiles, args.noise_set, args.limits)
+    head = header(args.binary, args.profiles, args.noise_set, args.limits, args.rules)
 
     results: list[Result] = []
     for repo in repositories:
@@ -651,7 +690,7 @@ def main(argv: list[str]) -> int:
             with tempfile.TemporaryDirectory(prefix="siloscan-noise-") as scratch:
                 tree = Path(scratch) / repo.name.replace("/", "-")
                 clone(repo, tree)
-                report, elapsed = scan(args.binary, tree, args.profiles)
+                report, elapsed = scan(args.binary, tree, args.profiles, args.rules)
                 # Inside the checkout's lifetime: a `.h` file's language is
                 # decided by reading it, and the directory goes away below.
                 files, files_total, code_lines, findings = tally(

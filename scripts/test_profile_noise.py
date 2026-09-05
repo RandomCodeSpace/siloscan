@@ -458,12 +458,68 @@ class Tables(unittest.TestCase):
         self.assertIn("gin", rows[2])
 
 
+class ScanCommand(unittest.TestCase):
+    def test_with_no_rules_the_command_is_the_one_this_script_always_ran(self):
+        self.assertEqual(
+            profile_noise.scan_command(Path("bin/siloscan"), Path("/t/tree"), "auto"),
+            [
+                "bin/siloscan",
+                "/t/tree",
+                "--profiles",
+                "auto",
+                "--no-cache",
+                "--format",
+                "json",
+            ],
+        )
+
+    def test_every_rules_directory_is_passed_through_after_the_profiles(self):
+        self.assertEqual(
+            profile_noise.scan_command(
+                Path("bin/siloscan"),
+                Path("/t/tree"),
+                "auto",
+                [Path("/t/a"), Path("/t/b")],
+            ),
+            [
+                "bin/siloscan",
+                "/t/tree",
+                "--profiles",
+                "auto",
+                "--rules",
+                "/t/a",
+                "--rules",
+                "/t/b",
+                "--no-cache",
+                "--format",
+                "json",
+            ],
+        )
+
+    def test_the_header_records_the_rules_it_was_run_with(self):
+        head = profile_noise.header(
+            Path(__file__), "auto", Path("n.md"), Path("l.tsv"), [Path("/t/a")]
+        )
+        self.assertIn(
+            "# command=siloscan REPO --profiles auto --rules /t/a "
+            "--no-cache --format json",
+            head,
+        )
+
+
 class Arguments(unittest.TestCase):
     def test_the_defaults_point_at_the_committed_inputs(self):
         args = profile_noise.parse_args(["--binary", "b", "--out", "o"])
         self.assertEqual(args.profiles, "auto")
         self.assertEqual(args.noise_set, profile_noise.DEFAULT_NOISE_SET)
         self.assertEqual(args.limits, profile_noise.DEFAULT_LIMITS)
+        self.assertEqual(args.rules, [])
+
+    def test_rules_is_repeatable(self):
+        args = profile_noise.parse_args(
+            ["--binary", "b", "--out", "o", "--rules", "a", "--rules", "b"]
+        )
+        self.assertEqual(args.rules, [Path("a"), Path("b")])
 
     def test_a_missing_binary_is_a_usage_failure_not_a_traceback(self):
         self.assertEqual(
