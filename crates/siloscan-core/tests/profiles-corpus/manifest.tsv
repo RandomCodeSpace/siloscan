@@ -205,3 +205,87 @@ typescript/constant-condition-positive.ts	2	reliability.typescript.constant-cond
 typescript/constant-condition-negative.ts	2	NONE	the condition is a parameter, so the branch is decided at run time
 typescript/jsx-self-assignment.tsx	3	reliability.typescript.self-assignment	the assignment writes the variable back to itself; it sits inside a component whose JSX only the tsx grammar parses, and the plain typescript grammar swallows this line into the misparse
 typescript/jsx-self-assignment.tsx	2	NONE	an ordinary self-closing JSX element, which no profile rule owns
+javascript/async-promise-executor-positive.js	2	reliability.javascript.async-promise-executor	the Promise executor is an async function, so a throw inside it rejects the executor's own promise
+javascript/async-promise-executor-positive.js	5	reliability.javascript.async-promise-executor	the Promise executor is an async function, so a throw inside it rejects the executor's own promise
+javascript/async-promise-executor-negative.js	2	NONE	the executor is not async, so the constructed promise sees its own rejections
+javascript/async-promise-executor-negative.js	5	NONE	the executor is not async, so the constructed promise sees its own rejections
+javascript/async-promise-executor-negative.js	8	NONE	the executor is not async, so the constructed promise sees its own rejections
+javascript/duplicate-object-key-positive.js	2	reliability.javascript.duplicate-object-key	the same property identifier is written twice in one object literal
+javascript/duplicate-object-key-positive.js	5	reliability.javascript.duplicate-object-key	the same property identifier is written twice in one object literal
+javascript/duplicate-object-key-negative.js	2	NONE	every property identifier in the literal is distinct
+javascript/duplicate-object-key-negative.js	5	NONE	every property identifier in the literal is distinct
+javascript/duplicate-object-key-negative.js	8	NONE	every property identifier in the literal is distinct
+javascript/duplicate-object-key-negative.js	11	NONE	every property identifier in the literal is distinct
+javascript/duplicate-else-if-condition-positive.js	2	reliability.javascript.duplicate-else-if-condition	the else-if repeats the byte-identical condition of the if above it
+javascript/duplicate-else-if-condition-negative.js	2	NONE	the two conditions differ, so both branches are reachable
+javascript/duplicate-switch-case-positive.js	2	reliability.javascript.duplicate-switch-case	two case labels in one switch body carry the same value
+javascript/duplicate-switch-case-negative.js	2	NONE	the case values differ, so no label is dead
+javascript/duplicate-switch-case-negative.js	5	NONE	the case values differ, so no label is dead
+javascript/duplicate-switch-case-negative.js	8	NONE	the case values differ, so no label is dead
+javascript/compare-neg-zero-positive.js	2	reliability.javascript.compare-neg-zero	an equality operator against -0, which is also true for +0
+javascript/compare-neg-zero-negative.js	2	NONE	Object.is is the spelling that keeps the sign, and the other operands are not -0
+javascript/compare-neg-zero-negative.js	5	NONE	Object.is is the spelling that keeps the sign, and the other operands are not -0
+javascript/compare-neg-zero-negative.js	8	NONE	Object.is is the spelling that keeps the sign, and the other operands are not -0
+javascript/compare-neg-zero-negative.js	11	NONE	Object.is is the spelling that keeps the sign, and the other operands are not -0
+javascript/invalid-typeof-comparison-positive.js	2	reliability.javascript.invalid-typeof-comparison	the string compared against typeof is not one of the eight values typeof can return
+javascript/invalid-typeof-comparison-positive.js	5	reliability.javascript.invalid-typeof-comparison	the string compared against typeof is not one of the eight values typeof can return
+javascript/invalid-typeof-comparison-negative.js	2	NONE	the compared strings are real typeof results, or the comparison is not against typeof
+javascript/invalid-typeof-comparison-negative.js	5	NONE	the compared strings are real typeof results, or the comparison is not against typeof
+javascript/invalid-typeof-comparison-negative.js	8	NONE	the compared strings are real typeof results, or the comparison is not against typeof
+javascript/invalid-typeof-comparison-negative.js	11	NONE	the compared strings are real typeof results, or the comparison is not against typeof
+javascript/empty-destructuring-pattern-positive.js	2	reliability.javascript.empty-destructuring-pattern	the destructuring pattern has no properties, so it binds nothing
+javascript/empty-destructuring-pattern-positive.js	5	reliability.javascript.empty-destructuring-pattern	the destructuring pattern has no properties, so it binds nothing
+javascript/empty-destructuring-pattern-negative.js	2	NONE	the pattern binds a property, or the braces are an object literal rather than a pattern
+javascript/empty-destructuring-pattern-negative.js	5	NONE	the pattern binds a property, or the braces are an object literal rather than a pattern
+javascript/empty-destructuring-pattern-negative.js	8	NONE	the pattern binds a property, or the braces are an object literal rather than a pattern
+javascript/empty-destructuring-pattern-negative.js	11	NONE	the pattern binds a property, or the braces are an object literal rather than a pattern
+javascript/throw-literal-positive.js	2	reliability.javascript.throw-literal	the thrown value is a literal, so it carries no stack
+javascript/throw-literal-positive.js	5	reliability.javascript.throw-literal	the thrown value is a literal, so it carries no stack
+javascript/throw-literal-negative.js	2	NONE	the thrown value is an Error, a binding, or the result of a call
+javascript/throw-literal-negative.js	5	NONE	the thrown value is an Error, a binding, or the result of a call
+javascript/throw-literal-negative.js	8	NONE	the thrown value is an Error, a binding, or the result of a call
+javascript/return-in-finally-positive.js	2	reliability.javascript.return-in-finally	the finally block returns directly, discarding the pending return value
+javascript/return-in-finally-negative.js	2	NONE	the finally block does not transfer control out of itself
+javascript/return-in-finally-negative.js	5	NONE	the finally block does not transfer control out of itself
+javascript/return-in-finally-negative.js	8	NONE	the finally block does not transfer control out of itself
+javascript/unsafe-negation-positive.js	2	reliability.javascript.unsafe-negation	the negation binds to the left operand of in and instanceof, so the test is always false
+javascript/unsafe-negation-positive.js	5	reliability.javascript.unsafe-negation	the negation binds to the left operand of in and instanceof, so the test is always false
+javascript/unsafe-negation-negative.js	2	NONE	the parentheses put the negation outside the relation, or the operator is not in or instanceof
+javascript/unsafe-negation-negative.js	5	NONE	the parentheses put the negation outside the relation, or the operator is not in or instanceof
+javascript/unsafe-negation-negative.js	8	NONE	the parentheses put the negation outside the relation, or the operator is not in or instanceof
+javascript/unsafe-negation-negative.js	11	NONE	the parentheses put the negation outside the relation, or the operator is not in or instanceof
+javascript/dynamic-code-execution-positive.js	2	reliability.javascript.dynamic-code-execution	source text is compiled at runtime by eval, a string timer argument, or the Function constructor
+javascript/dynamic-code-execution-positive.js	5	reliability.javascript.dynamic-code-execution	source text is compiled at runtime by eval, a string timer argument, or the Function constructor
+javascript/dynamic-code-execution-positive.js	8	reliability.javascript.dynamic-code-execution	source text is compiled at runtime by eval, a string timer argument, or the Function constructor
+javascript/dynamic-code-execution-positive.js	11	reliability.javascript.dynamic-code-execution	source text is compiled at runtime by eval, a string timer argument, or the Function constructor
+javascript/dynamic-code-execution-negative.js	2	NONE	the call is a different identifier, a member call, or passes a function rather than source text
+javascript/dynamic-code-execution-negative.js	5	NONE	the call is a different identifier, a member call, or passes a function rather than source text
+javascript/dynamic-code-execution-negative.js	8	NONE	the call is a different identifier, a member call, or passes a function rather than source text
+javascript/dynamic-code-execution-negative.js	11	NONE	the call is a different identifier, a member call, or passes a function rather than source text
+javascript/dynamic-code-execution-negative.js	14	NONE	the call is a different identifier, a member call, or passes a function rather than source text
+javascript/prototype-builtin-call-positive.js	2	reliability.javascript.prototype-builtin-call	a prototype builtin is called on the object itself, which throws on a null-prototype object
+javascript/prototype-builtin-call-negative.js	2	NONE	the call goes through Object.prototype, Object.hasOwn, or is not a call at all
+javascript/prototype-builtin-call-negative.js	5	NONE	the call goes through Object.prototype, Object.hasOwn, or is not a call at all
+javascript/prototype-builtin-call-negative.js	8	NONE	the call goes through Object.prototype, Object.hasOwn, or is not a call at all
+javascript/self-assignment-member-positive.js	2	reliability.javascript.self-assignment-member	both sides of the assignment are the byte-identical member expression
+javascript/self-assignment-member-positive.js	5	reliability.javascript.self-assignment-member	both sides of the assignment are the byte-identical member expression
+javascript/self-assignment-member-negative.js	2	NONE	the two sides denote different members, or the index makes them different over time
+javascript/self-assignment-member-negative.js	5	NONE	the two sides denote different members, or the index makes them different over time
+javascript/self-assignment-member-negative.js	8	NONE	the two sides denote different members, or the index makes them different over time
+javascript/new-wrapper-object-positive.js	2	reliability.javascript.new-wrapper-object	new on a primitive wrapper produces an object rather than a primitive
+javascript/new-wrapper-object-positive.js	5	reliability.javascript.new-wrapper-object	new on a primitive wrapper produces an object rather than a primitive
+javascript/new-wrapper-object-negative.js	2	NONE	the conversion spellings are bare calls, and Set is not a wrapper
+javascript/new-wrapper-object-negative.js	5	NONE	the conversion spellings are bare calls, and Set is not a wrapper
+javascript/new-wrapper-object-negative.js	8	NONE	the conversion spellings are bare calls, and Set is not a wrapper
+javascript/setter-returns-value-positive.js	2	reliability.javascript.setter-returns-value	the setter returns a value, which the assignment discards
+javascript/setter-returns-value-negative.js	2	NONE	the setter assigns without returning, returns bare, or the accessor is a getter
+javascript/setter-returns-value-negative.js	5	NONE	the setter assigns without returning, returns bare, or the accessor is a getter
+javascript/setter-returns-value-negative.js	8	NONE	the setter assigns without returning, returns bare, or the accessor is a getter
+javascript/unreachable-after-return-positive.js	2	reliability.javascript.unreachable-after-return	the statement follows a return in the same block and is not hoisted
+javascript/unreachable-after-return-negative.js	2	NONE	the return is last, or what follows it is a hoisted function declaration
+javascript/unreachable-after-return-negative.js	5	NONE	the return is last, or what follows it is a hoisted function declaration
+javascript/unreachable-after-return-negative.js	8	NONE	the return is last, or what follows it is a hoisted function declaration
+javascript/nested-ternary-in-consequence-positive.js	2	maintainability.javascript.nested-ternary-in-consequence	a ternary is nested in the consequence of another ternary
+javascript/nested-ternary-in-consequence-positive.js	5	maintainability.javascript.nested-ternary-in-consequence	a ternary is nested in the consequence of another ternary
+javascript/nested-ternary-in-consequence-negative.js	2	NONE	the nesting is in the alternative, which reads as a chain, or there is no nesting
+javascript/nested-ternary-in-consequence-negative.js	5	NONE	the nesting is in the alternative, which reads as a chain, or there is no nesting
