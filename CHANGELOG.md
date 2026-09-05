@@ -4,6 +4,20 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Fixed
+
+- A `.tsx` file is parsed with tree-sitter-typescript's TSX grammar rather than
+  the plain TypeScript one. The two grammars are not a superset of one another
+  - `<T>x` is a type assertion in `.ts` and the start of a JSX element in
+  `.tsx` - so JSX used to be read as a broken type assertion, and error
+  recovery from that misparse made every TypeScript ast rule, every metric and
+  the import graph unreliable on React code. The grammar is chosen by
+  extension; the language label stays `typescript` in reports, `--profiles
+  auto`, metrics, corpus directories, and the noise harness, and no new
+  language is selectable.
+
 ## 2.1.0 - 2026-09-04
 
 ### Fixed

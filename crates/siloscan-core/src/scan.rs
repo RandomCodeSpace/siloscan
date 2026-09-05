@@ -1528,7 +1528,9 @@ fn scan_text(
     }
 
     let tree = match parse {
-        true => language.and_then(|lang| crate::parsers::parse(lang, content)),
+        true => {
+            language.and_then(|lang| crate::parsers::parse_file(lang, Path::new(path_rel), content))
+        }
         false => None,
     };
 
@@ -1565,7 +1567,12 @@ fn scan_text(
     // its imports costs about as much as the parse did, and with no boundary
     // rule loaded the result is built, cached and never looked at.
     let facts = match (graph, language, &tree) {
-        (true, Some(lang), Some(tree)) => Some(crate::graph::extract(lang, content, tree)),
+        (true, Some(lang), Some(tree)) => Some(crate::graph::extract_file(
+            lang,
+            Path::new(path_rel),
+            content,
+            tree,
+        )),
         _ => None,
     };
 
