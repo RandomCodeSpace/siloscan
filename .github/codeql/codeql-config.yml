@@ -1,0 +1,24 @@
+name: "siloscan CodeQL config"
+
+# Default setup ran the "extended" query suite. Advanced setup has to ask for it
+# explicitly, otherwise the analysis silently narrows to the default suite and
+# this switch would quietly reduce coverage.
+queries:
+  - uses: security-extended
+
+# Both trees below are detection fixtures. Every file in them exists precisely
+# because it contains the construct a siloscan rule is supposed to report, so
+# CodeQL reads them as genuine findings in the product. On PR #132 the fixture
+# strncat-destination-sizeof-positive.c raised cpp/unsafe-strncat (critical) and
+# cpp/suspicious-sizeof (high) and blocked the merge until both alerts were
+# dismissed by hand as "used in tests"; every future fixture carrying a real
+# unsafe construct would repeat that. Excluding the trees keeps the fixtures out
+# of analysis while the rest of the repository is still scanned. See #140.
+#
+# Note: paths-ignore only applies to languages extracted without a build, so the
+# compiled languages are analysed with build-mode "none" in
+# .github/workflows/codeql.yml. Go does not support that build mode and is
+# analysed with autobuild, so these filters do not reach Go sources.
+paths-ignore:
+  - crates/siloscan-core/tests/profiles-corpus/tree/**
+  - crates/siloscan-core/tests/corpus/**
