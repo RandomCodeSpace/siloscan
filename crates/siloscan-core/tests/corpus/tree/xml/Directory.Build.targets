@@ -1,0 +1,5 @@
+<Project>
+<PropertyGroup Condition="'$(Configuration)' == 'Release'">
+<SigningSecretLifetime>expiry=00:20:00</SigningSecretLifetime>
+</PropertyGroup>
+</Project>

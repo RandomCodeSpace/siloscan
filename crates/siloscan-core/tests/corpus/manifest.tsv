@@ -529,7 +529,9 @@ xml/App.config	21	NONE	bindingRedirect version ranges are dotted version numbers
 xml/Directory.Build.props	5	NONE	an MSBuild equality condition; == comparisons are =-laden text no rule may report
 xml/Directory.Build.props	8	ANY	a code-signing pfx password in an MSBuild property element
 xml/Directory.Build.props	9	ANY	a 40-character base64url artifact token in a property element: the length the 1.4.1 assignment allowlist dropped, measured here in markup position
-xml/Directory.Build.props	10	ANY	a sig= query fragment in a secret-named property; the internal = trips the =[^=] allowlist in generic-markup-config-secret, known miss, ticket #51
+xml/Directory.Build.props	10	ANY	a sig= query fragment in a secret-named property; the internal = tripped the =[^=] allowlist in generic-markup-config-secret until ticket #51 replaced it with a narrower entry
+xml/Directory.Build.targets	2	NONE	an MSBuild condition comparing with ==
+xml/Directory.Build.targets	3	NONE	a secret-named property whose body is a clock duration setting; the word-shaped assignment entry that replaced =[^=] in generic-markup-config-secret suppresses it, ticket #51
 xml/NuGet.Config	5	NONE	the public nuget.org source URL
 xml/NuGet.Config	6	NONE	an internal feed URL with no credentials
 xml/NuGet.Config	10	NONE	a feed username is not a secret
@@ -541,12 +543,14 @@ xml/Payments.Api.csproj	7	NONE	a path to a key file, not key material
 xml/Payments.Api.csproj	9	NONE	an MSBuild condition comparing with ==
 xml/Payments.Api.csproj	10	secrets.generic-credentialed-url	a NuGet restore source with user:password@ inline, the CI leak shape for private feeds
 xml/Payments.Api.csproj	11	ANY	a NuGet feed api key in a property element
-xml/Payments.Api.csproj	12	ANY	a symbol server password with an internal =; the =[^=] allowlist in generic-markup-config-secret drops it, known miss, ticket #51
+xml/Payments.Api.csproj	12	ANY	a symbol server password with an internal =; the =[^=] allowlist in generic-markup-config-secret dropped it until ticket #51 replaced it
 xml/Payments.Api.csproj	16	NONE	an assembly-qualified reference; Version=, Culture= and PublicKeyToken= are public identity, a documented scanner false-positive shape
+xml/Web.Release.config	4	NONE	a web.config transform whose appSettings value is a keyDerivation= setting string; the word-shaped assignment entry that replaced =[^=] suppresses it, ticket #51
+xml/Web.Release.config	5	NONE	a token cache profile whose value is a timeout in milliseconds; the same entry suppresses it, and both rows fail if that entry is dropped, ticket #51
 xml/ivysettings.xml	3	NONE	a repository URL without credentials
 xml/ivysettings.xml	4	NONE	a username property
 xml/ivysettings.xml	5	ANY	an Ant/Ivy password in the name=/value= attribute pair, which the markup rule's key=/value= branch does not cover; known gap
-xml/ivysettings.xml	6	ANY	a keystore passphrase with an internal = in the name=/value= shape; missed twice over, once by the name=/value= gap and once by the =[^=] allowlist, ticket #51
+xml/ivysettings.xml	6	ANY	a keystore passphrase with an internal = in the name=/value= shape; missed twice over, ticket #51 cleared the =[^=] half and the name=/value= gap still misses it
 xml/ivysettings.xml	7	ANY	an Ivy credentials tag whose passwd= attribute the password assignment rule reaches inside the markup
 xml/ivysettings.xml	8	NONE	an entity-escaped value; the fragments around the escape sit below the length floor, and reporting escaped-markup fragments has produced noise
 xml/ivysettings.xml	11	NONE	a resolver root URL with no credentials
@@ -555,16 +559,16 @@ xml/settings.xml	3	NONE	an xmlns:xsi namespace URL
 xml/settings.xml	4	NONE	schemaLocation is a pair of schema URLs
 xml/settings.xml	9	ANY	a Maven server password element, the canonical settings.xml leak
 xml/settings.xml	14	NONE	a Maven master-password-encrypted value; the brace wrapper marks it already protected and the brace sits outside every value class
-xml/settings.xml	19	ANY	a docker registry password with an internal =; the =[^=] allowlist in generic-markup-config-secret drops the element-body branch too, known miss, ticket #51
+xml/settings.xml	19	ANY	a docker registry password with an internal =; the =[^=] allowlist dropped the element-body branch too until ticket #51 replaced it
 xml/settings.xml	24	NONE	a ${env.*} interpolation resolved by Maven at run time
 xml/settings.xml	35	ANY	a proxy password element with policy punctuation
-xml/web.config	4	NONE	an assembly-qualified type name; Version=, Culture= and PublicKeyToken= are the =-bearing identity text the =[^=] entry ostensibly protects, and none of it is secret
+xml/web.config	4	NONE	an assembly-qualified type name; Version=, Culture= and PublicKeyToken= are the =-bearing identity text the =[^=] entry ostensibly protected, none of it is secret, and the space and comma in it end the markup rule capture before it starts, which is why removing that entry did not reach this line
 xml/web.config	7	NONE	an OWIN startup type reference in a namespaced key
 xml/web.config	8	ANY	an 88-character base64 Azure storage account key in appSettings; the key name spells AccountKey, which no rule's name class or keyword list covers; known gap
-xml/web.config	9	ANY	a shared access secret whose trailing == padding survives =[^=] because no non-= character follows either =; the positive control for ticket #51
+xml/web.config	9	ANY	a shared access secret whose trailing == padding survived the old =[^=] entry because no non-= character followed either =; the positive control for ticket #51, still reported after the replacement
 xml/web.config	10	ANY	an api key of 32 base64 characters in appSettings value=
-xml/web.config	11	ANY	a secret with a single internal =; the =[^=] allowlist in generic-markup-config-secret stands down on it, known miss, ticket #51
-xml/web.config	12	ANY	a SAS token stored as its sig= query fragment in a token-named key; the internal = trips the =[^=] allowlist, known miss, ticket #51
+xml/web.config	11	ANY	a secret with a single internal =; the =[^=] allowlist in generic-markup-config-secret stood down on it until ticket #51 replaced it
+xml/web.config	12	ANY	a SAS token stored as its sig= query fragment in a token-named key; the internal = tripped the =[^=] allowlist until ticket #51 replaced it
 xml/web.config	13	NONE	password policy prose with an entity escape in a password-named key; spaces break the capture and the text carries no digits
 xml/web.config	14	NONE	a commented-out placeholder; changeme is caught by the placeholder allowlist
 xml/web.config	17	ANY	a SQL connection-string Password= with an internal =, reported by the assignment path whose measured allowlists replaced the blanket =[^=]; the contrast case for ticket #51

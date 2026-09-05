@@ -612,7 +612,45 @@ rules:
           - '\{\{'
           - '^%'
           - '#\{'
-          - '=[^=]'
+          # A captured value that is itself an assignment to an identifier
+          # written in words. A markup value carrying an interior `=` and not
+          # being a credential is this shape - a setting string sitting where
+          # a value goes:
+          #
+          #   <add key="ApiKeySettings" value="keyDerivation=Pbkdf2Sha256" />
+          #   <add key="TokenCacheProfile" value="timeout=3600000" />
+          #   <SigningSecretLifetime>expiry=00:20:00</SigningSecretLifetime>
+          #
+          # It replaces a blanket `=[^=]`, measured for ticket #51 on
+          # 2026-09-05, and it is the entry
+          # `secrets.generic-password-assignment` replaced its own `=[^=]`
+          # with, verbatim.
+          #
+          # `=` is in this rule's value class, so the blanket entry stood down
+          # on every markup value carrying an interior `=`. That is 5 of the 27
+          # xml corpus positives: a Maven `<password>` element, a .csproj
+          # symbol-server password, an MSBuild deploy secret, a web.config
+          # appSettings secret and two Azure SAS `sig=` fragments. Dropping it
+          # costs nothing on either real tree measured, because on neither does
+          # this rule report at all: 1.2 GB of published crates under a cargo
+          # registry stays at 510 findings and 2.5 GB of /usr/share stays at
+          # 25, 0 added and 0 removed on both. The xml family goes from 16/27
+          # to 21/27 and corpus precision is unchanged at 1.0000.
+          #
+          # The shape needs two word segments before the `=`, which a lowercase
+          # run of four characters already supplies, so `timeout=` and
+          # `expiry=` are it and the three-letter `sig=` of a SAS token is not.
+          #
+          # The query-parameter half of the same replacement on the assignment
+          # rules, `&[\w.-]{1,40}=`, is deliberately not carried over: XML
+          # writes `&` as `&amp;` and `;` sits outside the value class, so a
+          # value running on into the next query parameter never completes a
+          # capture here.
+          #
+          # The cost is stated rather than hidden: a value whose left side of
+          # the `=` is not a run of words - an acronym or a dotted name,
+          # `TTL=3600`, `api.key=1200` - is now reported.
+          - '^[_$]?(?:[a-z]{2,}|[A-Z][a-z]+)(?:[0-9]{0,4}(?:[a-z]{2,}|[A-Z][a-z]+)){1,10}[0-9]{0,4}='
           - '^@{1,2}[A-Za-z0-9_.-]{1,64}@{1,2}$'
           - '^(?:[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+|_{1,2}[A-Z][A-Z0-9_]*_{1,2})$'
           - '^(?:sha1|sha256|sha512|md5|base64)[-:]'

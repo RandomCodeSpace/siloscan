@@ -45,7 +45,7 @@ const RECALL_FLOORS: &[(&str, f64)] = &[
     ("k8s", 0.8333),  // measured 15/18: `data:` decoding waits on #52/#53
     ("keys", 1.0),    // measured 4/4: every private-key format reported
     ("urls", 0.9600), // measured 24/25: #44 closed bar the sub-floor entropy
-    ("xml", 0.5925),  // measured 16/27: the #51 `=[^=]` gap and unlisted names
+    ("xml", 0.7777),  // measured 21/27: #51 closed, unlisted names remain
 ];
 
 fn recall_floor(family: &str) -> f64 {
