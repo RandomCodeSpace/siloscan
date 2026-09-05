@@ -4,6 +4,16 @@
 # stays readable.
 #
 # Identity: maintainability-java@1. See crates/siloscan-core/src/profiles.rs.
+#
+# The two query rules below come from the Java pitfall list (#109) and were
+# measured on gson, commons-lang and guava under #103. One candidate from that
+# list is deliberately absent, removed on the measurement rather than re-tuned:
+#   catch-rethrow            within the `info` ceiling at 0.0117 per kLOC on
+#                            guava, but all six findings are the selective
+#                            rethrow `catch (ThreadDeath d) { throw d; }` placed
+#                            above a broader catch so the narrow type is not
+#                            swallowed, which is deliberate. TP:FP is 0:6.
+# reliability-java.yaml records the other three.
 version: 1
 rules:
   - id: maintainability.java.function-length
@@ -37,3 +47,35 @@ rules:
     metric:
       measure: cyclomatic-complexity
       max: 25
+
+  # Excluded from test trees: a suite that asserts identity needs distinct boxed
+  # instances, so `new Integer(4)` before an assertNotSame is correct there and
+  # was every finding on guava before the exclusion.
+  - id: maintainability.java.redundant-wrapper-instantiation
+    severity: info
+    message: 'This constructor allocates a wrapper where a literal or a valueOf call would do.'
+    paths:
+      exclude:
+        - '**/test/**'
+        - '**/tests/**'
+        - '**/testing/**'
+        - '**/*Test.java'
+    ast:
+      java: |
+        ((object_creation_expression
+           type: (type_identifier) @t
+           arguments: (argument_list . (string_literal) .)) @report
+         (#eq? @t "String"))
+        ((object_creation_expression type: (type_identifier) @t) @report
+         (#any-of? @t "Integer" "Long" "Short" "Byte" "Character" "Boolean" "Double" "Float"))
+
+  - id: maintainability.java.boolean-literal-redundancy
+    severity: info
+    message: 'This expression restates a boolean value that is already the answer.'
+    ast:
+      java: |
+        (binary_expression operator: ["==" "!="] right: [(true) (false)]) @report
+        (binary_expression left: [(true) (false)] operator: ["==" "!="]) @report
+        (ternary_expression
+          consequence: [(true) (false)]
+          alternative: [(true) (false)]) @report

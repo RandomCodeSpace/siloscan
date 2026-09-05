@@ -27,6 +27,49 @@ java/metric-under.java	2	NONE	the method spans exactly 120 lines, which is the p
 java/metric-under.java	124	NONE	seven parameters is exactly the profile's limit
 java/metric-under.java	129	NONE	five nested if statements is exactly the profile's limit
 java/metric-under.java	144	NONE	24 branches plus the entry path is 25, exactly the profile's limit
+java/self-assignment-positive.java	3	reliability.java.self-assignment	the assignment writes the variable back to itself and has no effect
+java/self-assignment-negative.java	4	NONE	a compound assignment accumulates into the variable, so it has an effect
+java/self-assignment-negative.java	6	NONE	the right-hand side is a different variable, so the field is given a new value
+java/unreachable-after-return-positive.java	4	reliability.java.unreachable-after-return	the assignment follows a return in the same block and can never run
+java/unreachable-after-return-negative.java	4	NONE	a line comment after the return is not a statement
+java/unreachable-after-return-negative.java	9	NONE	a block comment after the return is not a statement
+java/self-comparison-ordering-positive.java	3	reliability.java.self-comparison-ordering	both operands of the < comparison are the identical identifier
+java/self-comparison-ordering-positive.java	6	reliability.java.self-comparison-ordering	both operands of the >= comparison are the identical identifier
+java/self-comparison-ordering-negative.java	3	NONE	the operands are different identifiers, which is an ordinary comparison
+java/self-comparison-ordering-negative.java	6	NONE	d != d is the hand-rolled NaN test, which the operator set deliberately omits
+java/self-comparison-ordering-negative.java	9	NONE	Double.isNaN is the Java spelling of the same test and compares nothing
+java/self-equals-positive.java	3	reliability.java.self-equals	the receiver and the sole argument are the identical identifier
+java/self-equals-negative.java	3	NONE	the argument is a different identifier, which is an ordinary comparison
+java/self-equals-negative.java	6	NONE	the argument is a call on the receiver rather than the receiver itself
+java/identical-logical-operands-positive.java	3	reliability.java.identical-logical-operands	both operands of && are the identical identifier, so one of them is dead
+java/identical-logical-operands-negative.java	3	NONE	the operands are different identifiers, so both are read
+java/duplicate-branch-condition-positive.java	3	reliability.java.duplicate-branch-condition	the else-if repeats the condition above it, so its body is unreachable
+java/duplicate-branch-condition-negative.java	3	NONE	the two conditions differ, so the else-if is reachable
+java/assignment-in-condition-positive.java	3	reliability.java.assignment-in-condition	the condition assigns where a comparison was meant
+java/assignment-in-condition-negative.java	5	NONE	the read loop's assignment is a grandchild of the condition and is deliberate
+java/assignment-in-condition-negative.java	8	NONE	the condition compares rather than assigns
+java/control-flow-in-finally-positive.java	3	reliability.java.control-flow-in-finally	the finally returns, discarding the value the try was returning
+java/control-flow-in-finally-negative.java	3	NONE	the finally calls a method and leaves the pending return alone
+java/finalize-override-positive.java	2	reliability.java.finalize-override	the class overrides the zero-parameter JVM finalize hook
+java/finalize-override-negative.java	2	NONE	finalizeAll is a different name and not the JVM hook
+java/finalize-override-negative.java	3	NONE	finalize(int) takes a parameter, so it overrides nothing
+java/empty-control-body-positive.java	3	reliability.java.empty-control-body	a stray semicolon is the whole body of the if
+java/empty-control-body-positive.java	4	reliability.java.empty-control-body	a stray semicolon is the whole body of the while
+java/empty-control-body-negative.java	3	NONE	the if has a block body, which is the ordinary spelling
+java/empty-control-body-negative.java	4	NONE	the for has a block body, which is the ordinary spelling
+java/redundant-wrapper-instantiation-positive.java	2	maintainability.java.redundant-wrapper-instantiation	new String on a literal copies a constant the JVM already interned
+java/redundant-wrapper-instantiation-positive.java	3	maintainability.java.redundant-wrapper-instantiation	the Integer constructor is deprecated for removal
+java/redundant-wrapper-instantiation-positive.java	4	maintainability.java.redundant-wrapper-instantiation	the Boolean constructor is deprecated for removal
+java/redundant-wrapper-instantiation-negative.java	3	NONE	new String(bytes, charset) is the correct way to decode bytes
+java/redundant-wrapper-instantiation-negative.java	4	NONE	Integer.valueOf is the replacement the rule asks for
+java/redundant-wrapper-instantiation-negative.java	5	NONE	StringBuilder is not a wrapper and its constructor is the only way to build one
+java/boolean-literal-redundancy-positive.java	2	maintainability.java.boolean-literal-redundancy	comparing a boolean to true restates the value
+java/boolean-literal-redundancy-positive.java	3	maintainability.java.boolean-literal-redundancy	comparing a literal to a boolean with != restates the negation
+java/boolean-literal-redundancy-positive.java	4	maintainability.java.boolean-literal-redundancy	the ternary yields true and false, which is the value it tested
+java/boolean-literal-redundancy-negative.java	2	NONE	the value is returned directly, with nothing to simplify
+java/boolean-literal-redundancy-negative.java	3	NONE	the negation is written directly rather than through a literal comparison
+java/boolean-literal-redundancy-negative.java	4	NONE	the ternary yields numbers, not the boolean it tested
+java/boolean-literal-redundancy-negative.java	5	NONE	Boolean.TRUE is a field access, not the boolean literal node
 c/positive.c	2	reliability.c.self-comparison	both operands are the identical identifier, so the comparison is constant
 c/positive.c	5	reliability.c.self-assignment	the assignment writes `a` to itself and has no effect
 c/positive.c	8	reliability.c.assignment-in-condition	the condition assigns rather than compares, with no second pair of parentheses

@@ -5,16 +5,39 @@
 #
 # Identity: reliability-java@1. See crates/siloscan-core/src/profiles.rs.
 #
-# Three candidates from the rule matrix are deliberately absent, each removed
-# on the measurement recorded in tests/profiles-corpus/noise/limits.tsv rather
-# than re-tuned:
-#   empty-catch              4.67 per kLOC on guava, and the findings are the
-#                            pre-JUnit5 `catch (X expected) {}` assertion idiom.
-#   unreachable-after-return every finding on gson, commons-lang and guava is a
-#                            trailing comment on the return line, not code.
-#   self-assignment          the query does not constrain the `operator` field,
-#                            so `b *= b` and `n += n` match; all 22 findings on
-#                            guava are compound assignments.
+# Two rules the 2.1 round removed are back, each on a corrected query and a
+# fresh measurement recorded in tests/profiles-corpus/noise/limits.tsv. #117
+# established that both removals were defects in the query rather than limits
+# of the engine:
+#   unreachable-after-return every 2.1 finding on gson, commons-lang and guava
+#                            was a trailing comment on the return line, because
+#                            `(_)` matches the named comment nodes. The text
+#                            predicate excludes them and no Java statement can
+#                            begin with `/`. No finding on gson, commons-lang or
+#                            guava.
+#   self-assignment          the 2.1 query left the `operator` field
+#                            unconstrained, so `b *= b` and `n += n` matched and
+#                            all 22 guava findings were compound assignments.
+#                            `operator: "="` excludes them. No finding on gson,
+#                            commons-lang or guava.
+#
+# Four candidates from the Java pitfall list (#109) are deliberately absent,
+# each removed on the measurement recorded under #103 rather than re-tuned:
+#   empty-catch              0.4781 per kLOC on guava, over the 0.25 ceiling
+#                            `warning` holds. The parameter-name exclusion
+#                            catches `expected` and `ignored` but the findings
+#                            spell the same test idiom `tolerated` and
+#                            `optional`.
+#   catch-jvm-throwable      1.8284 per kLOC on guava and 0.2637 on
+#                            commons-lang, both over the ceiling, and the
+#                            findings are `catch (NullPointerException x) {}`
+#                            null-tolerance assertions in test helpers.
+#   equals-wrong-parameter   within the ceiling at 0.0101 per kLOC on
+#                            commons-lang, but the single finding across the
+#                            three repositories is StrBuilder's typed fast path
+#                            declared alongside a correct equals(Object), so
+#                            TP:FP is 0:1.
+# maintainability-java.yaml records the fourth, catch-rethrow.
 version: 1
 rules:
   - id: reliability.java.self-comparison
@@ -50,3 +73,117 @@ rules:
            consequence: (block) @a
            alternative: (block) @b) @report
          (#eq? @a @b))
+
+  - id: reliability.java.self-assignment
+    severity: warning
+    message: 'This assignment writes a variable to itself and has no effect.'
+    ast:
+      java: |
+        ((assignment_expression
+           left: (identifier) @l
+           operator: "="
+           right: (identifier) @r) @report
+         (#eq? @l @r))
+
+  - id: reliability.java.unreachable-after-return
+    severity: warning
+    message: 'This statement follows a return in the same block and can never run.'
+    ast:
+      java: |
+        ((block (return_statement) . (_) @report)
+         (#not-match? @report "^/"))
+
+  - id: reliability.java.self-comparison-ordering
+    severity: warning
+    message: 'Both operands of this ordering comparison are the same identifier, so the result is constant.'
+    ast:
+      java: |
+        ((binary_expression
+           left: (identifier) @l
+           operator: ["<" "<=" ">" ">="]
+           right: (identifier) @r) @report
+         (#eq? @l @r))
+
+  # Excluded from test trees: the equals contract asks a suite to assert
+  # reflexivity, so `assertTrue(a.equals(a))` is correct there and was every
+  # finding on commons-lang and guava before the exclusion.
+  - id: reliability.java.self-equals
+    severity: warning
+    message: 'This call compares an object with itself, so it is always true.'
+    paths:
+      exclude:
+        - '**/test/**'
+        - '**/tests/**'
+        - '**/testing/**'
+        - '**/*Test.java'
+    ast:
+      java: |
+        ((method_invocation
+           object: (identifier) @o
+           name: (identifier) @m
+           arguments: (argument_list . (identifier) @a .)) @report
+         (#eq? @m "equals")
+         (#eq? @o @a))
+
+  - id: reliability.java.identical-logical-operands
+    severity: warning
+    message: 'Both operands of this operator are the same identifier, so one of them is dead.'
+    ast:
+      java: |
+        ((binary_expression
+           left: (identifier) @l
+           operator: ["&&" "||" "&" "|"]
+           right: (identifier) @r) @report
+         (#eq? @l @r))
+
+  - id: reliability.java.duplicate-branch-condition
+    severity: warning
+    message: 'This else-if repeats the condition of the if above it, so its body is unreachable.'
+    ast:
+      java: |
+        ((if_statement
+           condition: (parenthesized_expression) @a
+           alternative: (if_statement condition: (parenthesized_expression) @b)) @report
+         (#eq? @a @b))
+
+  # The assignment must be a direct child of the condition, which is what keeps
+  # the deliberate `while ((line = reader.readLine()) != null)` read loop out:
+  # there the assignment is a grandchild, under a binary_expression.
+  - id: reliability.java.assignment-in-condition
+    severity: warning
+    message: 'This condition assigns a value instead of comparing one.'
+    ast:
+      java: |
+        (if_statement condition: (parenthesized_expression (assignment_expression) @report))
+        (while_statement condition: (parenthesized_expression (assignment_expression) @report))
+        (do_statement condition: (parenthesized_expression (assignment_expression) @report))
+
+  - id: reliability.java.control-flow-in-finally
+    severity: warning
+    message: 'This finally block leaves by control flow, discarding whatever the try or catch was returning or throwing.'
+    ast:
+      java: |
+        (finally_clause
+          (block [(return_statement) (break_statement) (continue_statement) (throw_statement)] @report))
+
+  # The "(" . ")" anchor holds this to a zero-parameter method, so an unrelated
+  # domain method such as finalize(Order o) is not reported.
+  - id: reliability.java.finalize-override
+    severity: warning
+    message: 'This class overrides finalize, which the JVM never promises to run.'
+    ast:
+      java: |
+        ((method_declaration
+           name: (identifier) @report
+           parameters: (formal_parameters "(" . ")"))
+         (#eq? @report "finalize"))
+
+  - id: reliability.java.empty-control-body
+    severity: warning
+    message: 'The body of this control statement is an empty statement, so the block that follows runs unconditionally.'
+    ast:
+      java: |
+        (if_statement consequence: ";" @report)
+        (while_statement body: ";" @report)
+        (for_statement body: ";" @report)
+        (enhanced_for_statement body: ";" @report)
