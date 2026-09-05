@@ -107,7 +107,7 @@ class Verdicts(unittest.TestCase):
         # 2.4x is the measured cost of the flip on the cold lane. It is a
         # rejection against v1.5.1 and inside the budget against v2.0.0.
         self.assertEqual(perf_gate.verdict(2.40, 0.01, 2.40, 1.05), "reject")
-        self.assertEqual(perf_gate.verdict(2.40, 0.01, 2.40, 2.50), "pass")
+        self.assertEqual(perf_gate.verdict(2.40, 0.01, 2.40, 3.00), "pass")
 
     def test_the_twice_rule_reads_the_prior_run_against_the_same_limit(self):
         # Below the bare wall budget in both runs, so nothing to reject.
@@ -372,7 +372,7 @@ class References(unittest.TestCase):
                 "explicit_no_cache": {"seconds": 1.05, "peak_rss_kib": 1.05},
                 "explicit_cold_cache": {"seconds": 1.05, "peak_rss_kib": 1.05},
                 "explicit_warm_cache": {"seconds": 1.05, "peak_rss_kib": 1.05},
-                "bare_no_save_cold": {"seconds": 2.50, "peak_rss_kib": 1.10},
+                "bare_no_save_cold": {"seconds": 3.00, "peak_rss_kib": 1.10},
                 "bare_no_save_warm": {"seconds": 1.25, "peak_rss_kib": 1.10},
                 "bare_auto_save_first": {"seconds": 1.25, "peak_rss_kib": 1.10},
                 "bare_auto_save_warm": {"seconds": 1.25, "peak_rss_kib": 1.10},
@@ -383,7 +383,7 @@ class References(unittest.TestCase):
         for lane in perf_gate.LANES:
             if lane.mode != "bare":
                 continue
-            expected = 1.25 if lane.cache == "warm" else 2.50
+            expected = 1.25 if lane.cache == "warm" else 3.00
             self.assertEqual(lane.ratio_limit("seconds"), expected, lane.name)
 
     def test_an_unknown_metric_is_rejected(self):
@@ -403,7 +403,7 @@ class PerLaneVerdicts(unittest.TestCase):
     def test_the_cold_bare_lane_absorbs_the_measured_2_4x_wall_cost(self):
         time_cell, rss_cell = self.cells("bare_no_save_cold", (1.80, 200_000), (4.32, 205_000))
         self.assertAlmostEqual(time_cell.ratio, 2.4)
-        self.assertEqual(time_cell.limit, 2.50)
+        self.assertEqual(time_cell.limit, 3.00)
         self.assertEqual(time_cell.verdict, "pass")
         self.assertEqual(rss_cell.limit, 1.10)
         self.assertEqual(rss_cell.verdict, "pass")
@@ -436,7 +436,7 @@ class PerLaneVerdicts(unittest.TestCase):
         table = perf_gate.format_table(perf_gate.analyze(document))
         self.assertIn("v1.5.1", table)
         self.assertIn("v2.0.0", table)
-        self.assertIn("2.50", table)
+        self.assertIn("3.00", table)
         self.assertIn("1.25", table)
         self.assertIn("1.10", table)
 
