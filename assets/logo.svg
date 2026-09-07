@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" role="img" aria-labelledby="siloscan-logo-title">
+  <title id="siloscan-logo-title">siloscan logo: a grain silo crossed by a scan line with a highlighted hit</title>
+  <rect width="256" height="256" rx="56" fill="#0f172a"/>
+  <path d="M76 94a52 52 0 0 1 104 0Z" fill="#cbd5e1"/>
+  <rect x="84" y="94" width="88" height="104" fill="#cbd5e1"/>
+  <rect x="76" y="198" width="104" height="16" rx="5" fill="#cbd5e1"/>
+  <path d="M76 94h104" fill="none" stroke="#0f172a" stroke-width="6"/>
+  <rect x="50" y="122" width="156" height="32" rx="16" fill="#0f172a"/>
+  <path d="M42 138h172" fill="none" stroke="#f59e0b" stroke-width="12" stroke-linecap="round"/>
+  <circle cx="150" cy="138" r="15" fill="#0f172a"/>
+  <circle cx="150" cy="138" r="10" fill="#f59e0b"/>
+</svg>
