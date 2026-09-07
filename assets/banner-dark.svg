@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 300" width="1200" height="300" role="img" aria-labelledby="siloscan-banner-dark-title">
+  <title id="siloscan-banner-dark-title">siloscan: find leaked secrets and code risks in any repository, fully offline</title>
+  <rect width="1200" height="300" fill="#0b0f14"/>
+  <g transform="translate(64 66) scale(0.65625)">
+    <rect width="256" height="256" rx="56" fill="#0f172a"/>
+    <path d="M76 94a52 52 0 0 1 104 0Z" fill="#cbd5e1"/>
+    <rect x="84" y="94" width="88" height="104" fill="#cbd5e1"/>
+    <rect x="76" y="198" width="104" height="16" rx="5" fill="#cbd5e1"/>
+    <path d="M76 94h104" fill="none" stroke="#0f172a" stroke-width="6"/>
+    <rect x="50" y="122" width="156" height="32" rx="16" fill="#0f172a"/>
+    <path d="M42 138h172" fill="none" stroke="#f59e0b" stroke-width="12" stroke-linecap="round"/>
+    <circle cx="150" cy="138" r="15" fill="#0f172a"/>
+    <circle cx="150" cy="138" r="10" fill="#f59e0b"/>
+  </g>
+  <text x="272" y="154" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-weight="700" font-size="76" fill="#e2e8f0">siloscan</text>
+  <text x="274" y="198" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="22" fill="#94a3b8">Find leaked secrets and code risks in any repository. Fully offline.</text>
+</svg>
