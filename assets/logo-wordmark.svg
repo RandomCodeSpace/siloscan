@@ -2,14 +2,17 @@
   <title id="siloscan-wordmark-title">siloscan</title>
   <g transform="translate(32 16) scale(0.5)">
     <rect width="256" height="256" rx="56" fill="#0f172a"/>
-    <path d="M76 94a52 52 0 0 1 104 0Z" fill="#cbd5e1"/>
-    <rect x="84" y="94" width="88" height="104" fill="#cbd5e1"/>
-    <rect x="76" y="198" width="104" height="16" rx="5" fill="#cbd5e1"/>
-    <path d="M76 94h104" fill="none" stroke="#0f172a" stroke-width="6"/>
-    <rect x="50" y="122" width="156" height="32" rx="16" fill="#0f172a"/>
-    <path d="M42 138h172" fill="none" stroke="#f59e0b" stroke-width="12" stroke-linecap="round"/>
-    <circle cx="150" cy="138" r="15" fill="#0f172a"/>
-    <circle cx="150" cy="138" r="10" fill="#f59e0b"/>
+    <rect x="39" y="184" width="178" height="15" rx="5" fill="#cbd5e1"/>
+    <path d="M44 108 66 93 88 108Z" fill="#cbd5e1"/>
+    <rect x="47" y="108" width="38" height="76" fill="#cbd5e1"/>
+    <path d="M102 80 128 62 154 80Z" fill="#cbd5e1"/>
+    <rect x="105" y="80" width="46" height="104" fill="#cbd5e1"/>
+    <path d="M168 96 190 80 212 96Z" fill="#cbd5e1"/>
+    <rect x="171" y="96" width="38" height="88" fill="#cbd5e1"/>
+    <rect x="28" y="122" width="200" height="24" rx="12" fill="#0f172a"/>
+    <path d="M36 134h184" fill="none" stroke="#f59e0b" stroke-width="13" stroke-linecap="round"/>
+    <circle cx="128" cy="134" r="21" fill="#0f172a"/>
+    <circle cx="128" cy="134" r="14" fill="#f59e0b"/>
   </g>
   <text x="192" y="100" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-weight="700" font-size="76" fill="#0f172a">siloscan</text>
 </svg>
